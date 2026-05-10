@@ -43,7 +43,61 @@ else
     echo "[build] Skipping patches (--skip-patches)"
 fi
 
-# ── Step 2.5: Copy ZeroFox branding assets ───────────────────────────────────
+# ── Step 2.5: Inject attestation public key ──────────────────────────────────
+# If build/haproxy-public.der exists, replace the all-zeros placeholder in
+# ZeroFoxAttest.cpp with the real key bytes so attestation is active in this
+# build. Skipped (with a warning) if the key hasn't been generated yet; aborts
+# if the key exists but injection fails (e.g. sentinels missing from source).
+ATTEST_SRC="$FIREFOX_SRC/netwerk/base/ZeroFoxAttest.cpp"
+ATTEST_KEY="$ROOT_DIR/build/haproxy-public.der"
+if [[ -f "$ATTEST_KEY" && -f "$ATTEST_SRC" ]]; then
+    echo "[build] Injecting attestation public key into ZeroFoxAttest.cpp..."
+    python3 - "$ATTEST_KEY" "$ATTEST_SRC" <<'PYEOF' || { echo "[build] ERROR: key injection failed — aborting build."; exit 1; }
+import sys
+
+der_path, src_path = sys.argv[1], sys.argv[2]
+with open(der_path, 'rb') as f:
+    raw = f.read()
+
+# Format as a C hex array, 10 bytes per line, indented to match the source.
+key_lines = []
+for i in range(0, len(raw), 10):
+    chunk = raw[i:i+10]
+    key_lines.append('  ' + ', '.join(f'0x{b:02x}' for b in chunk) + ',\n')
+
+with open(src_path, 'r') as f:
+    src_lines = f.readlines()
+
+# Find the sentinel lines and replace everything between them.
+START = '// ── REPLACE:'
+END   = '// ── END REPLACE'
+start_i = end_i = None
+for i, line in enumerate(src_lines):
+    if START in line:
+        start_i = i
+    elif END in line and start_i is not None:
+        end_i = i
+        break
+
+if start_i is None or end_i is None:
+    print('ERROR: REPLACE sentinels not found in source file', file=sys.stderr)
+    sys.exit(1)
+
+new_lines = src_lines[:start_i + 1] + key_lines + src_lines[end_i:]
+
+with open(src_path, 'w') as f:
+    f.writelines(new_lines)
+
+print(f'[build] Injected {len(raw)}-byte public key ({len(key_lines)} lines).')
+PYEOF
+elif [[ ! -f "$ATTEST_KEY" ]]; then
+    echo "[build] WARNING: build/haproxy-public.der not found — attestation headers disabled."
+    echo "[build]          Run scripts/gen-attest-key.sh to generate a keypair."
+elif [[ ! -f "$ATTEST_SRC" ]]; then
+    echo "[build] WARNING: ZeroFoxAttest.cpp not in source tree — was patch 006 applied?"
+fi
+
+# ── Step 2.6: Copy ZeroFox branding assets ───────────────────────────────────
 BRANDING_DIR="$FIREFOX_SRC/browser/branding/zerofox"
 if [[ -d "$BRANDING_DIR" ]]; then
     ICONSET="$ROOT_DIR/branding/ZeroFox.iconset"

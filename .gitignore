@@ -1,11 +1,14 @@
 # Firefox source and build artifacts
-src/
+/src/
 
 # macOS
 .DS_Store
 
 # Build logs
 *.log
+
+# Rust build artifacts
+proxy/target/
 
 # Attestation key material — NEVER commit these
 build/

@@ -136,7 +136,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.h b/netwerk/base/ZeroFoxAttest.h
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/ZeroFoxAttest.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,47 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -144,9 +144,12 @@ new file mode 100644
 +#ifndef ZeroFoxAttest_h__
 +#define ZeroFoxAttest_h__
 +
-+#include "nsHttpRequestHead.h"
-+#include "nsIURI.h"
-+#include "nsresult.h"
++#include "nscore.h"
++
++class nsIURI;
++namespace mozilla::net {
++class nsHttpRequestHead;
++}
 +
 +namespace zerofox {
 +
@@ -186,7 +189,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/ZeroFoxAttest.cpp
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,275 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -224,6 +227,12 @@ new file mode 100644
 +#include "secitem.h"
 +
 +namespace zerofox {
++
++using mozilla::UniqueCERTSubjectPublicKeyInfo;
++using mozilla::UniquePK11SlotInfo;
++using mozilla::UniquePK11SymKey;
++using mozilla::UniqueSECKEYPrivateKey;
++using mozilla::UniqueSECKEYPublicKey;
 +
 +static mozilla::LazyLogModule sLog("ZeroFoxAttest");
 +
@@ -380,7 +389,7 @@ new file mode 100644
 +      nullptr,         // randomA
 +      nullptr,         // randomB
 +      CKM_ECDH1_DERIVE,
-+      CKM_AES_128_GCM,
++      CKM_AES_GCM,
 +      CKA_ENCRYPT,
 +      16,              // 128-bit key
 +      CKD_SHA256_KDF,  // ANSI X9.63 with SHA-256

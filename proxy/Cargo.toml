@@ -1,0 +1,30 @@
+[package]
+name = "zerofox-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "zerofox-proxy"
+path = "src/main.rs"
+
+[dependencies]
+pingora-core  = "0.8"
+pingora-proxy = "0.8"
+pingora-http  = "0.8"
+
+async-trait = "0.1"
+
+# Crypto — RustCrypto stack, no system OpenSSL dependency
+p256    = { version = "0.13", features = ["ecdh"] }
+aes-gcm = "0.10"
+sha2    = "0.10"
+
+base64     = "0.22"
+http       = "1"
+clap       = { version = "4", features = ["derive", "env"] }
+anyhow     = "1"
+log        = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
