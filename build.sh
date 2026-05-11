@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build.sh — Orchestrate a full ZeroFox build from scratch
-# Usage: ./build.sh [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N]
+# Usage: ./build.sh [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +11,7 @@ SRC_DIR="$ROOT_DIR/src"
 SKIP_FETCH=0
 SKIP_PATCHES=0
 SKIP_PATCH_ARGS=()
+DEV_MODE=0
 JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 while [[ $# -gt 0 ]]; do
@@ -19,15 +20,23 @@ while [[ $# -gt 0 ]]; do
         --skip-patches) SKIP_PATCHES=1 ;;
         --skip-patch)   SKIP_PATCH_ARGS+=(--skip-patch "$2"); shift ;;
         --jobs)         JOBS="$2"; shift ;;
+        --dev)          DEV_MODE=1 ;;
         -h|--help)
-            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N]"
+            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev]"
             echo "  --skip-patch N  Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
             echo "                  Repeatable: --skip-patch 6 --skip-patch 8"
+            echo "  --dev           Enable DevTools: skips patch 008, strips devtools locks from"
+            echo "                  policies.json and mozilla.cfg."
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+if [[ $DEV_MODE -eq 1 ]]; then
+    echo "[build] DEV MODE: DevTools will be enabled (patch 008 skipped, config locks removed)"
+    SKIP_PATCH_ARGS+=(--skip-patch 8)
+fi
 
 # ── Step 1: Fetch Firefox ESR source ─────────────────────────────────────────
 if [[ $SKIP_FETCH -eq 0 ]]; then
@@ -142,8 +151,20 @@ echo "mk_add_options MOZ_MAKE_FLAGS=\"-j${JOBS}\"" >> "$FIREFOX_SRC/.mozconfig"
 # so it gets picked up at build time.
 DIST_DIR="$FIREFOX_SRC/browser/app/distribution"
 mkdir -p "$DIST_DIR"
-cp "$CONFIG_DIR/policies.json" "$DIST_DIR/policies.json"
-echo "[build] Installed policies.json to $DIST_DIR"
+if [[ $DEV_MODE -eq 1 ]]; then
+    python3 - "$CONFIG_DIR/policies.json" "$DIST_DIR/policies.json" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    p = json.load(f)
+p["policies"].pop("DisableDeveloperTools", None)
+with open(sys.argv[2], "w") as f:
+    json.dump(p, f, indent=2)
+PYEOF
+    echo "[build] Installed policies.json (DevTools policy removed) to $DIST_DIR"
+else
+    cp "$CONFIG_DIR/policies.json" "$DIST_DIR/policies.json"
+    echo "[build] Installed policies.json to $DIST_DIR"
+fi
 
 # ── Step 5: Run the Firefox build ────────────────────────────────────────────
 echo "[build] Starting Firefox build (this will take 30–90 minutes)..."
@@ -166,8 +187,14 @@ if [[ -d "$APP_BUNDLE" ]]; then
     GRE_DIR="$APP_BUNDLE/Contents/Resources"
     mkdir -p "$PREF_DIR"
     cp "$CONFIG_DIR/autoconfig.js" "$PREF_DIR/autoconfig.js"
-    cp "$CONFIG_DIR/mozilla.cfg"   "$GRE_DIR/mozilla.cfg"
-    echo "[build] Installed autoconfig.js and mozilla.cfg"
+    if [[ $DEV_MODE -eq 1 ]]; then
+        sed -E '/^\/\/ ── Developer tools/,/^$/d; /lockPref\("devtools\./d' \
+            "$CONFIG_DIR/mozilla.cfg" > "$GRE_DIR/mozilla.cfg"
+        echo "[build] Installed autoconfig.js and mozilla.cfg (DevTools locks removed)"
+    else
+        cp "$CONFIG_DIR/mozilla.cfg" "$GRE_DIR/mozilla.cfg"
+        echo "[build] Installed autoconfig.js and mozilla.cfg"
+    fi
 else
     echo "[build] WARNING: App bundle not found at $APP_BUNDLE — skipping autoconfig install"
     echo "[build]          Run a full build first, or check MOZ_OBJDIR in mozconfig."
