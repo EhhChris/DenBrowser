@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # apply-patches.sh — Apply all ZeroFox patches to the Firefox ESR source tree
+# Usage: ./scripts/apply-patches.sh [--skip-patch N]...
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$ROOT_DIR/src"
 PATCHES_DIR="$ROOT_DIR/patches"
+
+SKIP_PATCH_NUMS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-patch) SKIP_PATCH_NUMS+=("$((10#$2))"); shift ;;
+        *) echo "[apply-patches] Unknown flag: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
 
 VERSION_FILE="$SRC_DIR/.esr_version"
 if [[ ! -f "$VERSION_FILE" ]]; then
@@ -23,8 +34,12 @@ fi
 
 echo "[apply-patches] Applying patches to $FIREFOX_SRC"
 echo "[apply-patches] Patch directory: $PATCHES_DIR"
+if [[ ${#SKIP_PATCH_NUMS[@]} -gt 0 ]]; then
+    echo "[apply-patches] Skipping patch(es): ${SKIP_PATCH_NUMS[*]}"
+fi
 
 APPLIED=0
+SKIPPED=0
 FAILED=0
 
 for patch_file in "$PATCHES_DIR"/*.patch; do
@@ -34,7 +49,20 @@ for patch_file in "$PATCHES_DIR"/*.patch; do
     # Skip placeholder-only patches (marked with STUB header)
     if head -5 "$patch_file" | grep -q "^# STUB"; then
         echo "[apply-patches] SKIP (stub not yet implemented): $patch_name"
+        SKIPPED=$((SKIPPED + 1))
         continue
+    fi
+
+    # Skip patches requested via --skip-patch
+    if [[ ${#SKIP_PATCH_NUMS[@]} -gt 0 ]]; then
+        patch_num=$((10#${patch_name%%[^0-9]*}))
+        for skip in "${SKIP_PATCH_NUMS[@]}"; do
+            if [[ $patch_num -eq $skip ]]; then
+                echo "[apply-patches] SKIP (--skip-patch $skip): $patch_name"
+                SKIPPED=$((SKIPPED + 1))
+                continue 2
+            fi
+        done
     fi
 
     echo "[apply-patches] Applying: $patch_name"
@@ -50,7 +78,7 @@ for patch_file in "$PATCHES_DIR"/*.patch; do
 done
 
 echo ""
-echo "[apply-patches] Applied: $APPLIED  Failed: $FAILED"
+echo "[apply-patches] Applied: $APPLIED  Skipped: $SKIPPED  Failed: $FAILED"
 [[ $FAILED -eq 0 ]] || exit 1
 
 # ── Windows branding binary assets ───────────────────────────────────────────

@@ -24,7 +24,7 @@ struct Args {
     upstream: String,
 
     /// Path to the EC P-256 private key PEM file
-    #[arg(long, env = "ZEROFOX_KEY", default_value = "build/haproxy-private.pem")]
+    #[arg(long, env = "ZEROFOX_KEY", default_value = "../build/proxy-private.pem")]
     key: String,
 }
 

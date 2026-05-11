@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build.sh — Orchestrate a full ZeroFox build from scratch
-# Usage: ./build.sh [--skip-fetch] [--skip-patches] [--jobs N]
+# Usage: ./build.sh [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,15 +10,19 @@ SRC_DIR="$ROOT_DIR/src"
 
 SKIP_FETCH=0
 SKIP_PATCHES=0
+SKIP_PATCH_ARGS=()
 JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-fetch)   SKIP_FETCH=1 ;;
         --skip-patches) SKIP_PATCHES=1 ;;
+        --skip-patch)   SKIP_PATCH_ARGS+=(--skip-patch "$2"); shift ;;
         --jobs)         JOBS="$2"; shift ;;
         -h|--help)
-            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--jobs N]"
+            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N]"
+            echo "  --skip-patch N  Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
+            echo "                  Repeatable: --skip-patch 6 --skip-patch 8"
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -38,18 +42,18 @@ echo "[build] Firefox source: $FIREFOX_SRC"
 
 # ── Step 2: Apply ZeroFox patches ────────────────────────────────────────────
 if [[ $SKIP_PATCHES -eq 0 ]]; then
-    bash "$SCRIPTS_DIR/apply-patches.sh"
+    bash "$SCRIPTS_DIR/apply-patches.sh" "${SKIP_PATCH_ARGS[@]}"
 else
     echo "[build] Skipping patches (--skip-patches)"
 fi
 
 # ── Step 2.5: Inject attestation public key ──────────────────────────────────
-# If build/haproxy-public.der exists, replace the all-zeros placeholder in
+# If build/proxy-public.der exists, replace the all-zeros placeholder in
 # ZeroFoxAttest.cpp with the real key bytes so attestation is active in this
 # build. Skipped (with a warning) if the key hasn't been generated yet; aborts
 # if the key exists but injection fails (e.g. sentinels missing from source).
 ATTEST_SRC="$FIREFOX_SRC/netwerk/base/ZeroFoxAttest.cpp"
-ATTEST_KEY="$ROOT_DIR/build/haproxy-public.der"
+ATTEST_KEY="$ROOT_DIR/build/proxy-public.der"
 if [[ -f "$ATTEST_KEY" && -f "$ATTEST_SRC" ]]; then
     echo "[build] Injecting attestation public key into ZeroFoxAttest.cpp..."
     python3 - "$ATTEST_KEY" "$ATTEST_SRC" <<'PYEOF' || { echo "[build] ERROR: key injection failed — aborting build."; exit 1; }
@@ -91,7 +95,7 @@ with open(src_path, 'w') as f:
 print(f'[build] Injected {len(raw)}-byte public key ({len(key_lines)} lines).')
 PYEOF
 elif [[ ! -f "$ATTEST_KEY" ]]; then
-    echo "[build] WARNING: build/haproxy-public.der not found — attestation headers disabled."
+    echo "[build] WARNING: build/proxy-public.der not found — attestation headers disabled."
     echo "[build]          Run scripts/gen-attest-key.sh to generate a keypair."
 elif [[ ! -f "$ATTEST_SRC" ]]; then
     echo "[build] WARNING: ZeroFoxAttest.cpp not in source tree — was patch 006 applied?"

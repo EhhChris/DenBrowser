@@ -2,15 +2,15 @@
 # gen-attest-key.sh — Generate the ZeroFox browser-attestation keypair.
 #
 # Key model:
-#   Private key  → stays on HAProxy (copy to your gateway config)
+#   Private key  → stays on the proxy (copy to your gateway config)
 #   Public key   → embedded in the ZeroFox browser build (not secret)
 #
 # Usage:  ./scripts/gen-attest-key.sh
 #
 # Output:
-#   build/haproxy-private.pem  — EC P-256 private key  (deploy to HAProxy)
-#   build/haproxy-public.pem   — matching public key    (not secret)
-#   build/haproxy-public.der   — public key in DER form (bytes for the patch)
+#   build/proxy-private.pem  — EC P-256 private key  (deploy to the proxy)
+#   build/proxy-public.pem   — matching public key    (not secret)
+#   build/proxy-public.der   — public key in DER form (bytes for the patch)
 #
 # The public key bytes are also patched directly into kHapPublicKeyDer[]
 # in netwerk/base/ZeroFoxAttest.cpp so the next Firefox build includes them.
@@ -18,16 +18,16 @@
 # Workflow for each new ZeroFox release:
 #   1. Run this script.
 #   2. Rebuild Firefox (public key is now baked in).
-#   3. Copy build/haproxy-private.pem to HAProxy and reload.
-#   4. The old build's tokens will no longer decrypt correctly once HAProxy
+#   3. Copy build/proxy-private.pem to the proxy and reload.
+#   4. The old build's tokens will no longer decrypt correctly once the proxy
 #      is updated — old builds are effectively revoked.
 #
 # SECURITY NOTES:
-#   - Never commit haproxy-private.pem.  It is gitignored from build/.
-#   - Treat the HAProxy private key like any other TLS private key.
+#   - Never commit proxy-private.pem.  It is gitignored from build/.
+#   - Treat the proxy private key like any other TLS private key.
 #   - The public key in kHapPublicKeyDer[] is not secret; embedding it in
 #     the binary gives attackers nothing useful (they cannot forge tokens
-#     without the HAProxy private key to complete ECDH on the other side).
+#     without the proxy private key to complete ECDH on the other side).
 
 set -euo pipefail
 
@@ -48,20 +48,20 @@ mkdir -p "$BUILD_DIR"
 # ── 1. Generate EC P-256 keypair ─────────────────────────────────────────────
 echo "[gen-attest-key] Generating EC P-256 keypair..."
 openssl ecparam -genkey -name prime256v1 -noout \
-        -out "$BUILD_DIR/haproxy-private.pem"
+        -out "$BUILD_DIR/proxy-private.pem"
 
 # ── 2. Extract public key (PEM + DER) ────────────────────────────────────────
 echo "[gen-attest-key] Extracting public key..."
-openssl ec -in "$BUILD_DIR/haproxy-private.pem" -pubout \
-        -out "$BUILD_DIR/haproxy-public.pem"
-openssl ec -in "$BUILD_DIR/haproxy-private.pem" -pubout \
-        -outform DER -out "$BUILD_DIR/haproxy-public.der"
+openssl ec -in "$BUILD_DIR/proxy-private.pem" -pubout \
+        -out "$BUILD_DIR/proxy-public.pem"
+openssl ec -in "$BUILD_DIR/proxy-private.pem" -pubout \
+        -outform DER -out "$BUILD_DIR/proxy-public.der"
 
-KEY_SIZE=$(wc -c < "$BUILD_DIR/haproxy-public.der" | tr -d ' ')
+KEY_SIZE=$(wc -c < "$BUILD_DIR/proxy-public.der" | tr -d ' ')
 echo "[gen-attest-key] Public key DER: $KEY_SIZE bytes"
 
 # ── 3. Build C hex array ──────────────────────────────────────────────────────
-KEY_BYTES=$(xxd -i "$BUILD_DIR/haproxy-public.der" \
+KEY_BYTES=$(xxd -i "$BUILD_DIR/proxy-public.der" \
             | grep -v '^unsigned\|^};' \
             | sed 's/^  /  /')
 
@@ -107,15 +107,15 @@ fi
 echo ""
 echo "[gen-attest-key] Done."
 echo ""
-echo "  HAProxy private key : $BUILD_DIR/haproxy-private.pem  ← deploy to HAProxy"
-echo "  HAProxy public key  : $BUILD_DIR/haproxy-public.pem   ← not secret"
-echo "  Public key DER      : $BUILD_DIR/haproxy-public.der   ← baked into build"
+echo "  Proxy private key : $BUILD_DIR/proxy-private.pem  ← deploy to the proxy"
+echo "  Proxy public key  : $BUILD_DIR/proxy-public.pem   ← not secret"
+echo "  Public key DER    : $BUILD_DIR/proxy-public.der   ← baked into build"
 echo ""
 echo "  Next steps:"
 echo "    1. Rebuild Firefox (public key is now in ZeroFoxAttest.cpp)."
-echo "    2. Copy haproxy-private.pem to /etc/haproxy/ and reload HAProxy."
+echo "    2. Copy proxy-private.pem to the proxy and reload."
 echo "    3. Distribute the new ZeroFox build."
-echo "    4. Old builds are now revoked — HAProxy's new private key means"
+echo "    4. Old builds are now revoked — the new private key means"
 echo "       their tokens cannot be decrypted."
 echo ""
-echo "  NEVER commit haproxy-private.pem to version control."
+echo "  NEVER commit proxy-private.pem to version control."

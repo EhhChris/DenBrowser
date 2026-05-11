@@ -10,18 +10,21 @@ VERSIONS_URL="https://product-details.mozilla.org/1.0/firefox_versions.json"
 DOWNLOAD_BASE="https://archive.mozilla.org/pub/firefox/releases"
 
 echo "[fetch-esr] Fetching version metadata..."
-VERSIONS_JSON=$(curl -fsSL "$VERSIONS_URL")
-
-# Extract FIREFOX_ESR version (e.g., "128.8.0esr")
-ESR_VERSION=$(echo "$VERSIONS_JSON" | python3 -c \
-    "import sys,json; d=json.load(sys.stdin); print(d['FIREFOX_ESR'])")
-
-if [[ -z "$ESR_VERSION" ]]; then
-    echo "[fetch-esr] ERROR: Could not determine ESR version." >&2
+if VERSIONS_JSON=$(curl -fsSL --max-time 10 "$VERSIONS_URL" 2>/dev/null); then
+    ESR_VERSION=$(echo "$VERSIONS_JSON" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d['FIREFOX_ESR'])")
+    if [[ -z "$ESR_VERSION" ]]; then
+        echo "[fetch-esr] ERROR: Could not determine ESR version from metadata." >&2
+        exit 1
+    fi
+    echo "[fetch-esr] Latest Firefox ESR: $ESR_VERSION"
+elif [[ -f "$SRC_DIR/.esr_version" ]]; then
+    ESR_VERSION=$(cat "$SRC_DIR/.esr_version")
+    echo "[fetch-esr] WARNING: Network unavailable; using cached version: $ESR_VERSION"
+else
+    echo "[fetch-esr] ERROR: Network unavailable and no cached version found." >&2
     exit 1
 fi
-
-echo "[fetch-esr] Latest Firefox ESR: $ESR_VERSION"
 
 TARBALL="firefox-${ESR_VERSION}.source.tar.xz"
 DOWNLOAD_URL="${DOWNLOAD_BASE}/${ESR_VERSION}/source/${TARBALL}"
