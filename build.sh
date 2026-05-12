@@ -51,7 +51,7 @@ echo "[build] Firefox source: $FIREFOX_SRC"
 
 # ── Step 2: Apply ZeroFox patches ────────────────────────────────────────────
 if [[ $SKIP_PATCHES -eq 0 ]]; then
-    bash "$SCRIPTS_DIR/apply-patches.sh" "${SKIP_PATCH_ARGS[@]}"
+    bash "$SCRIPTS_DIR/apply-patches.sh" ${SKIP_PATCH_ARGS[@]+"${SKIP_PATCH_ARGS[@]}"}
 else
     echo "[build] Skipping patches (--skip-patches)"
 fi
@@ -107,7 +107,10 @@ elif [[ ! -f "$ATTEST_KEY" ]]; then
     echo "[build] WARNING: build/proxy-public.der not found — attestation headers disabled."
     echo "[build]          Run scripts/gen-attest-key.sh to generate a keypair."
 elif [[ ! -f "$ATTEST_SRC" ]]; then
-    echo "[build] WARNING: ZeroFoxAttest.cpp not in source tree — was patch 006 applied?"
+    echo "[build] ERROR: proxy-public.der exists but ZeroFoxAttest.cpp not in source tree." >&2
+    echo "[build]        Patch 006 must be applied before key injection can run." >&2
+    echo "[build]        Check that apply-patches.sh succeeded for 006-attest-requests.patch." >&2
+    exit 1
 fi
 
 # ── Step 2.6: Copy ZeroFox branding assets ───────────────────────────────────

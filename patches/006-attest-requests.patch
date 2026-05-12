@@ -477,7 +477,7 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
  #include <inttypes.h>
 
  #include "mozilla/ScopeExit.h"
-@@ -1787,6 +1788,10 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
+@@ -1758,6 +1759,10 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
    if (mWebTransportSessionEventListener) {
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }

@@ -66,13 +66,13 @@ for patch_file in "$PATCHES_DIR"/*.patch; do
     fi
 
     echo "[apply-patches] Applying: $patch_name"
-    if (cd "$FIREFOX_SRC" && git apply --no-index -p1 --check "$patch_file") 2>/dev/null; then
-        (cd "$FIREFOX_SRC" && git apply --no-index -p1 "$patch_file")
+    if (cd "$FIREFOX_SRC" && GIT_CEILING_DIRECTORIES="$ROOT_DIR" git apply --no-index -p1 --check "$patch_file") 2>/dev/null; then
+        (cd "$FIREFOX_SRC" && GIT_CEILING_DIRECTORIES="$ROOT_DIR" git apply --no-index -p1 "$patch_file")
         echo "[apply-patches]   OK: $patch_name"
         APPLIED=$((APPLIED + 1))
     else
         echo "[apply-patches]   FAILED: $patch_name" >&2
-        echo "[apply-patches]   Run manually: (cd $FIREFOX_SRC && git apply --no-index -p1 $patch_file)" >&2
+        echo "[apply-patches]   Run manually: (cd $FIREFOX_SRC && GIT_CEILING_DIRECTORIES=$ROOT_DIR git apply --no-index -p1 $patch_file)" >&2
         FAILED=$((FAILED + 1))
     fi
 done
