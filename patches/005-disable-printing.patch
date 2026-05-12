@@ -27,12 +27,28 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
-@@ -326,6 +326,8 @@
+@@ -33,3 +33,4 @@
+ #include "nsIOService.h"
++#include "nsIPromptService.h"
+ #include "nsIScriptGlobalObject.h"
+ #include "nsIStringBundle.h"
+@@ -326,6 +327,19 @@
  nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
                                   nsIPrintSettings* aPrintSettings,
                                   nsIWebProgressListener* aWebProgressListener,
                                   Document& aSourceDoc) {
 +  // ZeroFox: printing permanently disabled.
++  // Show a native alert for explicit print attempts (not print-preview, which
++  // is triggered internally and never visible to the user in release builds).
++  if (!aIsPrintPreview) {
++    if (nsCOMPtr<nsPIDOMWindowOuter> win = aSourceDoc.GetWindow()) {
++      if (nsCOMPtr<nsIPromptService> prompt =
++              do_GetService("@mozilla.org/embedcomp/prompt-service;1")) {
++        prompt->Alert(win, u"ZeroFox",
++                      u"Printing is not available in this browser.");
++      }
++    }
++  }
 +  return NS_ERROR_ABORT;
    // Callers must hold a strong reference to |this| to ensure that we stay
    // alive for the duration of this method, because our main owning reference
