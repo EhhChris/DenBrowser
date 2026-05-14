@@ -105,7 +105,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.h b/netwerk/base/ZeroFoxAttest.h
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/ZeroFoxAttest.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,55 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -166,7 +166,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/ZeroFoxAttest.cpp
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,366 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -201,6 +201,7 @@ new file mode 100644
 +#include "mozilla/StaticMutex.h"
 +#include "mozilla/UniquePtr.h"
 +#include "mozilla/Unused.h"
++#include "nsComponentManagerUtils.h"
 +#include "nsHttp.h"
 +#include "nsHttpRequestHead.h"
 +#include "nsICryptoHash.h"
@@ -539,16 +540,16 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
 @@ -7,6 +7,7 @@
  // HttpLog.h should generally be included first
  #include "HttpLog.h"
-
+ 
 +#include "ZeroFoxAttest.h"
  #include <inttypes.h>
-
+ 
  #include "mozilla/ScopeExit.h"
-@@ -1758,6 +1759,12 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
+@@ -1758,6 +1759,13 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
    if (mWebTransportSessionEventListener) {
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }
-
+ 
 +  // ZeroFox: attach per-request ECIES attestation headers (X-ZeroFox-Ts,
 +  // X-ZeroFox-Nonce, X-ZeroFox-Token).  The token's plaintext binds the
 +  // request's method/host/path/body hash so a captured triple cannot be

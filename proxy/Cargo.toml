@@ -8,8 +8,9 @@ name = "zerofox-proxy"
 path = "src/main.rs"
 
 [dependencies]
-pingora-core  = "0.8"
-pingora-proxy = "0.8"
+# `openssl` feature enables TLS termination at the listen socket.
+pingora-core  = { version = "0.8", features = ["openssl"] }
+pingora-proxy = { version = "0.8", features = ["openssl"] }
 pingora-http  = "0.8"
 
 async-trait = "0.1"

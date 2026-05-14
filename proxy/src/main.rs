@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use clap::Parser;
 use log::{info, warn};
+use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::{Error, ErrorType, Result};
@@ -30,9 +31,21 @@ struct Args {
     #[arg(long, env = "ZEROFOX_UPSTREAM")]
     upstream: String,
 
-    /// Path to the EC P-256 private key PEM file
+    /// Path to the EC P-256 attestation private key PEM file.
+    /// (Separate from the TLS server key below — this one decrypts
+    /// per-request attestation tokens.)
     #[arg(long, env = "ZEROFOX_KEY", default_value = "../build/proxy-private.pem")]
     key: String,
+
+    /// Path to the TLS server certificate (PEM).  The browser pins this
+    /// cert's SPKI; rotating the cert requires rebuilding ZeroFox with
+    /// the new pin.
+    #[arg(long, env = "ZEROFOX_TLS_CERT", default_value = "../build/proxy-tls.crt")]
+    cert: String,
+
+    /// Path to the TLS server private key (PEM).
+    #[arg(long, env = "ZEROFOX_TLS_KEY", default_value = "../build/proxy-tls.key")]
+    tls_key: String,
 }
 
 struct ZeroFoxProxy {
@@ -234,9 +247,17 @@ fn main() {
     server.bootstrap();
 
     let mut svc = http_proxy_service(&server.configuration, proxy);
-    svc.add_tcp(&args.listen);
 
-    info!("listening on {} → {}", args.listen, args.upstream);
+    // TLS-only listener.  Browsers verify the SPKI of `args.cert` matches
+    // a pin baked into the build (see ZeroFoxAttest.cpp::kProxySpkiSha256),
+    // so a local sniffer on this machine sees ciphertext and a captured
+    // attestation token cannot be replayed from outside this TLS channel.
+    let tls = TlsSettings::intermediate(&args.cert, &args.tls_key)
+        .unwrap_or_else(|e| panic!("TLS cert/key load failed ({}, {}): {e}",
+                                   args.cert, args.tls_key));
+    svc.add_tls_with_settings(&args.listen, None, tls);
+
+    info!("listening TLS on {} → {}", args.listen, args.upstream);
     server.add_service(svc);
     server.run_forever();
 }

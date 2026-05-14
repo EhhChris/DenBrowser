@@ -10,6 +10,7 @@ Requirements:
 
 Usage (from repo root):
     scripts/gen-attest-key.sh
+    scripts/gen-proxy-tls.sh
     docker compose -f test/target-server/compose.yml up -d
     (cd proxy && ZEROFOX_UPSTREAM=localhost:8080 cargo run)
     python3 test/attestation/test_roundtrip.py
@@ -20,8 +21,10 @@ import hashlib
 import os
 import sys
 import time
+import warnings
 
 import requests
+from urllib3.exceptions import InsecureRequestWarning
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ec import (
     ECDH,
@@ -31,8 +34,17 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.x963kdf import X963KDF
 
-PROXY_URL = os.environ.get("ZEROFOX_PROXY_URL", "http://localhost:8081")
+PROXY_URL = os.environ.get("ZEROFOX_PROXY_URL", "https://localhost:8081")
 PUBLIC_KEY_PATH = os.environ.get("PUBLIC_KEY_PATH", "build/proxy-public.pem")
+TLS_CERT_PATH = os.environ.get("ZEROFOX_TLS_CERT", "build/proxy-tls.crt")
+
+# When the proxy uses a self-signed dev cert, `requests` needs to be told to
+# trust it.  Set VERIFY=False to skip TLS verification entirely (CI-only).
+if TLS_CERT_PATH and os.path.exists(TLS_CERT_PATH):
+    VERIFY = TLS_CERT_PATH
+else:
+    warnings.simplefilter("ignore", InsecureRequestWarning)
+    VERIFY = False
 
 
 def _load_public_key(path):
@@ -78,7 +90,7 @@ def _run(pub_key):
         full = {**headers, "Host": host}
         try:
             r = requests.request(method, f"{PROXY_URL}{path}", data=body,
-                                 headers=full, timeout=5)
+                                 headers=full, timeout=5, verify=VERIFY)
             if r.status_code == expect:
                 print(f"  PASS  {label}  (HTTP {r.status_code})")
                 passed += 1
@@ -177,6 +189,7 @@ if __name__ == "__main__":
 
     pub_key = _load_public_key(PUBLIC_KEY_PATH)
     print(f"Public key : {PUBLIC_KEY_PATH}")
-    print(f"Proxy URL  : {PROXY_URL}\n")
+    print(f"Proxy URL  : {PROXY_URL}")
+    print(f"TLS verify : {VERIFY!r}\n")
 
     sys.exit(0 if _run(pub_key) else 1)
