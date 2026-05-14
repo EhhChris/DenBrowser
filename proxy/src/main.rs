@@ -16,7 +16,7 @@ use attest::Verifier;
 #[command(about = "ZeroFox attestation proxy — verifies ECIES tokens, strips headers, forwards")]
 struct Args {
     /// Address to listen on
-    #[arg(long, env = "ZEROFOX_LISTEN", default_value = "0.0.0.0:8080")]
+    #[arg(long, env = "ZEROFOX_LISTEN", default_value = "0.0.0.0:8081")]
     listen: String,
 
     /// Upstream address to forward verified requests to (host:port)

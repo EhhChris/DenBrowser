@@ -106,6 +106,7 @@ impl Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
     use rand_core::OsRng;
 
     /// Replicates ZeroFoxAttest.cpp: ECIES-encrypt a token for `proxy_pub`.
@@ -124,7 +125,7 @@ mod tests {
         let plaintext = format!("zerofox-attest:{ts_str}:{host}");
         let cipher = Aes128Gcm::new_from_slice(aes_key).unwrap();
         let ct_tag = cipher
-            .encrypt(Nonce::from(iv), plaintext.as_bytes())
+            .encrypt(&Nonce::from(iv), plaintext.as_bytes())
             .unwrap();
 
         let ep_bytes = ephem_pub.to_encoded_point(false).as_bytes().to_vec();

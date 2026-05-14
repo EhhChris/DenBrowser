@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ZeroFox Test Target</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 80px auto; padding: 0 20px; }
+    h1 { font-size: 1.4em; }
+    .info { background: #f4f4f4; padding: 12px; border-left: 3px solid #333; margin: 16px 0; }
+    code { background: #eee; padding: 2px 4px; }
+  </style>
+</head>
+<body>
+  <h1>ZeroFox Proxy Test Target</h1>
+  <p>This server is running and reachable through the proxy.</p>
+  <div class="info">
+    <strong>Server:</strong> nginx<br>
+    <strong>Purpose:</strong> proxy integration test target
+  </div>
+  <p>Test endpoints:</p>
+  <ul>
+    <li><code>GET /</code> — this page</li>
+    <li><code>GET /health</code> — 200 OK plain text</li>
+    <li><code>GET /headers</code> — echoes request headers (via nginx vars)</li>
+  </ul>
+</body>
+</html>
