@@ -16,6 +16,26 @@ As this project progresses tags will be cut and attempt to follow the latest ESR
 - Python 3, Rust, Node.js (required by Firefox build system — see [Firefox build docs](https://firefox-source-docs.mozilla.org/setup/))
 - ~20 GB free disk space for the source + build artifacts
 
+## Deployment requirements
+
+ZeroFox keeps page content out of Firefox's on-disk profile (PBM forced on,
+disk cache hard-disabled, downloads blocked, SanitizeOnShutdown locked).
+What it cannot control is the **operating system** writing process memory
+to disk underneath it. To close that gap, every deployment host must:
+
+- **Enable full-disk encryption** (FileVault on macOS, BitLocker on Windows,
+  LUKS on Linux). Anything the OS pages out to swap/pagefile, captures in a
+  crash dump (`WerFault`, `sysdiagnose`, kernel minidump), or writes to a
+  hibernation image is then encrypted at rest under a user- or TPM-bound key.
+- **Disable hibernation**, or ensure the hibernation image is encrypted.
+  (FDE generally covers this, but verify on locked-down kiosk images.)
+- **On Linux**, prefer `swapoff` or an encrypted swap partition. Unencrypted
+  swap defeats every in-memory protection in this project.
+
+These are operational controls, not build-time controls. The browser cannot
+enforce them; the deployment image must. See `patches/007-ramdisk-profile.patch`
+for the detailed analysis of why ZeroFox does not ship a RAM-disk profile.
+
 ## Quick start
 
 ```bash

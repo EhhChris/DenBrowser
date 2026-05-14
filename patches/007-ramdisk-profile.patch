@@ -1,9 +1,97 @@
 # STUB — Remove this line once real diff content is added below.
 #
-# PATCH: 007-ramdisk-profile
+# PATCH: 007-ramdisk-profile  —  NOT IMPLEMENTED (intentional)
+#
+# Decision date: 2026-05-14
+# Decision:      Skip the RAM-disk profile patch. PBM-forced + locked disk-cache
+#                prefs + SanitizeOnShutdown already keep page content off disk,
+#                and a RAM disk does not solve the residual OS-level risks.
+#                Full-disk encryption is required at the deployment layer
+#                instead (documented in README.md).
+#
+# ── Why this patch is not implemented ─────────────────────────────────────────
+#
+# The driving concern was: "is there residual image or website-content data
+# left on disk in an unprotected way?" Three independent layers already keep
+# site content in memory only:
+#
+#   1. browser.privatebrowsing.autostart=true (locked) — PBM keeps cache,
+#      IndexedDB, localStorage/sessionStorage, cookies, history, favicons,
+#      and CacheStorage in memory only.
+#   2. browser.cache.disk.enable=false + disk.capacity=0 + offline.enable=false
+#      (locked) — the disk cache backend is hard-disabled even if PBM were
+#      somehow bypassed.
+#   3. SanitizeOnShutdown locked across all categories in policies.json —
+#      final sweep on clean exit.
+#
+# Other on-disk paths are blocked elsewhere:
+#   - History (places.sqlite): places.history.enabled=false + PBM
+#   - Form data: DisableFormHistory policy + browser.formfill.enable=false
+#   - Session restore: interval=MAX_INT, max_undo=0, resume_from_crash=false
+#   - Downloads: patch 004 cancels the channel inside CreateListener before
+#     any disk file is opened.
+#   - Cookies: ExpireAtSessionEnd=true (locked) + PBM in-memory store
+#   - Page thumbnails / shortcut favicons / media cache / service workers:
+#     locked off in mozilla.cfg (added the same day as this decision)
+#
+# A RAM-disk profile would only catch:
+#   - Non-content profile metadata (prefs.js counters, extensions.json,
+#     compatibility.ini, times.json) — none of which contains page content.
+#   - A hypothetical Firefox bug where a PBM code path mistakenly hits disk.
+#     Defense-in-depth value is real but small; we already have layered
+#     defenses for the content-leak vectors that have historically appeared.
+#
+# ── What a RAM disk does NOT solve ────────────────────────────────────────────
+#
+# OS swap / pagefile / hibernation. A RAM disk on macOS (hdiutil ram://),
+# Linux (tmpfs), or Windows (ImDisk) is backed by pageable kernel memory.
+# Under memory pressure the OS can write those pages — plus decoded image
+# bitmaps in the content-process heap and JIT-compiled JS — to the swap
+# file or pagefile. sysdiagnose, WerFault, and kernel crash dumps capture
+# the same content. None of that is inside Firefox's control, so wrapping
+# the profile in a RAM disk doesn't change the residual exposure.
+#
+# The correct mitigations are operational, not patch-side:
+#   - Require full-disk encryption (FileVault / BitLocker / LUKS) on every
+#     deployment host so anything that lands on disk is encrypted at rest
+#     under a user- or TPM-bound key.
+#   - Suppress hibernation in the OS image, or ensure the hibernation
+#     image is encrypted (FDE generally covers this).
+#   - On Linux deployments, prefer swapoff or encrypted swap.
+#
+# These are now documented as deployment prerequisites in README.md.
+#
+# ── Costs that tipped the trade-off ───────────────────────────────────────────
+#
+#   - Windows: needs an external dependency (ImDisk, OSFMount, or similar)
+#     and typically admin rights to mount. Conflicts with the "no elevated
+#     privileges" deployment assumption.
+#   - Linux: tmpfs mount needs CAP_SYS_ADMIN or a user namespace; the
+#     newuidmap/newgidmap setup is fragile across distros.
+#   - macOS: hdiutil is built-in and the cleanest of the three, but adding
+#     mac-only behavior splits the codebase.
+#   - Substantial complexity in the binary: RAM-disk setup/teardown,
+#     atomic-shutdown handling, crash-recovery cleanup, embedded user.js.
+#
+# Given the deployment model — controlled environment, no elevated privileges,
+# VPN required — requiring FDE on the host is a broader, cheaper, and more
+# durable fix than a custom RAM-disk module.
+#
+# ── Revisit this decision if ──────────────────────────────────────────────────
+#
+#   - Firefox ships a regression that writes page content to disk in PBM.
+#   - The deployment target changes to allow elevated privileges.
+#   - FDE cannot be enforced on the host (then RAM disk + swapoff becomes
+#     the only mitigation, however imperfect).
+#   - A swap-encryption or no-swap deployment profile becomes infeasible.
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# IMPLEMENTATION GUIDANCE — kept for reference if the decision is reversed
+# ══════════════════════════════════════════════════════════════════════════════
+#
 # PURPOSE: At startup, automatically create a RAM-backed filesystem, place the
-#          Firefox profile on it, and destroy it on exit. No launch script needed.
-#          The binary is self-contained — `./zerofox` just works.
+#          Firefox profile on it, and destroy it on exit. No launch script
+#          needed. The binary is self-contained — `./zerofox` just works.
 #
 # ── OVERVIEW ─────────────────────────────────────────────────────────────────
 #
