@@ -1,16 +1,23 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use clap::Parser;
 use log::{info, warn};
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_core::Result;
+use pingora_core::{Error, ErrorType, Result};
 use pingora_http::RequestHeader;
 use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
+use sha2::{Digest, Sha256};
 
 mod attest;
-use attest::Verifier;
+use attest::{AttestInputs, PhaseOne, Verifier};
+
+/// Maximum bytes of request body we are willing to buffer for verification.
+/// Anything larger is rejected with 413.  Adjust per deployment if the upstream
+/// legitimately accepts very large uploads.
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(about = "ZeroFox attestation proxy — verifies ECIES tokens, strips headers, forwards")]
@@ -48,11 +55,24 @@ impl ZeroFoxProxy {
     }
 }
 
+/// Per-request state.  Phase 1 (header verify) runs in `request_filter`;
+/// phase 2 (body verify) runs in `request_body_filter` once all chunks have
+/// been buffered.
+#[derive(Default)]
+pub struct ProxyCtx {
+    phase_one: Option<PhaseOne>,
+    body_buffer: Vec<u8>,
+    body_hasher: Sha256,
+    body_emitted: bool,
+}
+
 #[async_trait]
 impl ProxyHttp for ZeroFoxProxy {
-    type CTX = ();
+    type CTX = ProxyCtx;
 
-    fn new_ctx(&self) -> Self::CTX {}
+    fn new_ctx(&self) -> Self::CTX {
+        ProxyCtx::default()
+    }
 
     async fn upstream_peer(
         &self,
@@ -66,44 +86,122 @@ impl ProxyHttp for ZeroFoxProxy {
         )))
     }
 
-    /// Verify attestation headers.  Returns early with 403 on any failure;
-    /// otherwise lets Pingora continue to upstream_request_filter.
+    /// Phase 1.  Validate every attestation field except the body hash;
+    /// short-circuit with 403 on any failure.  The body hash is checked in
+    /// `request_body_filter` once the body has streamed in.
     async fn request_filter(
         &self,
         session: &mut Session,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<bool> {
-        let headers = &session.req_header().headers;
+        let req = session.req_header();
 
-        let ts = header_str(headers, "x-zerofox-ts");
-        let token = header_str(headers, "x-zerofox-token");
-        let host = header_str(headers, "host")
+        let ts = header_str(&req.headers, "x-zerofox-ts");
+        let nonce = header_str(&req.headers, "x-zerofox-nonce");
+        let token = header_str(&req.headers, "x-zerofox-token");
+        let host = header_str(&req.headers, "host")
             .map(|h| h.split(':').next().unwrap_or(&h).to_owned());
 
-        let (ts_val, token_val) = match (ts, token) {
-            (Some(t), Some(tok)) => (t, tok),
+        let (ts, nonce, token, host) = match (ts, nonce, token, host) {
+            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             _ => {
-                warn!(
-                    "rejected — missing attestation headers (host={})",
-                    host.as_deref().unwrap_or("?")
-                );
+                warn!("rejected — missing attestation headers");
                 let _ = session.respond_error(403).await;
                 return Ok(true);
             }
         };
 
-        let host_val = host.unwrap_or_default();
-        if let Err(e) = self.verifier.verify(&ts_val, &token_val, &host_val) {
-            warn!("rejected — {e} (host={host_val})");
-            let _ = session.respond_error(403).await;
-            return Ok(true);
+        let method = req.method.as_str().to_owned();
+        let path = req
+            .uri
+            .path_and_query()
+            .map(|p| p.as_str().to_owned())
+            .unwrap_or_else(|| "/".to_owned());
+
+        let inputs = AttestInputs {
+            ts: &ts,
+            nonce_b64: &nonce,
+            token_b64: &token,
+            host: &host,
+            method: &method,
+            path: &path,
+        };
+
+        match self.verifier.verify_headers(&inputs) {
+            Ok(p1) => {
+                ctx.phase_one = Some(p1);
+                Ok(false)
+            }
+            Err(e) => {
+                warn!("rejected — {e} (host={host} {method} {path})");
+                let _ = session.respond_error(403).await;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Phase 2.  Buffer body chunks (suppressing them from upstream), hash on
+    /// the fly, then at end-of-stream verify against the expected hash and
+    /// emit the buffered body for upstream forwarding.
+    ///
+    /// Trade-off: the upstream connection is opened and request headers are
+    /// sent before body verification completes.  Upstream sees no body bytes
+    /// until verification passes; on failure the connection is aborted before
+    /// any body reaches upstream.  For services that act only after receiving
+    /// a full body (the common case) this is equivalent to a 403.
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if let Some(chunk) = body.as_ref() {
+            if ctx.body_buffer.len() + chunk.len() > MAX_BODY_BYTES {
+                warn!(
+                    "rejected — request body exceeds {MAX_BODY_BYTES} bytes (DoS guard)"
+                );
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(413),
+                    "request body too large",
+                ));
+            }
+            ctx.body_hasher.update(chunk);
+            ctx.body_buffer.extend_from_slice(chunk);
         }
 
-        Ok(false)
+        // Suppress every chunk while we accumulate; we'll emit the verified
+        // buffer in one shot at end-of-stream.
+        *body = None;
+
+        if end_of_stream {
+            let actual: [u8; 32] = ctx.body_hasher.clone().finalize().into();
+            let p1 = ctx
+                .phase_one
+                .as_ref()
+                .expect("request_body_filter without successful request_filter");
+
+            if let Err(e) = self.verifier.verify_body_and_commit(p1, &actual) {
+                warn!("rejected — {e}");
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(403),
+                    "attestation body verification failed",
+                ));
+            }
+
+            if !ctx.body_emitted {
+                let buf = std::mem::take(&mut ctx.body_buffer);
+                if !buf.is_empty() {
+                    *body = Some(Bytes::from(buf));
+                }
+                ctx.body_emitted = true;
+            }
+        }
+
+        Ok(())
     }
 
     /// Strip attestation headers from the request forwarded upstream.
-    /// Only called when request_filter returned Ok(false), i.e. verification passed.
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
@@ -111,6 +209,7 @@ impl ProxyHttp for ZeroFoxProxy {
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
         upstream_request.remove_header("x-zerofox-ts");
+        upstream_request.remove_header("x-zerofox-nonce");
         upstream_request.remove_header("x-zerofox-token");
         Ok(())
     }
@@ -128,8 +227,8 @@ fn main() {
         .unwrap_or_else(|e| panic!("cannot read {}: {}", args.key, e));
     let verifier = Verifier::from_pem(&pem)
         .unwrap_or_else(|e| panic!("cannot parse key {}: {}", args.key, e));
-    let proxy = ZeroFoxProxy::new(verifier, &args.upstream)
-        .unwrap_or_else(|e| panic!("{e}"));
+    let proxy =
+        ZeroFoxProxy::new(verifier, &args.upstream).unwrap_or_else(|e| panic!("{e}"));
 
     let mut server = Server::new(None).expect("Pingora server init failed");
     server.bootstrap();
