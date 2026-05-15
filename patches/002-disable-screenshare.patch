@@ -32,10 +32,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      return nullptr;
    }
    nsCOMPtr<nsPIDOMWindowInner> owner = do_QueryInterface(global);
-+  // ZeroFox: getDisplayMedia() unconditionally rejected; screen capture is
++  // DenBrowser: getDisplayMedia() unconditionally rejected; screen capture is
 +  // disabled by policy regardless of prefs or caller privilege.
 +  p->MaybeRejectWithNotAllowedError(
-+      "ZeroFox policy: screen capture is disabled");
++      "DenBrowser policy: screen capture is disabled");
 +  return p.forget();
    /* If the relevant global object of this does not have transient activation,
     * return a promise rejected with a DOMException object whose name attribute
@@ -59,11 +59,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 -              __func__);
 -        }
 -        break;
-+        // ZeroFox: screen/window/browser capture unconditionally rejected
++        // DenBrowser: screen/window/browser capture unconditionally rejected
 +        // regardless of prefs or caller privilege.
 +        return StreamPromise::CreateAndReject(
 +            MakeRefPtr<MediaMgrError>(MediaMgrError::Name::NotAllowedError,
-+                                      "ZeroFox policy: screen capture is disabled"),
++                                      "DenBrowser policy: screen capture is disabled"),
 +            __func__);
  
        case MediaSourceEnum::Microphone:

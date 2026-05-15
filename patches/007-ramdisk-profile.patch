@@ -91,7 +91,7 @@
 #
 # PURPOSE: At startup, automatically create a RAM-backed filesystem, place the
 #          Firefox profile on it, and destroy it on exit. No launch script
-#          needed. The binary is self-contained — `./zerofox` just works.
+#          needed. The binary is self-contained — `./denbrowser` just works.
 #
 # ── OVERVIEW ─────────────────────────────────────────────────────────────────
 #
@@ -108,13 +108,13 @@
 #   d. Force Firefox to use that directory as its profile
 #   e. Register a shutdown observer to tear down the RAM disk on exit
 #
-# ── PART 1: New file — zerofox RAM disk module ────────────────────────────────
+# ── PART 1: New file — denbrowser RAM disk module ────────────────────────────────
 #
-# Create: toolkit/xre/ZeroFoxRamDisk.h
-# Create: toolkit/xre/ZeroFoxRamDisk.cpp
+# Create: toolkit/xre/DenBrowserRamDisk.h
+# Create: toolkit/xre/DenBrowserRamDisk.cpp
 #
 # Interface:
-#   namespace zerofox {
+#   namespace denbrowser {
 #     // Creates RAM disk, writes profile, returns profile path.
 #     // Returns empty string on failure.
 #     nsString SetupRamProfile();
@@ -129,7 +129,7 @@
 #   #include <sys/wait.h>
 #
 #   static nsString sRamDiskDev;   // e.g. "/dev/disk5"
-#   static nsString sRamDiskMount; // e.g. "/Volumes/ZeroFoxProfile"
+#   static nsString sRamDiskMount; // e.g. "/Volumes/DenBrowserProfile"
 #
 #   static bool RunCommand(const char* cmd[]) {
 #     pid_t pid;
@@ -150,12 +150,12 @@
 #
 #     // Format the RAM disk
 #     const char* erase[] = {
-#       "diskutil", "erasevolume", "HFS+", "ZeroFoxProfile",
+#       "diskutil", "erasevolume", "HFS+", "DenBrowserProfile",
 #       sRamDiskDev.get(), nullptr
 #     };
 #     RunCommand(erase);
 #
-#     sRamDiskMount = u"/Volumes/ZeroFoxProfile"_ns;
+#     sRamDiskMount = u"/Volumes/DenBrowserProfile"_ns;
 #
 #     // Create profile dir and write user.js
 #     nsString profilePath = sRamDiskMount + u"/profile"_ns;
@@ -177,10 +177,10 @@
 #
 #   #include <sys/mount.h>
 #
-#   static std::string sMountPoint; // e.g. "/tmp/zerofox-XXXXXX"
+#   static std::string sMountPoint; // e.g. "/tmp/denbrowser-XXXXXX"
 #
 #   nsString SetupRamProfile() {
-#     char tmpl[] = "/tmp/zerofox-XXXXXX";
+#     char tmpl[] = "/tmp/denbrowser-XXXXXX";
 #     mkdtemp(tmpl);
 #     sMountPoint = tmpl;
 #
@@ -204,7 +204,7 @@
 # Rather than reading user.js from disk at runtime (which would require it to
 # exist next to the binary), embed its content directly in the binary.
 #
-# In ZeroFoxRamDisk.cpp:
+# In DenBrowserRamDisk.cpp:
 #
 #   static const char kUserJs[] =
 #     // Paste the full content of config/user.js here as a raw string literal:
@@ -235,13 +235,13 @@
 # Find: XRE_main() — the main entry point called from nsBrowserApp.cpp
 # After argument parsing but before profile selection, add:
 #
-#   #include "ZeroFoxRamDisk.h"
+#   #include "DenBrowserRamDisk.h"
 #
-#   // ZeroFox: set up RAM-backed profile before profile service initializes
-#   nsString ramProfilePath = zerofox::SetupRamProfile();
+#   // DenBrowser: set up RAM-backed profile before profile service initializes
+#   nsString ramProfilePath = denbrowser::SetupRamProfile();
 #   if (ramProfilePath.IsEmpty()) {
 #     // Fatal — refuse to start without RAM profile
-#     Output(true, "ZeroFox: Failed to create RAM disk profile. Aborting.\n");
+#     Output(true, "DenBrowser: Failed to create RAM disk profile. Aborting.\n");
 #     return 1;
 #   }
 #   // Override the -profile argument so nsToolkitProfileService uses our path
@@ -254,18 +254,18 @@
 #
 # ── PART 4: Shutdown observer ────────────────────────────────────────────────
 #
-# Register a shutdown observer in ZeroFoxRamDisk.cpp to call TeardownRamProfile()
+# Register a shutdown observer in DenBrowserRamDisk.cpp to call TeardownRamProfile()
 # when Firefox quits cleanly. Also register an atexit() handler as a fallback
 # for crash/kill scenarios.
 #
 #   // In SetupRamProfile(), after mounting:
 #   nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
-#   obs->AddObserver(new ZeroFoxShutdownObserver(), "quit-application", false);
-#   atexit([]{ zerofox::TeardownRamProfile(); });
+#   obs->AddObserver(new DenBrowserShutdownObserver(), "quit-application", false);
+#   atexit([]{ denbrowser::TeardownRamProfile(); });
 #
-#   // ZeroFoxShutdownObserver::Observe():
+#   // DenBrowserShutdownObserver::Observe():
 #   NS_IMETHODIMP Observe(nsISupports*, const char* topic, const char16_t*) {
-#     zerofox::TeardownRamProfile();
+#     denbrowser::TeardownRamProfile();
 #     return NS_OK;
 #   }
 #
@@ -273,7 +273,7 @@
 #
 # File: toolkit/xre/moz.build
 # Add to UNIFIED_SOURCES:
-#   "ZeroFoxRamDisk.cpp",
+#   "DenBrowserRamDisk.cpp",
 # Add platform-conditional libs:
 #   if CONFIG['OS_TARGET'] == 'Darwin':
 #       OS_LIBS += ['-framework', 'CoreFoundation']
@@ -281,7 +281,7 @@
 # ── GENERATE THIS PATCH ───────────────────────────────────────────────────────
 #   cd src/firefox-<version>
 #   hg diff toolkit/xre/nsAppRunner.cpp \
-#           toolkit/xre/ZeroFoxRamDisk.cpp \
-#           toolkit/xre/ZeroFoxRamDisk.h \
+#           toolkit/xre/DenBrowserRamDisk.cpp \
+#           toolkit/xre/DenBrowserRamDisk.h \
 #           toolkit/xre/moz.build \
 #     > patches/007-ramdisk-profile.patch

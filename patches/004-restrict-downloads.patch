@@ -34,10 +34,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    aPrincipal,
    aSaveCompleteCallback
  ) {
-+  // ZeroFox: all saves to disk are unconditionally blocked.
++  // DenBrowser: all saves to disk are unconditionally blocked.
 +  Services.prompt.alert(
 +    Services.wm.getMostRecentWindow("navigator:browser"),
-+    "ZeroFox",
++    "DenBrowser",
 +    "Saving files is not available in this browser."
 +  );
 +  return;
@@ -61,10 +61,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    MOZ_ASSERT(!XRE_IsContentProcess());
    NS_ENSURE_ARG_POINTER(aChannel);
 
-+  // ZeroFox: file downloads unconditionally blocked.
++  // DenBrowser: file downloads unconditionally blocked.
 +  if (nsCOMPtr<nsIPromptService> prompt =
 +          do_GetService("@mozilla.org/embedcomp/prompt-service;1")) {
-+    prompt->Alert(nullptr, u"ZeroFox",
++    prompt->Alert(nullptr, u"DenBrowser",
 +                  u"Saving files is not available in this browser.");
 +  }
 +  aChannel->Cancel(NS_ERROR_ABORT);
@@ -76,7 +76,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +++ b/browser/components/shell/ShellService.sys.mjs
 @@ -57,6 +57,7 @@
    get canSetDesktopBackground() {
-+    return false; // ZeroFox: writing files to disk is not permitted.
++    return false; // DenBrowser: writing files to disk is not permitted.
      if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
        return true;
      }
@@ -89,7 +89,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  NS_IMETHODIMP
  nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
                                          const nsACString& aImageName) {
-+  // ZeroFox: writing files to disk is not permitted.
++  // DenBrowser: writing files to disk is not permitted.
 +  return NS_ERROR_ABORT;
    // Note: We don't support aPosition on OS X.
 
@@ -102,7 +102,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  nsWindowsShellService::SetDesktopBackground(dom::Element* aElement,
                                              int32_t aPosition,
                                              const nsACString& aImageName) {
-+  // ZeroFox: writing files to disk is not permitted.
++  // DenBrowser: writing files to disk is not permitted.
 +  return NS_ERROR_ABORT;
    if (!aElement || !aElement->IsHTMLElement(nsGkAtoms::img)) {
      // XXX write background loading stuff!

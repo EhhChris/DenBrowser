@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gen-proxy-tls.sh — Generate the ZeroFox proxy's TLS server cert (or refresh
+# gen-proxy-tls.sh — Generate the DenBrowser proxy's TLS server cert (or refresh
 # the SPKI pin from an existing cert) and patch the pin into the browser
 # source so the next build refuses to talk to any other TLS endpoint claiming
 # to be the proxy.
@@ -27,11 +27,11 @@
 #
 # Side-effect:
 #   Patches kProxyHost[] and kProxySpkiSha256[] in
-#   netwerk/base/ZeroFoxAttest.cpp between the REPLACE TLS PIN markers.
+#   netwerk/base/DenBrowserAttest.cpp between the REPLACE TLS PIN markers.
 #
 # SECURITY NOTES:
 #   - build/proxy-tls.key is gitignored; never commit it.
-#   - Rotating the cert requires rebuilding ZeroFox so the pin matches.
+#   - Rotating the cert requires rebuilding DenBrowser so the pin matches.
 #     This is intentional — it ties the browser binary to a specific server
 #     identity, the way HPKP would for a website.
 
@@ -98,16 +98,16 @@ SPKI_C_BYTES=$(echo "$SPKI_HASH_HEX" | fold -w2 \
                | fold -s -w 60 \
                | sed 's/^/  /')
 
-# ── 4. Patch ZeroFoxAttest.cpp if the source tree is available ────────────────
+# ── 4. Patch DenBrowserAttest.cpp if the source tree is available ────────────────
 if [[ -f "$ROOT_DIR/src/.esr_version" ]]; then
     ESR_VER=$(cat "$ROOT_DIR/src/.esr_version" | sed 's/esr//')
-    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/ZeroFoxAttest.cpp"
+    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/DenBrowserAttest.cpp"
 else
     ATTEST_CPP=""
 fi
 
 if [[ -n "$ATTEST_CPP" && -f "$ATTEST_CPP" ]]; then
-    echo "[gen-proxy-tls] Patching kProxyHost / kProxySpkiSha256 in ZeroFoxAttest.cpp..."
+    echo "[gen-proxy-tls] Patching kProxyHost / kProxySpkiSha256 in DenBrowserAttest.cpp..."
     python3 - "$ATTEST_CPP" "$PROXY_HOST" "$SPKI_C_BYTES" <<'PYEOF'
 import sys, re
 
@@ -140,7 +140,7 @@ with open(cpp_path, "w") as f:
 print(f"  Updated {cpp_path}")
 PYEOF
 else
-    echo "[gen-proxy-tls] Source tree not found; paste manually into ZeroFoxAttest.cpp:"
+    echo "[gen-proxy-tls] Source tree not found; paste manually into DenBrowserAttest.cpp:"
     echo ""
     echo "  static const char kProxyHost[] = \"$PROXY_HOST\";"
     echo "  static const uint8_t kProxySpkiSha256[32] = {"
@@ -159,7 +159,7 @@ cat <<EOF
   Pinned SPKI    : $SPKI_HASH_B64
 
   Next steps:
-    1. Rebuild ZeroFox (the pin is now baked into the binary).
+    1. Rebuild DenBrowser (the pin is now baked into the binary).
     2. Restart the proxy — it will load the new cert/key automatically.
     3. Any older build, or any TLS endpoint not presenting this exact
        public key, will fail the handshake before any request is sent.

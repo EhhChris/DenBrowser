@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — Orchestrate a full ZeroFox build from scratch
+# build.sh — Orchestrate a full DenBrowser build from scratch
 # Usage: ./build.sh [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev]
 set -euo pipefail
 
@@ -49,7 +49,7 @@ ESR_VERSION=$(cat "$SRC_DIR/.esr_version")
 FIREFOX_SRC="$SRC_DIR/firefox-${ESR_VERSION%esr}"
 echo "[build] Firefox source: $FIREFOX_SRC"
 
-# ── Step 2: Apply ZeroFox patches ────────────────────────────────────────────
+# ── Step 2: Apply DenBrowser patches ────────────────────────────────────────────
 if [[ $SKIP_PATCHES -eq 0 ]]; then
     bash "$SCRIPTS_DIR/apply-patches.sh" ${SKIP_PATCH_ARGS[@]+"${SKIP_PATCH_ARGS[@]}"}
 else
@@ -58,13 +58,13 @@ fi
 
 # ── Step 2.5: Inject attestation public key ──────────────────────────────────
 # If build/proxy-public.der exists, replace the all-zeros placeholder in
-# ZeroFoxAttest.cpp with the real key bytes so attestation is active in this
+# DenBrowserAttest.cpp with the real key bytes so attestation is active in this
 # build. Skipped (with a warning) if the key hasn't been generated yet; aborts
 # if the key exists but injection fails (e.g. sentinels missing from source).
-ATTEST_SRC="$FIREFOX_SRC/netwerk/base/ZeroFoxAttest.cpp"
+ATTEST_SRC="$FIREFOX_SRC/netwerk/base/DenBrowserAttest.cpp"
 ATTEST_KEY="$ROOT_DIR/build/proxy-public.der"
 if [[ -f "$ATTEST_KEY" && -f "$ATTEST_SRC" ]]; then
-    echo "[build] Injecting attestation public key into ZeroFoxAttest.cpp..."
+    echo "[build] Injecting attestation public key into DenBrowserAttest.cpp..."
     python3 - "$ATTEST_KEY" "$ATTEST_SRC" <<'PYEOF' || { echo "[build] ERROR: key injection failed — aborting build."; exit 1; }
 import sys
 
@@ -107,17 +107,17 @@ elif [[ ! -f "$ATTEST_KEY" ]]; then
     echo "[build] WARNING: build/proxy-public.der not found — attestation headers disabled."
     echo "[build]          Run scripts/gen-attest-key.sh to generate a keypair."
 elif [[ ! -f "$ATTEST_SRC" ]]; then
-    echo "[build] ERROR: proxy-public.der exists but ZeroFoxAttest.cpp not in source tree." >&2
+    echo "[build] ERROR: proxy-public.der exists but DenBrowserAttest.cpp not in source tree." >&2
     echo "[build]        Patch 006 must be applied before key injection can run." >&2
     echo "[build]        Check that apply-patches.sh succeeded for 006-attest-requests.patch." >&2
     exit 1
 fi
 
-# ── Step 2.6: Copy ZeroFox branding assets ───────────────────────────────────
-BRANDING_DIR="$FIREFOX_SRC/browser/branding/zerofox"
+# ── Step 2.6: Copy DenBrowser branding assets ───────────────────────────────────
+BRANDING_DIR="$FIREFOX_SRC/browser/branding/denbrowser"
 if [[ -d "$BRANDING_DIR" ]]; then
-    ICONSET="$ROOT_DIR/branding/ZeroFox.iconset"
-    echo "[build] Copying ZeroFox branding icons..."
+    ICONSET="$ROOT_DIR/branding/DenBrowser.iconset"
+    echo "[build] Copying DenBrowser branding icons..."
 
     cp "$ICONSET/icon_16x16.png"    "$BRANDING_DIR/default16.png"
     cp "$ICONSET/icon_32x32.png"    "$BRANDING_DIR/default32.png"
@@ -182,8 +182,8 @@ cd "$FIREFOX_SRC"
 # autoconfig.js  → <app>/Contents/Resources/defaults/pref/  (tells Firefox to load mozilla.cfg)
 # mozilla.cfg    → <app>/Contents/Resources/                 (NS_GRE_DIR on macOS; this is where
 #                                                             the autoconfig system looks for it)
-OBJDIR="$(dirname "$FIREFOX_SRC")/zerofox-obj"
-APP_BUNDLE="$OBJDIR/dist/ZeroFox.app"
+OBJDIR="$(dirname "$FIREFOX_SRC")/denbrowser-obj"
+APP_BUNDLE="$OBJDIR/dist/DenBrowser.app"
 if [[ -d "$APP_BUNDLE" ]]; then
     echo "[build] Installing autoconfig lockdown..."
     PREF_DIR="$APP_BUNDLE/Contents/Resources/defaults/pref"

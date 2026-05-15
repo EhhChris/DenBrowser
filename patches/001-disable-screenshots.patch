@@ -31,7 +31,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
                                             styleMask:features
                                               backing:NSBackingStoreBuffered
                                                 defer:YES];
-+  // ZeroFox: prevent this window from appearing in any screen capture API,
++  // DenBrowser: prevent this window from appearing in any screen capture API,
 +  // screen recorder, or screenshot tool. NSWindowSharingNone instructs the
 +  // macOS compositor to exclude the window's backing store from capture.
 +  [mWindow setSharingType:NSWindowSharingNone];
@@ -54,7 +54,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
        return NS_ERROR_FAILURE;
      }
    }
-+  // ZeroFox: exclude this window from all screen capture APIs.
++  // DenBrowser: exclude this window from all screen capture APIs.
 +  // WDA_EXCLUDEFROMCAPTURE requires Windows 10 build 19041+; on older
 +  // builds the call returns FALSE which we intentionally ignore.
 +  ::SetWindowDisplayAffinity(mWnd, WDA_EXCLUDEFROMCAPTURE);
@@ -64,8 +64,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +++ b/browser/components/screenshots/ScreenshotsUtils.sys.mjs
 @@ -1052,6 +1052,9 @@
    async takeScreenshot(browser, type) {
-+    // ZeroFox: built-in screenshot capture disabled.
-+    console.error("ZeroFox: screenshot capture is disabled by policy.");
++    // DenBrowser: built-in screenshot capture disabled.
++    console.error("DenBrowser: screenshot capture is disabled by policy.");
 +    return;
      this.closePanel(browser);
      this.closeOverlay(browser, {
@@ -74,8 +74,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      });
 @@ -1180,5 +1183,8 @@
    async copyScreenshotFromRegion(region, browser) {
-+    // ZeroFox: built-in screenshot capture disabled.
-+    console.error("ZeroFox: screenshot capture is disabled by policy.");
++    // DenBrowser: built-in screenshot capture disabled.
++    console.error("DenBrowser: screenshot capture is disabled by policy.");
 +    return;
      let canvas = await this.createCanvas(region, browser);
      let blob = await canvas.convertToBlob();
@@ -83,8 +83,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      await this.copyScreenshot(blob, browser, "OverlayCopy");
 @@ -1263,5 +1269,8 @@
    async downloadScreenshotFromRegion(title, region, browser) {
-+    // ZeroFox: built-in screenshot capture disabled.
-+    console.error("ZeroFox: screenshot capture is disabled by policy.");
++    // DenBrowser: built-in screenshot capture disabled.
++    console.error("DenBrowser: screenshot capture is disabled by policy.");
 +    return;
      let canvas = await this.createCanvas(region, browser);
      let blob = await canvas.convertToBlob();

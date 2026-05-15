@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ZeroFox attestation roundtrip test (v2 protocol).
+DenBrowser attestation roundtrip test (v2 protocol).
 
-Replicates the ZeroFox browser's ECIES token generation (patch 006) and
-validates the full path: test client → zerofox-proxy (Pingora) → upstream.
+Replicates the DenBrowser browser's ECIES token generation (patch 006) and
+validates the full path: test client → denbrowser-proxy (Pingora) → upstream.
 
 Requirements:
     pip install cryptography requests
@@ -12,7 +12,7 @@ Usage (from repo root):
     scripts/gen-attest-key.sh
     scripts/gen-proxy-tls.sh
     docker compose -f test/target-server/compose.yml up -d
-    (cd proxy && ZEROFOX_UPSTREAM=localhost:8080 cargo run)
+    (cd proxy && DENBROWSER_UPSTREAM=localhost:8080 cargo run)
     python3 test/attestation/test_roundtrip.py
 """
 
@@ -34,9 +34,9 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.x963kdf import X963KDF
 
-PROXY_URL = os.environ.get("ZEROFOX_PROXY_URL", "https://localhost:8081")
+PROXY_URL = os.environ.get("DENBROWSER_PROXY_URL", "https://localhost:8081")
 PUBLIC_KEY_PATH = os.environ.get("PUBLIC_KEY_PATH", "build/proxy-public.pem")
-TLS_CERT_PATH = os.environ.get("ZEROFOX_TLS_CERT", "build/proxy-tls.crt")
+TLS_CERT_PATH = os.environ.get("DENBROWSER_TLS_CERT", "build/proxy-tls.crt")
 
 # When the proxy uses a self-signed dev cert, `requests` needs to be told to
 # trust it.  Set VERIFY=False to skip TLS verification entirely (CI-only).
@@ -53,10 +53,10 @@ def _load_public_key(path):
 
 
 def _make_attest(pub_key, *, nonce_b64, ts, host, method, path, body):
-    """Mirror ZeroFoxAttest.cpp::AddAttestHeaders — produce v2 headers."""
+    """Mirror DenBrowserAttest.cpp::AddAttestHeaders — produce v2 headers."""
     body_hash_hex = hashlib.sha256(body).hexdigest()
     plaintext = (
-        f"zerofox-attest:v2\n"
+        f"denbrowser-attest:v2\n"
         f"{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{body_hash_hex}"
     ).encode()
 
@@ -71,9 +71,9 @@ def _make_attest(pub_key, *, nonce_b64, ts, host, method, path, body):
     )
     token = base64.b64encode(ephem_pub_bytes + iv + ct_tag).decode()
     return {
-        "X-ZeroFox-Ts":    ts,
-        "X-ZeroFox-Nonce": nonce_b64,
-        "X-ZeroFox-Token": token,
+        "X-DenBrowser-Ts":    ts,
+        "X-DenBrowser-Nonce": nonce_b64,
+        "X-DenBrowser-Token": token,
     }
 
 
@@ -156,9 +156,9 @@ def _run(pub_key):
     # ── Missing headers ─────────────────────────────────────────────────────
     check("Missing all attestation headers",
           method="GET", path="/", body=None, headers={}, expect=403)
-    check("Missing X-ZeroFox-Nonce",
+    check("Missing X-DenBrowser-Nonce",
           method="GET", path="/", body=None,
-          headers={"X-ZeroFox-Ts": ts, "X-ZeroFox-Token": "AAAA"},
+          headers={"X-DenBrowser-Ts": ts, "X-DenBrowser-Token": "AAAA"},
           expect=403)
 
     # ── Stale timestamp ─────────────────────────────────────────────────────

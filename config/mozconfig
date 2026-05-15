@@ -1,13 +1,13 @@
-# mozconfig — ZeroFox build configuration
+# mozconfig — DenBrowser build configuration
 # Place this file at the root of the Firefox source before building,
 # or set MOZCONFIG env var pointing to this file.
 #
 # Usage: cp config/mozconfig <firefox-src>/.mozconfig
-#        OR: export MOZCONFIG=/path/to/ZeroFox/config/mozconfig
+#        OR: export MOZCONFIG=/path/to/DenBrowser/config/mozconfig
 
 # ── Application identity ──────────────────────────────────────────────────────
-export MOZ_APP_NAME=zerofox
-export MOZ_APP_DISPLAYNAME="ZeroFox"
+export MOZ_APP_NAME=denbrowser
+export MOZ_APP_DISPLAYNAME="DenBrowser"
 export MOZ_CRASHREPORTER_API_URL=
 export MOZILLA_OFFICIAL=1
 
@@ -26,7 +26,7 @@ case "$(uname -s)" in
 esac
 
 # Custom branding — text files created by patch 009, binary icons copied by build.sh
-ac_add_options --with-branding=browser/branding/zerofox
+ac_add_options --with-branding=browser/branding/denbrowser
 
 # ── Build type ────────────────────────────────────────────────────────────────
 ac_add_options --enable-optimize="-O2"
@@ -49,4 +49,4 @@ ac_add_options --disable-profiling
 # ac_add_options --with-macos-sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
-mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/../zerofox-obj
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/../denbrowser-obj

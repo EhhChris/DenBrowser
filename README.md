@@ -1,9 +1,9 @@
 > **Note:** This project and its scaffolding were built with AI assistance (Claude, Anthropic).
 > Review all generated code and patches carefully before use in production.
 
-# ZeroFox
+# DenBrowser
 
-A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. ZeroFox is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
+A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. DenBrowser is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
 
 **Currently only built and tested against FireFox ESR 140.9.1**
 
@@ -18,7 +18,7 @@ As this project progresses tags will be cut and attempt to follow the latest ESR
 
 ## Deployment requirements
 
-ZeroFox keeps page content out of Firefox's on-disk profile (PBM forced on,
+DenBrowser keeps page content out of Firefox's on-disk profile (PBM forced on,
 disk cache hard-disabled, downloads blocked, SanitizeOnShutdown locked).
 What it cannot control is the **operating system** writing process memory
 to disk underneath it. To close that gap, every deployment host must:
@@ -34,7 +34,7 @@ to disk underneath it. To close that gap, every deployment host must:
 
 These are operational controls, not build-time controls. The browser cannot
 enforce them; the deployment image must. See `patches/007-ramdisk-profile.patch`
-for the detailed analysis of why ZeroFox does not ship a RAM-disk profile.
+for the detailed analysis of why DenBrowser does not ship a RAM-disk profile.
 
 ## Quick start
 
@@ -54,7 +54,7 @@ cd ../..
 ## Project structure
 
 ```
-ZeroFox/
+DenBrowser/
 ├── build.sh                    # Full build orchestration
 ├── config/
 │   ├── mozconfig               # Firefox build flags & app identity
@@ -71,13 +71,13 @@ ZeroFox/
 │   ├── 006-enforce-vpn.patch
 │   ├── 007-ramdisk-profile.patch
 │   ├── 008-disable-devtools.patch
-│   ├── 009-zerofox-branding.patch
+│   ├── 009-denbrowser-branding.patch
 │   ├── 010-disable-diagnostics.patch
 │   └── 011-disable-extensions.patch
 ├── scripts/
 │   ├── fetch-esr.sh            # Download & verify latest Firefox ESR
 │   └── apply-patches.sh        # Apply patches with dry-run validation
-└── branding/                   # ZeroFox branding assets
+└── branding/                   # DenBrowser branding assets
 ```
 
 ---

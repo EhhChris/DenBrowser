@@ -46,7 +46,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 -    );
 -  },
 +  get dataSubmissionEnabled() {
-+    // ZeroFox: diagnostics and data submission permanently disabled.
++    // DenBrowser: diagnostics and data submission permanently disabled.
 +    return false;
 +  },
 
@@ -60,7 +60,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     *                   initialized. This is only used in tests.
     */
    setupTelemetry: function setupTelemetry(testing) {
-+    // ZeroFox: telemetry permanently disabled.
++    // DenBrowser: telemetry permanently disabled.
 +    return Promise.resolve();
      this._initStarted = true;
      this._shuttingDown = false;

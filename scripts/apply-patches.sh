@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# apply-patches.sh — Apply all ZeroFox patches to the Firefox ESR source tree
+# apply-patches.sh — Apply all DenBrowser patches to the Firefox ESR source tree
 # Usage: ./scripts/apply-patches.sh [--skip-patch N]...
 set -euo pipefail
 
@@ -82,15 +82,15 @@ echo "[apply-patches] Applied: $APPLIED  Skipped: $SKIPPED  Failed: $FAILED"
 [[ $FAILED -eq 0 ]] || exit 1
 
 # ── Windows branding binary assets ───────────────────────────────────────────
-# These binary files are required by browser/branding/zerofox/ on Windows builds.
-# Copied from nightly branding as placeholders; replace with custom ZeroFox
+# These binary files are required by browser/branding/denbrowser/ on Windows builds.
+# Copied from nightly branding as placeholders; replace with custom DenBrowser
 # artwork before distribution.
-ZEROFOX_BRANDING="$FIREFOX_SRC/browser/branding/zerofox"
+DENBROWSER_BRANDING="$FIREFOX_SRC/browser/branding/denbrowser"
 NIGHTLY_BRANDING="$FIREFOX_SRC/browser/branding/nightly"
 
 if [[ -d "$NIGHTLY_BRANDING" ]]; then
-    echo "[apply-patches] Copying branding binary assets to zerofox branding..."
-    mkdir -p "$ZEROFOX_BRANDING/stubinstaller" "$ZEROFOX_BRANDING/msix/Assets"
+    echo "[apply-patches] Copying branding binary assets to denbrowser branding..."
+    mkdir -p "$DENBROWSER_BRANDING/stubinstaller" "$DENBROWSER_BRANDING/msix/Assets"
     for asset in \
         VisualElements_150.png VisualElements_70.png \
         PrivateBrowsing_150.png PrivateBrowsing_70.png \
@@ -119,7 +119,7 @@ if [[ -d "$NIGHTLY_BRANDING" ]]; then
         stubinstaller/installing_page.css \
         stubinstaller/profile_cleanup_page.css; do
         if [[ -f "$NIGHTLY_BRANDING/$asset" ]]; then
-            cp "$NIGHTLY_BRANDING/$asset" "$ZEROFOX_BRANDING/$asset"
+            cp "$NIGHTLY_BRANDING/$asset" "$DENBROWSER_BRANDING/$asset"
             echo "[apply-patches]   Copied: $asset"
         else
             echo "[apply-patches]   WARNING: $asset not found in nightly branding" >&2

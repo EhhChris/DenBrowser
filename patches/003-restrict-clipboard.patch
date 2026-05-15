@@ -52,8 +52,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  already_AddRefed<Promise> Clipboard::ReadHelper(nsIPrincipal& aSubjectPrincipal,
                                                  ReadRequestType aType,
                                                  ErrorResult& aRv) {
-+  // ZeroFox: clipboard read access disabled.
-+  aRv.ThrowNotAllowedError("ZeroFox policy: clipboard access is disabled.");
++  // DenBrowser: clipboard read access disabled.
++  aRv.ThrowNotAllowedError("DenBrowser policy: clipboard access is disabled.");
 +  return nullptr;
    // Create a new promise
    nsGlobalWindowInner* owner = GetOwnerWindow();
@@ -61,8 +61,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  already_AddRefed<Promise> Clipboard::Write(
      const Sequence<OwningNonNull<ClipboardItem>>& aData,
      nsIPrincipal& aSubjectPrincipal, ErrorResult& aRv) {
-+  // ZeroFox: clipboard write access disabled.
-+  aRv.ThrowNotAllowedError("ZeroFox policy: clipboard access is disabled.");
++  // DenBrowser: clipboard write access disabled.
++  aRv.ThrowNotAllowedError("DenBrowser policy: clipboard access is disabled.");
 +  return nullptr;
    // Create a promise
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
@@ -72,7 +72,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    BrowsingContext* bc = piWindow->GetBrowsingContext();
    const bool chromeShell = bc && bc->IsChrome();
 
-+  // ZeroFox: block clipboard cut/copy for all content including browser UI.
++  // DenBrowser: block clipboard cut/copy for all content including browser UI.
 +  if (originalEventMessage == eCopy || originalEventMessage == eCut) {
 +    return false;
 +  }
@@ -88,7 +88,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      return false;
    }
 
-+  // ZeroFox: block clipboard commands from web content.
++  // DenBrowser: block clipboard commands from web content.
 +  if (aHTMLCommandName.LowerCaseEqualsLiteral("cut") ||
 +      aHTMLCommandName.LowerCaseEqualsLiteral("copy") ||
 +      aHTMLCommandName.LowerCaseEqualsLiteral("paste")) {
@@ -105,7 +105,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      // Reject existing pending asyncSetData request if any.
      RejectPendingAsyncSetDataRequestIfAny(aWhichClipboard);
 -    rv = SetNativeClipboardData(aTransferable, aWhichClipboard);
-+    // ZeroFox: suppress all clipboard writes to the OS clipboard.
++    // DenBrowser: suppress all clipboard writes to the OS clipboard.
 +    rv = NS_OK;
      mIgnoreEmptyNotification = false;
    }
@@ -114,7 +114,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 @@ -322,5 +322,7 @@
    // stash the document of the dom node
    mSourceDocument = aDOMNode->OwnerDoc();
-+  // ZeroFox: block all drag-and-drop to prevent text exfiltration (incl. URL bar).
++  // DenBrowser: block all drag-and-drop to prevent text exfiltration (incl. URL bar).
 +  return NS_ERROR_ABORT;
    mTriggeringPrincipal = aPrincipal;
    mCsp = aCsp;

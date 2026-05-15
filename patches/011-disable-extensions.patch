@@ -42,7 +42,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
 @@ -2618,4 +2618,8 @@
      for (let [constructor, name, scope, ...args] of locations) {
-+      // ZeroFox: only register application-scoped (built-in) addon locations.
++      // DenBrowser: only register application-scoped (built-in) addon locations.
 +      if (scope !== AddonManager.SCOPE_APPLICATION) {
 +        continue;
 +      }
@@ -55,8 +55,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     * @throws if installation cannot proceed from the current state
     */
    install() {
-+    // ZeroFox: extension installation permanently disabled.
-+    throw new Error("ZeroFox policy: extension installation is disabled.");
++    // DenBrowser: extension installation permanently disabled.
++    throw new Error("DenBrowser policy: extension installation is disabled.");
      switch (this.state) {
        case AddonManager.STATE_DOWNLOADED:
          this.checkPrompt();

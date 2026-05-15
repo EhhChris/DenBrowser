@@ -5,8 +5,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # PATCH: 006-attest-requests  (v2 — nonce + body binding)
 #
 # PURPOSE: Attach a per-request ECIES attestation token to every outbound
-#          HTTP(S) request so that the ZeroFox proxy (Pingora-based; see
-#          proxy/) can verify that traffic originated from a genuine ZeroFox
+#          HTTP(S) request so that the DenBrowser proxy (Pingora-based; see
+#          proxy/) can verify that traffic originated from a genuine DenBrowser
 #          browser build, *and* that the captured headers cannot be replayed
 #          to issue a different request from curl.
 #
@@ -15,7 +15,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   Proxy holds:    ECDSA P-256 private key  (long-lived, rotate on breach)
 #   Browser embeds: matching SPKI public key (new one per browser build)
 #
-#   For each new ZeroFox release:
+#   For each new DenBrowser release:
 #     1. Run  scripts/gen-attest-key.sh  to generate a fresh keypair.
 #     2. Add the new public key bytes to kProxyPublicKeyDer[] and rebuild.
 #     3. Deploy the new private key to the proxy (proxy/build/proxy-private.pem).
@@ -29,7 +29,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # WHY THIS DOES NOT AFFECT PKI / OAUTH:
 #   These headers are an independent application-layer channel added on top
 #   of TLS.  TLS handshakes, certificate verification, and all OAuth flows
-#   are completely untouched.  The proxy strips X-ZeroFox-* after verification;
+#   are completely untouched.  The proxy strips X-DenBrowser-* after verification;
 #   downstream servers never see them.
 #
 # CRYPTOGRAPHIC PROTOCOL (ECIES — Elliptic-Curve Integrated Encryption):
@@ -43,18 +43,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #     5. Generate random 16-byte nonce  N.
 #     6. Compute  body_hash = sha256(request_body)  in lowercase hex.
 #     7. Build the canonical plaintext:
-#          "zerofox-attest:v2\n<base64(N)>\n<ts>\n<host>\n<method>\n<path>\n<body_hash>"
+#          "denbrowser-attest:v2\n<base64(N)>\n<ts>\n<host>\n<method>\n<path>\n<body_hash>"
 #     8. AES-128-GCM-Encrypt(K_enc, IV, plaintext) → ciphertext || 16-byte tag.
 #     9. token = base64( ephem_pub(65) || IV(12) || ciphertext_and_tag )
 #
 #   Headers added:
-#     X-ZeroFox-Ts:    Unix timestamp, whole seconds.
-#     X-ZeroFox-Nonce: base64 of the 16-byte nonce.
-#     X-ZeroFox-Token: base64 of the encrypted blob (above).
+#     X-DenBrowser-Ts:    Unix timestamp, whole seconds.
+#     X-DenBrowser-Nonce: base64 of the 16-byte nonce.
+#     X-DenBrowser-Token: base64 of the encrypted blob (above).
 #
 #   Proxy verification (Rust, see proxy/src/attest.rs):
-#     1. Read X-ZeroFox-Ts; reject (403) if |now – ts| > 30 s.
-#     2. Decode X-ZeroFox-Nonce; reject if length ≠ 16 bytes.
+#     1. Read X-DenBrowser-Ts; reject (403) if |now – ts| > 30 s.
+#     2. Decode X-DenBrowser-Nonce; reject if length ≠ 16 bytes.
 #     3. Peek the per-nonce replay cache; reject (403) if already present.
 #     4. Decode token, ECDH + KDF, AES-128-GCM decrypt.
 #     5. Compare every plaintext field (prefix, nonce, ts, host, method, path)
@@ -90,28 +90,28 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   eliminates entirely once either request lands.
 #
 # FILES ADDED:
-#   netwerk/base/ZeroFoxAttest.h
-#   netwerk/base/ZeroFoxAttest.cpp
+#   netwerk/base/DenBrowserAttest.h
+#   netwerk/base/DenBrowserAttest.cpp
 #
 # FILES MODIFIED:
 #   netwerk/protocol/http/nsHttpChannel.cpp
-#       — include ZeroFoxAttest.h, call zerofox::AddAttestHeaders() at
+#       — include DenBrowserAttest.h, call denbrowser::AddAttestHeaders() at
 #         end of SetupChannelForTransaction() before return NS_OK,
 #         passing mUploadStream so the body can be hashed.
 #   netwerk/base/moz.build
-#       — add ZeroFoxAttest.cpp to UNIFIED_SOURCES.
+#       — add DenBrowserAttest.cpp to UNIFIED_SOURCES.
 
-diff --git a/netwerk/base/ZeroFoxAttest.h b/netwerk/base/ZeroFoxAttest.h
+diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
 new file mode 100644
 --- /dev/null
-+++ b/netwerk/base/ZeroFoxAttest.h
++++ b/netwerk/base/DenBrowserAttest.h
 @@ -0,0 +1,55 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 +
-+#ifndef ZeroFoxAttest_h__
-+#define ZeroFoxAttest_h__
++#ifndef DenBrowserAttest_h__
++#define DenBrowserAttest_h__
 +
 +#include "nscore.h"
 +
@@ -121,10 +121,10 @@ new file mode 100644
 +class nsHttpRequestHead;
 +}
 +
-+namespace zerofox {
++namespace denbrowser {
 +
 +/**
-+ * AddAttestHeaders — inject X-ZeroFox-Ts, X-ZeroFox-Nonce, and X-ZeroFox-Token
++ * AddAttestHeaders — inject X-DenBrowser-Ts, X-DenBrowser-Nonce, and X-DenBrowser-Token
 + * into aHead for every outbound HTTP/HTTPS request.
 + *
 + * Called from nsHttpChannel::SetupChannelForTransaction().  The token is an
@@ -138,11 +138,11 @@ new file mode 100644
 + * Protocol:  ECIES with EC P-256, ANSI X9.63 KDF (SHA-256), AES-128-GCM.
 + *
 + * Canonical plaintext (v2):
-+ *   "zerofox-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
++ *   "denbrowser-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
 + *
 + * Key model:
 + *   - The attestation proxy holds the EC P-256 private key.
-+ *   - Each ZeroFox build embeds only the matching SPKI public key.
++ *   - Each DenBrowser build embeds only the matching SPKI public key.
 + *   - A new keypair per browser release lets the proxy invalidate old builds
 + *     by rotating its private key or removing the old public key from its
 + *     allowlist.
@@ -158,31 +158,31 @@ new file mode 100644
 +nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
 +                          nsIInputStream* aUploadStream);
 +
-+}  // namespace zerofox
++}  // namespace denbrowser
 +
-+#endif  // ZeroFoxAttest_h__
++#endif  // DenBrowserAttest_h__
 
-diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
+diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
 new file mode 100644
 --- /dev/null
-+++ b/netwerk/base/ZeroFoxAttest.cpp
++++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -0,0 +1,366 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 +
-+// ZeroFox per-request ECIES attestation header injector — v2 protocol.
++// DenBrowser per-request ECIES attestation header injector — v2 protocol.
 +//
 +// Adds three HTTP headers to every outbound HTTP/HTTPS request:
 +//
-+//   X-ZeroFox-Ts:    current Unix timestamp (seconds, decimal string).
-+//   X-ZeroFox-Nonce: base64( 16 random bytes ), fresh per request.
-+//   X-ZeroFox-Token: base64( ephem_pub(65) || IV(12) || AES-128-GCM-ct ).
++//   X-DenBrowser-Ts:    current Unix timestamp (seconds, decimal string).
++//   X-DenBrowser-Nonce: base64( 16 random bytes ), fresh per request.
++//   X-DenBrowser-Token: base64( ephem_pub(65) || IV(12) || AES-128-GCM-ct ).
 +//
 +// The ciphertext decrypts to a canonical plaintext that binds the request
 +// to its method, host, path, and body hash:
 +//
-+//   "zerofox-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
++//   "denbrowser-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
 +//
 +// Replaying the captured (Ts, Nonce, Token) triple in a different request
 +// now fails because:
@@ -193,7 +193,7 @@ new file mode 100644
 +// The proxy private key never appears in this file or the browser binary;
 +// only the proxy public key (kProxyPublicKeyDer) is embedded.
 +
-+#include "ZeroFoxAttest.h"
++#include "DenBrowserAttest.h"
 +
 +#include "keyhi.h"
 +#include "mozilla/Base64.h"
@@ -215,7 +215,7 @@ new file mode 100644
 +#include "secasn1.h"
 +#include "secitem.h"
 +
-+namespace zerofox {
++namespace denbrowser {
 +
 +using mozilla::UniqueCERTSubjectPublicKeyInfo;
 +using mozilla::UniquePK11SlotInfo;
@@ -223,11 +223,11 @@ new file mode 100644
 +using mozilla::UniqueSECKEYPrivateKey;
 +using mozilla::UniqueSECKEYPublicKey;
 +
-+static mozilla::LazyLogModule sLog("ZeroFoxAttest");
++static mozilla::LazyLogModule sLog("DenBrowserAttest");
 +
 +// ── Proxy public key ──────────────────────────────────────────────────────────
 +//
-+// SubjectPublicKeyInfo DER-encoded EC P-256 public key from the ZeroFox
++// SubjectPublicKeyInfo DER-encoded EC P-256 public key from the DenBrowser
 +// attestation proxy (Pingora-based; see proxy/).
 +//
 +// PLACEHOLDER: all bytes 0x00.  Attestation is DISABLED until replaced.
@@ -285,10 +285,10 @@ new file mode 100644
 +
 +  if (KeyIsPlaceholder()) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Warning,
-+            ("ZeroFoxAttest: public key is the all-zeros placeholder — "
++            ("DenBrowserAttest: public key is the all-zeros placeholder — "
 +             "request attestation is DISABLED.  Run "
 +             "scripts/gen-attest-key.sh, replace kProxyPublicKeyDer[] in "
-+             "netwerk/base/ZeroFoxAttest.cpp, and rebuild."));
++             "netwerk/base/DenBrowserAttest.cpp, and rebuild."));
 +    return nullptr;
 +  }
 +
@@ -299,7 +299,7 @@ new file mode 100644
 +      SECKEY_DecodeDERSubjectPublicKeyInfo(&spkiItem));
 +  if (!spki) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: SECKEY_DecodeDERSubjectPublicKeyInfo failed "
++            ("DenBrowserAttest: SECKEY_DecodeDERSubjectPublicKeyInfo failed "
 +             "(bad DER bytes?)."));
 +    return nullptr;
 +  }
@@ -307,7 +307,7 @@ new file mode 100644
 +  SECKEYPublicKey* key = SECKEY_ExtractPublicKey(spki.get());
 +  if (!key) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: SECKEY_ExtractPublicKey failed."));
++            ("DenBrowserAttest: SECKEY_ExtractPublicKey failed."));
 +    return nullptr;
 +  }
 +
@@ -342,7 +342,7 @@ new file mode 100644
 +      }
 +    } else {
 +      MOZ_LOG(sLog, mozilla::LogLevel::Warning,
-+              ("ZeroFoxAttest: upload stream is not cloneable; body hash "
++              ("DenBrowserAttest: upload stream is not cloneable; body hash "
 +               "will be sha256(\"\") and the proxy will reject."));
 +    }
 +  }
@@ -402,7 +402,7 @@ new file mode 100644
 +  uint8_t nonceBytes[16];
 +  if (PK11_GenerateRandom(nonceBytes, sizeof(nonceBytes)) != SECSuccess) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: PK11_GenerateRandom (nonce) failed."));
++            ("DenBrowserAttest: PK11_GenerateRandom (nonce) failed."));
 +    return NS_OK;
 +  }
 +  nsAutoCString nonceB64;
@@ -418,7 +418,7 @@ new file mode 100644
 +
 +  // ── 7. Canonical plaintext ───────────────────────────────────────────────
 +  nsAutoCString plaintext;
-+  plaintext.AppendLiteral("zerofox-attest:v2\n");
++  plaintext.AppendLiteral("denbrowser-attest:v2\n");
 +  plaintext.Append(nonceB64);
 +  plaintext.Append('\n');
 +  plaintext.Append(tsStr);
@@ -435,7 +435,7 @@ new file mode 100644
 +  UniquePK11SlotInfo slot(PK11_GetInternalSlot());
 +  if (!slot) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: PK11_GetInternalSlot failed."));
++            ("DenBrowserAttest: PK11_GetInternalSlot failed."));
 +    return NS_OK;
 +  }
 +
@@ -449,7 +449,7 @@ new file mode 100644
 +
 +  if (!ephemPriv || !ephemPub) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: PK11_GenerateKeyPair failed."));
++            ("DenBrowserAttest: PK11_GenerateKeyPair failed."));
 +    return NS_OK;
 +  }
 +
@@ -467,7 +467,7 @@ new file mode 100644
 +
 +  if (!aesKey) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: ECDH/KDF failed."));
++            ("DenBrowserAttest: ECDH/KDF failed."));
 +    return NS_OK;
 +  }
 +
@@ -475,7 +475,7 @@ new file mode 100644
 +  uint8_t iv[12];
 +  if (PK11_GenerateRandom(iv, sizeof(iv)) != SECSuccess) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: PK11_GenerateRandom (iv) failed."));
++            ("DenBrowserAttest: PK11_GenerateRandom (iv) failed."));
 +    return NS_OK;
 +  }
 +
@@ -502,7 +502,7 @@ new file mode 100644
 +
 +  if (rv != SECSuccess) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: AES-128-GCM encrypt failed."));
++            ("DenBrowserAttest: AES-128-GCM encrypt failed."));
 +    return NS_OK;
 +  }
 +
@@ -525,14 +525,14 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  mozilla::Unused << aHead.SetHeader("X-ZeroFox-Ts"_ns, tsStr, false);
-+  mozilla::Unused << aHead.SetHeader("X-ZeroFox-Nonce"_ns, nonceB64, false);
-+  mozilla::Unused << aHead.SetHeader("X-ZeroFox-Token"_ns, tokenB64, false);
++  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Ts"_ns, tsStr, false);
++  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Nonce"_ns, nonceB64, false);
++  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Token"_ns, tokenB64, false);
 +
 +  return NS_OK;
 +}
 +
-+}  // namespace zerofox
++}  // namespace denbrowser
 
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
@@ -541,7 +541,7 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
  // HttpLog.h should generally be included first
  #include "HttpLog.h"
  
-+#include "ZeroFoxAttest.h"
++#include "DenBrowserAttest.h"
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
@@ -550,12 +550,12 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }
  
-+  // ZeroFox: attach per-request ECIES attestation headers (X-ZeroFox-Ts,
-+  // X-ZeroFox-Nonce, X-ZeroFox-Token).  The token's plaintext binds the
++  // DenBrowser: attach per-request ECIES attestation headers (X-DenBrowser-Ts,
++  // X-DenBrowser-Nonce, X-DenBrowser-Token).  The token's plaintext binds the
 +  // request's method/host/path/body hash so a captured triple cannot be
 +  // replayed for a different request, and the proxy maintains a per-nonce
 +  // replay cache to also reject re-use of the exact same triple.
-+  zerofox::AddAttestHeaders(mRequestHead, mURI, mUploadStream);
++  denbrowser::AddAttestHeaders(mRequestHead, mURI, mUploadStream);
 +
    return NS_OK;
  }
@@ -568,5 +568,5 @@ diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
      "Tickler.cpp",
      "TLSServerSocket.cpp",
      "TRRLoadInfo.cpp",
-+    "ZeroFoxAttest.cpp",
++    "DenBrowserAttest.cpp",
  ]

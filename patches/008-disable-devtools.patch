@@ -33,21 +33,21 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     */
    isDisabledByPolicy() {
 -    return Services.prefs.getBoolPref(DEVTOOLS_POLICY_DISABLED_PREF, false);
-+    return true; // ZeroFox: developer tools permanently disabled.
++    return true; // DenBrowser: developer tools permanently disabled.
    },
 --- a/devtools/startup/DevToolsStartup.sys.mjs
 +++ b/devtools/startup/DevToolsStartup.sys.mjs
 @@ -348,3 +348,3 @@
    isDisabledByPolicy() {
 -    return Services.prefs.getBoolPref(DEVTOOLS_POLICY_DISABLED_PREF, false);
-+    return true; // ZeroFox: developer tools permanently disabled.
++    return true; // DenBrowser: developer tools permanently disabled.
    },
 @@ -683,6 +683,9 @@
    },
 
    onMoreToolsViewShowing(moreToolsView) {
 +    if (this.isDisabledByPolicy()) {
-+      return; // ZeroFox: developer tools permanently disabled.
++      return; // DenBrowser: developer tools permanently disabled.
 +    }
      this.addDevToolsItemsToSubview(moreToolsView);
    },

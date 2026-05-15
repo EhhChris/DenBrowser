@@ -5,10 +5,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # PATCH: 012-pin-proxy-tls
 #
 # PURPOSE: Pin the attestation proxy's TLS SubjectPublicKeyInfo (SPKI) into
-#          the ZeroFox build.  When the browser opens a TLS connection to
+#          the DenBrowser build.  When the browser opens a TLS connection to
 #          the configured proxy host, the leaf cert's SPKI sha256 must
 #          match a build-time constant — otherwise the handshake is aborted
-#          before any X-ZeroFox-* attestation header is sent.
+#          before any X-DenBrowser-* attestation header is sent.
 #
 # THREAT MODEL ADDRESSED:
 #
@@ -44,7 +44,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #           --key  /path/to/server.key
 #
 #   The script extracts sha256(SPKI) from the cert and patches both
-#   constants between the REPLACE TLS PIN markers in ZeroFoxAttest.cpp.
+#   constants between the REPLACE TLS PIN markers in DenBrowserAttest.cpp.
 #
 # INTEGRATION POINT:
 #
@@ -56,16 +56,16 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # ROTATION:
 #
-#   Rotating the proxy's TLS cert requires rebuilding ZeroFox with the new
+#   Rotating the proxy's TLS cert requires rebuilding DenBrowser with the new
 #   pin.  This is intentional — the pin binds the browser binary to a
 #   specific server identity, the way HPKP would for a website.  Operators
-#   should plan rotations alongside ZeroFox release cycles.
+#   should plan rotations alongside DenBrowser release cycles.
 
-diff --git a/netwerk/base/ZeroFoxAttest.h b/netwerk/base/ZeroFoxAttest.h
---- a/netwerk/base/ZeroFoxAttest.h
-+++ b/netwerk/base/ZeroFoxAttest.h
+diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
+--- a/netwerk/base/DenBrowserAttest.h
++++ b/netwerk/base/DenBrowserAttest.h
 @@ -6,6 +6,8 @@
- #define ZeroFoxAttest_h__
+ #define DenBrowserAttest_h__
  
  #include "nscore.h"
 +#include "mozilla/Span.h"
@@ -97,15 +97,15 @@ diff --git a/netwerk/base/ZeroFoxAttest.h b/netwerk/base/ZeroFoxAttest.h
 +bool VerifyProxyPin(const nsACString& aHost,
 +                    mozilla::Span<const uint8_t> aLeafCertDer);
 +
- }  // namespace zerofox
+ }  // namespace denbrowser
  
- #endif  // ZeroFoxAttest_h__
-diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
---- a/netwerk/base/ZeroFoxAttest.cpp
-+++ b/netwerk/base/ZeroFoxAttest.cpp
+ #endif  // DenBrowserAttest_h__
+diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
+--- a/netwerk/base/DenBrowserAttest.cpp
++++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -26,6 +26,8 @@
  
- #include "ZeroFoxAttest.h"
+ #include "DenBrowserAttest.h"
  
 +#include "cert.h"
 +#include "certt.h"
@@ -118,7 +118,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
  
 +#include <cstring>
 +
- namespace zerofox {
+ namespace denbrowser {
  
  using mozilla::UniqueCERTSubjectPublicKeyInfo;
 @@ -94,6 +98,25 @@
@@ -148,7 +148,7 @@ diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
  // ── P-256 curve params for ephemeral keygen ───────────────────────────────────
  // DER encoding of OID prime256v1 (1.2.840.10045.3.1.7):
 @@ -361,6 +384,68 @@
-   mozilla::Unused << aHead.SetHeader("X-ZeroFox-Token"_ns, tokenB64, false);
+   mozilla::Unused << aHead.SetHeader("X-DenBrowser-Token"_ns, tokenB64, false);
  
    return NS_OK;
 +}
@@ -201,21 +201,21 @@ diff --git a/netwerk/base/ZeroFoxAttest.cpp b/netwerk/base/ZeroFoxAttest.cpp
 +  uint8_t hash[32];
 +  if (NS_FAILED(Sha256OfLeafSpki(aLeafCertDer, hash))) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: SPKI hashing failed for host=%s — pin REJECT.",
++            ("DenBrowserAttest: SPKI hashing failed for host=%s — pin REJECT.",
 +             nsPromiseFlatCString(aHost).get()));
 +    return false;  // fail-closed
 +  }
 +
 +  if (std::memcmp(hash, kProxySpkiSha256, sizeof(hash)) != 0) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("ZeroFoxAttest: SPKI pin MISMATCH for host=%s — aborting TLS.",
++            ("DenBrowserAttest: SPKI pin MISMATCH for host=%s — aborting TLS.",
 +             nsPromiseFlatCString(aHost).get()));
 +    return false;
 +  }
 +  return true;
 +}
 +
- }  // namespace zerofox
+ }  // namespace denbrowser
 diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
 --- a/netwerk/base/moz.build
 +++ b/netwerk/base/moz.build
@@ -223,7 +223,7 @@ diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
      "nsURLHelper.h",
      "nsURLParsers.h",
      "SimpleChannel.h",
-+    "ZeroFoxAttest.h",
++    "DenBrowserAttest.h",
  ]
  
  EXPORTS.mozilla += [
@@ -234,7 +234,7 @@ diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manag
  #include "ScopedNSSTypes.h"
  #include "SharedCertVerifier.h"
  #include "VerifySSLServerCertChild.h"
-+#include "ZeroFoxAttest.h"  // zerofox::VerifyProxyPin
++#include "DenBrowserAttest.h"  // denbrowser::VerifyProxyPin
  #include "cert.h"
  #include "mozilla/Assertions.h"
  #include "mozilla/Casting.h"
@@ -242,19 +242,19 @@ diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manag
    nsTArray<nsTArray<uint8_t>> peerCertsBytes =
        CreateCertBytesArray(peerCertChain);
  
-+  // ── ZeroFox proxy SPKI pin ──────────────────────────────────────────────
++  // ── DenBrowser proxy SPKI pin ──────────────────────────────────────────────
 +  // Reject the handshake before any application data flows if the
 +  // hostname matches our configured attestation-proxy host AND the leaf
 +  // cert's SPKI does not match the build-time pin.  Inert for any other
 +  // host and for unconfigured builds (kProxyHost empty / hash all-zero).
 +  // Prevents a co-resident attacker on this machine from MitMing the
-+  // proxy hop and harvesting X-ZeroFox-* attestation headers in cleartext.
++  // proxy hop and harvesting X-DenBrowser-* attestation headers in cleartext.
 +  if (!peerCertsBytes.IsEmpty() &&
-+      !zerofox::VerifyProxyPin(
++      !denbrowser::VerifyProxyPin(
 +          socketInfo->GetHostName(),
 +          mozilla::Span<const uint8_t>(peerCertsBytes[0]))) {
 +    MOZ_LOG(gPIPNSSLog, LogLevel::Error,
-+            ("[%p] ZeroFox proxy pin failed; aborting handshake\n", fd));
++            ("[%p] DenBrowser proxy pin failed; aborting handshake\n", fd));
 +    PR_SetError(SSL_ERROR_BAD_CERTIFICATE, 0);
 +    return SECFailure;
 +  }

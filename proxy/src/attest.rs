@@ -18,7 +18,7 @@ const HEX_HASH_LEN: usize = 64;
 // ephem_pub(65) + IV(12) + plaintext(≥1) + GCM-tag(16)
 const TOKEN_MIN_LEN: usize = 94;
 
-const PLAINTEXT_PREFIX: &[u8] = b"zerofox-attest:v2";
+const PLAINTEXT_PREFIX: &[u8] = b"denbrowser-attest:v2";
 
 /// Header values + URL fields the verifier compares against the decrypted
 /// plaintext.  The body is handled separately by `verify_body_and_commit`
@@ -58,11 +58,11 @@ pub enum AttestError {
 impl std::fmt::Display for AttestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BadTimestamp => write!(f, "X-ZeroFox-Ts is not a valid integer"),
+            Self::BadTimestamp => write!(f, "X-DenBrowser-Ts is not a valid integer"),
             Self::TimestampDrift(d) => {
                 write!(f, "timestamp drift {d}s exceeds {MAX_TS_DRIFT_SECS}s window")
             }
-            Self::InvalidNonce(r) => write!(f, "invalid X-ZeroFox-Nonce: {r}"),
+            Self::InvalidNonce(r) => write!(f, "invalid X-DenBrowser-Nonce: {r}"),
             Self::NonceReplay => write!(f, "nonce already seen — replay rejected"),
             Self::InvalidToken(r) => write!(f, "invalid token: {r}"),
             Self::DecryptFailed => write!(f, "AES-128-GCM authentication failed"),
@@ -227,7 +227,7 @@ mod tests {
         h.finalize().into()
     }
 
-    /// Mirrors ZeroFoxAttest.cpp::AddAttestHeaders — produces a v2 token.
+    /// Mirrors DenBrowserAttest.cpp::AddAttestHeaders — produces a v2 token.
     fn make_token(
         proxy_pub: &PublicKey,
         nonce_b64: &str,
@@ -249,7 +249,7 @@ mod tests {
 
         let iv = [0u8; 12]; // fixed IV is fine for unit tests
         let plaintext = format!(
-            "zerofox-attest:v2\n{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{}",
+            "denbrowser-attest:v2\n{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{}",
             sha256_hex(body)
         );
         let cipher = Aes128Gcm::new_from_slice(aes_key).unwrap();

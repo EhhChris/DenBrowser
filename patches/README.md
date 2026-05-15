@@ -1,7 +1,7 @@
 > **Note:** This project and its scaffolding were built with AI assistance (Claude, Anthropic).
 > Review all generated code and patches carefully before use in production.
 
-# ZeroFox Patch Development Guide
+# DenBrowser Patch Development Guide
 
 ## Workflow
 

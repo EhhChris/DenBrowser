@@ -552,6 +552,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "denbrowser-proxy"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "clap",
+ "env_logger",
+ "http",
+ "log",
+ "p256",
+ "pingora-core",
+ "pingora-http",
+ "pingora-proxy",
+ "rand_core 0.6.4",
+ "sha2",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2626,27 +2647,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "zerofox-proxy"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "async-trait",
- "base64",
- "bytes",
- "clap",
- "env_logger",
- "http",
- "log",
- "p256",
- "pingora-core",
- "pingora-http",
- "pingora-proxy",
- "rand_core 0.6.4",
- "sha2",
 ]
 
 [[package]]

@@ -21,40 +21,40 @@ use attest::{AttestInputs, PhaseOne, Verifier};
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Parser, Debug)]
-#[command(about = "ZeroFox attestation proxy — verifies ECIES tokens, strips headers, forwards")]
+#[command(about = "DenBrowser attestation proxy — verifies ECIES tokens, strips headers, forwards")]
 struct Args {
     /// Address to listen on
-    #[arg(long, env = "ZEROFOX_LISTEN", default_value = "0.0.0.0:8081")]
+    #[arg(long, env = "DENBROWSER_LISTEN", default_value = "0.0.0.0:8081")]
     listen: String,
 
     /// Upstream address to forward verified requests to (host:port)
-    #[arg(long, env = "ZEROFOX_UPSTREAM")]
+    #[arg(long, env = "DENBROWSER_UPSTREAM")]
     upstream: String,
 
     /// Path to the EC P-256 attestation private key PEM file.
     /// (Separate from the TLS server key below — this one decrypts
     /// per-request attestation tokens.)
-    #[arg(long, env = "ZEROFOX_KEY", default_value = "../build/proxy-private.pem")]
+    #[arg(long, env = "DENBROWSER_KEY", default_value = "../build/proxy-private.pem")]
     key: String,
 
     /// Path to the TLS server certificate (PEM).  The browser pins this
-    /// cert's SPKI; rotating the cert requires rebuilding ZeroFox with
+    /// cert's SPKI; rotating the cert requires rebuilding DenBrowser with
     /// the new pin.
-    #[arg(long, env = "ZEROFOX_TLS_CERT", default_value = "../build/proxy-tls.crt")]
+    #[arg(long, env = "DENBROWSER_TLS_CERT", default_value = "../build/proxy-tls.crt")]
     cert: String,
 
     /// Path to the TLS server private key (PEM).
-    #[arg(long, env = "ZEROFOX_TLS_KEY", default_value = "../build/proxy-tls.key")]
+    #[arg(long, env = "DENBROWSER_TLS_KEY", default_value = "../build/proxy-tls.key")]
     tls_key: String,
 }
 
-struct ZeroFoxProxy {
+struct DenBrowserProxy {
     verifier: Arc<Verifier>,
     upstream_host: String,
     upstream_port: u16,
 }
 
-impl ZeroFoxProxy {
+impl DenBrowserProxy {
     fn new(verifier: Verifier, upstream: &str) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
@@ -80,7 +80,7 @@ pub struct ProxyCtx {
 }
 
 #[async_trait]
-impl ProxyHttp for ZeroFoxProxy {
+impl ProxyHttp for DenBrowserProxy {
     type CTX = ProxyCtx;
 
     fn new_ctx(&self) -> Self::CTX {
@@ -109,9 +109,9 @@ impl ProxyHttp for ZeroFoxProxy {
     ) -> Result<bool> {
         let req = session.req_header();
 
-        let ts = header_str(&req.headers, "x-zerofox-ts");
-        let nonce = header_str(&req.headers, "x-zerofox-nonce");
-        let token = header_str(&req.headers, "x-zerofox-token");
+        let ts = header_str(&req.headers, "x-denbrowser-ts");
+        let nonce = header_str(&req.headers, "x-denbrowser-nonce");
+        let token = header_str(&req.headers, "x-denbrowser-token");
         let host = header_str(&req.headers, "host")
             .map(|h| h.split(':').next().unwrap_or(&h).to_owned());
 
@@ -221,9 +221,9 @@ impl ProxyHttp for ZeroFoxProxy {
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
-        upstream_request.remove_header("x-zerofox-ts");
-        upstream_request.remove_header("x-zerofox-nonce");
-        upstream_request.remove_header("x-zerofox-token");
+        upstream_request.remove_header("x-denbrowser-ts");
+        upstream_request.remove_header("x-denbrowser-nonce");
+        upstream_request.remove_header("x-denbrowser-token");
         Ok(())
     }
 }
@@ -241,7 +241,7 @@ fn main() {
     let verifier = Verifier::from_pem(&pem)
         .unwrap_or_else(|e| panic!("cannot parse key {}: {}", args.key, e));
     let proxy =
-        ZeroFoxProxy::new(verifier, &args.upstream).unwrap_or_else(|e| panic!("{e}"));
+        DenBrowserProxy::new(verifier, &args.upstream).unwrap_or_else(|e| panic!("{e}"));
 
     let mut server = Server::new(None).expect("Pingora server init failed");
     server.bootstrap();
@@ -249,7 +249,7 @@ fn main() {
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
     // TLS-only listener.  Browsers verify the SPKI of `args.cert` matches
-    // a pin baked into the build (see ZeroFoxAttest.cpp::kProxySpkiSha256),
+    // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
     let tls = TlsSettings::intermediate(&args.cert, &args.tls_key)

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# gen-attest-key.sh — Generate the ZeroFox browser-attestation keypair.
+# gen-attest-key.sh — Generate the DenBrowser browser-attestation keypair.
 #
 # Key model:
 #   Private key  → stays on the proxy (copy to your gateway config)
-#   Public key   → embedded in the ZeroFox browser build (not secret)
+#   Public key   → embedded in the DenBrowser browser build (not secret)
 #
 # Usage:  ./scripts/gen-attest-key.sh
 #
@@ -13,9 +13,9 @@
 #   build/proxy-public.der   — public key in DER form (bytes for the patch)
 #
 # The public key bytes are also patched directly into kHapPublicKeyDer[]
-# in netwerk/base/ZeroFoxAttest.cpp so the next Firefox build includes them.
+# in netwerk/base/DenBrowserAttest.cpp so the next Firefox build includes them.
 #
-# Workflow for each new ZeroFox release:
+# Workflow for each new DenBrowser release:
 #   1. Run this script.
 #   2. Rebuild Firefox (public key is now baked in).
 #   3. Copy build/proxy-private.pem to the proxy and reload.
@@ -35,10 +35,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build"
 
-# Locate ZeroFoxAttest.cpp inside the unpacked Firefox source tree.
+# Locate DenBrowserAttest.cpp inside the unpacked Firefox source tree.
 if [[ -f "$ROOT_DIR/src/.esr_version" ]]; then
     ESR_VER=$(cat "$ROOT_DIR/src/.esr_version" | sed 's/esr//')
-    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/ZeroFoxAttest.cpp"
+    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/DenBrowserAttest.cpp"
 else
     ATTEST_CPP=""
 fi
@@ -65,9 +65,9 @@ KEY_BYTES=$(xxd -i "$BUILD_DIR/proxy-public.der" \
             | grep -v '^unsigned\|^};' \
             | sed 's/^  /  /')
 
-# ── 4. Patch ZeroFoxAttest.cpp (if the source tree is available) ─────────────
+# ── 4. Patch DenBrowserAttest.cpp (if the source tree is available) ─────────────
 if [[ -n "$ATTEST_CPP" && -f "$ATTEST_CPP" ]]; then
-    echo "[gen-attest-key] Patching kHapPublicKeyDer[] in ZeroFoxAttest.cpp..."
+    echo "[gen-attest-key] Patching kHapPublicKeyDer[] in DenBrowserAttest.cpp..."
     python3 - "$ATTEST_CPP" "$KEY_BYTES" <<'PYEOF'
 import sys, re
 
@@ -97,7 +97,7 @@ PYEOF
 else
     echo "[gen-attest-key] Source tree not found; printing bytes for manual paste:"
     echo ""
-    echo "  Replace kHapPublicKeyDer[] in netwerk/base/ZeroFoxAttest.cpp with:"
+    echo "  Replace kHapPublicKeyDer[] in netwerk/base/DenBrowserAttest.cpp with:"
     echo ""
     echo "$KEY_BYTES"
     echo ""
@@ -112,9 +112,9 @@ echo "  Proxy public key  : $BUILD_DIR/proxy-public.pem   ← not secret"
 echo "  Public key DER    : $BUILD_DIR/proxy-public.der   ← baked into build"
 echo ""
 echo "  Next steps:"
-echo "    1. Rebuild Firefox (public key is now in ZeroFoxAttest.cpp)."
+echo "    1. Rebuild Firefox (public key is now in DenBrowserAttest.cpp)."
 echo "    2. Copy proxy-private.pem to the proxy and reload."
-echo "    3. Distribute the new ZeroFox build."
+echo "    3. Distribute the new DenBrowser build."
 echo "    4. Old builds are now revoked — the new private key means"
 echo "       their tokens cannot be decrypted."
 echo ""
