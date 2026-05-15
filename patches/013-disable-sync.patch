@@ -1,0 +1,77 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 013-disable-sync
+#
+# PURPOSE: Permanently disable Firefox Sync and Firefox Accounts (FxA) at the
+# source level so no pref change, policy override, or runtime manipulation can
+# re-enable them.
+#
+# THREAT MODEL ADDRESSED:
+#
+#   Firefox Sync, if active, exfiltrates browsing history, open tabs, passwords,
+#   form data, and extension state to Mozilla's sync servers.  For a hardened,
+#   VPN-gated browser whose traffic is confined to the attestation proxy, any
+#   out-of-band sync channel is a data-leak vector.  Even with no account
+#   configured at deployment time, a user or attacker with local access could
+#   sign in and begin exfiltrating data.
+#
+# LAYERS OF COVERAGE:
+#
+# 1. WeaveService.enabled (services/sync/Weave.sys.mjs)
+#    The startup auto-connect timer checks this getter before importing any
+#    Sync code.  Hardcoding it to false prevents the entire Sync module graph
+#    from loading, regardless of whether an FxA account is present in the
+#    profile.
+#
+# 2. FXA_ENABLED constant (services/fxaccounts/FxAccounts.sys.mjs)
+#    FxAccounts reads FXA_ENABLED at two points: to auto-sign-out any account
+#    found in profile storage on startup, and to reject any call to
+#    setSignedInUser().  Replacing the pref-backed lazy getter with a hard
+#    false means no pref write or runtime change can make either path return
+#    true.
+#
+# RELATIONSHIP TO POLICIES:
+#
+#   policies.json already sets DisableFirefoxAccounts which locks the
+#   identity.fxaccounts.enabled pref to false.  These source patches add
+#   defence-in-depth: the policy depends on policies.json loading correctly at
+#   runtime; the source-level changes are unconditional.
+
+--- a/services/sync/Weave.sys.mjs
++++ b/services/sync/Weave.sys.mjs
+@@ -139,12 +139,10 @@
+    * It does *not* perform a robust check to see if the client is working.
+    * For that, you'll want to check Weave.Status.checkSetup().
+    */
+-  get enabled() {
+-    return (
+-      !!lazy.syncUsername &&
+-      Services.prefs.getBoolPref("identity.fxaccounts.enabled")
+-    );
+-  },
++  get enabled() {
++    // DenBrowser: Firefox Sync permanently disabled.
++    return false;
++  },
+ };
+
+ export function AboutWeaveLog() {}
+--- a/services/fxaccounts/FxAccounts.sys.mjs
++++ b/services/fxaccounts/FxAccounts.sys.mjs
+@@ -59,12 +59,8 @@
+     .Utils.ensureMPUnlocked;
+ });
+
+-XPCOMUtils.defineLazyPreferenceGetter(
+-  lazy,
+-  "FXA_ENABLED",
+-  "identity.fxaccounts.enabled",
+-  true
+-);
++// DenBrowser: FxA permanently disabled; no pref can re-enable it.
++lazy.FXA_ENABLED = false;
+
+ XPCOMUtils.defineLazyPreferenceGetter(
+   lazy,
