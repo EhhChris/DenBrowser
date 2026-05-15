@@ -563,10 +563,19 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
 diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
 --- a/netwerk/base/moz.build
 +++ b/netwerk/base/moz.build
-@@ -253,5 +253,6 @@ UNIFIED_SOURCES += [
-     "ThrottleQueue.cpp",
-     "Tickler.cpp",
-     "TLSServerSocket.cpp",
-     "TRRLoadInfo.cpp",
+@@ -132,6 +132,7 @@ XPIDL_MODULE = "necko"
+ EXPORTS += [
++    "DenBrowserAttest.h",
+     "netCore.h",
+     "nsASocketHandler.h",
+     "nsAsyncRedirectVerifyHelper.h",
+     "nsBaseChannel.h",
+     "nsFileStreams.h",
+@@ -186,6 +187,7 @@ UNIFIED_SOURCES += [
+     "ContentRange.cpp",
+     "Dashboard.cpp",
+     "DefaultURI.cpp",
 +    "DenBrowserAttest.cpp",
- ]
+     "EventTokenBucket.cpp",
+     "InterceptionInfo.cpp",
+     "IPv4Parser.cpp",

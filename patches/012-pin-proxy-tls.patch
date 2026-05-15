@@ -216,17 +216,6 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
 +}
 +
  }  // namespace denbrowser
-diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
---- a/netwerk/base/moz.build
-+++ b/netwerk/base/moz.build
-@@ -148,6 +148,7 @@
-     "nsURLHelper.h",
-     "nsURLParsers.h",
-     "SimpleChannel.h",
-+    "DenBrowserAttest.h",
- ]
- 
- EXPORTS.mozilla += [
 diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manager/ssl/SSLServerCertVerification.cpp
 --- a/security/manager/ssl/SSLServerCertVerification.cpp
 +++ b/security/manager/ssl/SSLServerCertVerification.cpp
