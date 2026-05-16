@@ -32,6 +32,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #    false means no pref write or runtime change can make either path return
 #    true.
 #
+# 3. Settings page Sync pane (browser/components/preferences/preferences.js)
+#    The pref-gated block that un-hides the Sync category and registers
+#    gSyncPane is removed unconditionally, so the Sync settings page is never
+#    reachable regardless of pref state.
+#
+# 4. Sidebar Synced Tabs entry (browser/components/sidebar/browser-sidebar.js)
+#    The viewTabsSidebar sidebar registration is removed, so the Synced Tabs
+#    panel never appears in the sidebar launcher or switcher menu.
+#
+# 5. Sidebar switcher menu item (browser/base/content/main-popupset.inc.xhtml)
+#    The sidebar-switcher-tabs menuitem (classic sidebar menu) is removed.
+#
 # RELATIONSHIP TO POLICIES:
 #
 #   policies.json already sets DisableFirefoxAccounts which locks the
@@ -75,3 +87,46 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
  XPCOMUtils.defineLazyPreferenceGetter(
    lazy,
+--- a/browser/components/preferences/preferences.js
++++ b/browser/components/preferences/preferences.js
+@@ -222,9 +222,7 @@
+-  // The Sync category needs to be the last of the "real" categories
+-  // registered and inititalized since many tests wait for the
+-  // "sync-pane-loaded" observer notification before starting the test.
+-  if (Services.prefs.getBoolPref("identity.fxaccounts.enabled")) {
+-    document.getElementById("category-sync").hidden = false;
+-    register_module("paneSync", gSyncPane);
+-  }
++  // DenBrowser: Sync UI permanently removed.
+   register_module("paneSearchResults", gSearchResultsPane);
+--- a/browser/components/sidebar/browser-sidebar.js
++++ b/browser/components/sidebar/browser-sidebar.js
+@@ -117,19 +117,6 @@
+       ],
+-      [
+-        "viewTabsSidebar",
+-        this.makeSidebar({
+-          elementId: "sidebar-switcher-tabs",
+-          url: this.sidebarRevampEnabled
+-            ? "chrome://browser/content/sidebar/sidebar-syncedtabs.html"
+-            : "chrome://browser/content/syncedtabs/sidebar.xhtml",
+-          menuId: "menu_tabsSidebar",
+-          classAttribute: "sync-ui-item",
+-          menuL10nId: "menu-view-synced-tabs-sidebar",
+-          revampL10nId: "sidebar-menu-synced-tabs-label",
+-          iconUrl: "chrome://browser/skin/synced-tabs.svg",
+-          contextMenuId: this.sidebarRevampEnabled
+-            ? "sidebar-synced-tabs-context-menu"
+-            : undefined,
+-          gleanClickEvent: Glean.sidebar.syncedTabsIconClick,
+-        }),
+-      ],
+       [
+         "viewBookmarksSidebar",
+--- a/browser/base/content/main-popupset.inc.xhtml
++++ b/browser/base/content/main-popupset.inc.xhtml
+@@ -291,4 +291,3 @@
+-    <menuitem id="sidebar-switcher-tabs"
+-              data-l10n-id="sidebar-menu-synced-tabs"
+-              class="sync-ui-item"/>
+     <menuseparator/>
