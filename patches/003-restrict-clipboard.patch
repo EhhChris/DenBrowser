@@ -4,47 +4,52 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 003-restrict-clipboard
 #
-# Blocks all clipboard and drag-to-copy access. Five entry points covered:
+# Blocks all clipboard and drag-to-copy access, with an optional compile-time
+# allow-list that permits in-browser copy/paste between specific sites.
+#
+# CORE BLOCKS (always active — six entry points):
 #
 # 1. Clipboard::ReadHelper (dom/events/Clipboard.cpp)
-#    Covers both Clipboard.read() and Clipboard.readText() -- both funnel
-#    through this single method, so one block covers both.
+#    Blocks Clipboard.read() and Clipboard.readText() for all sites.
+#    Listed sites use the internal clipboard path instead (see below).
 #
 # 2. Clipboard::Write (dom/events/Clipboard.cpp)
-#    Covers Clipboard.write(). Clipboard.writeText() delegates to Write
-#    internally, so this also blocks writeText().
+#    Blocks Clipboard.write() / writeText() for all sites.
 #
 # 3. Document::ExecCommand (dom/base/Document.cpp)
-#    Blocks document.execCommand("cut"), execCommand("copy"), and
-#    execCommand("paste") -- the legacy synchronous clipboard API still
-#    widely used by web pages.
+#    Blocks document.execCommand("cut/copy/paste") for all sites.
 #
 # 4. nsCopySupport::FireClipboardEvent (dom/base/nsCopySupport.cpp)
-#    Blocks the user-level copy command (Ctrl+C, right-click Copy, address
-#    bar Ctrl+C, etc.) for ALL content including browser chrome. This is
-#    the path taken when the USER presses Ctrl+C -- it bypasses all JS
-#    clipboard APIs and writes directly to the clipboard. Blocking here
-#    prevents both the clipboard event dispatch AND the subsequent
-#    EncodeDocumentWithContextAndPutToClipboard write.
-#    Paste is deliberately NOT blocked so users can type into web forms.
+#    Blocks the user-level copy command (Ctrl+C / right-click Copy) for ALL
+#    content.  Paste (Ctrl+V) is intercepted here too for listed sites (see
+#    INTERNAL CLIPBOARD below).
 #
 # 5. nsBaseClipboard::SetData (widget/nsBaseClipboard.cpp)
-#    The universal clipboard write funnel. Every path that writes to the OS
-#    clipboard — whether from web content JS, the C++ editor, or chrome JS
-#    via ClipboardHelper (e.g. the URL bar's doCommand()) — ultimately calls
-#    this method. Replacing the SetNativeClipboardData call with NS_OK makes
-#    all clipboard writes silently succeed without touching the OS pasteboard.
-#    This is the backstop that catches anything FireClipboardEvent doesn't see.
+#    Backstop: suppresses every remaining OS clipboard write path.
 #
 # 6. nsBaseDragSession::InvokeDragSession (widget/nsBaseDragService.cpp)
-#    Blocks all drag-and-drop unconditionally. Earlier versions only blocked
-#    non-chrome drags, but the URL bar (chrome) could still drag text out.
-#    Returning NS_ERROR_ABORT before any data is set prevents all drags from
-#    reaching external applications.
+#    Blocks all drag-and-drop to prevent text exfiltration via URL bar drag.
 #
-# The user.js prefs dom.allow_cut_copy=false and
-# dom.event.clipboardevents.enabled=false are belt-and-suspenders on top
-# of this patch. The patch is the authoritative block.
+# INTERNAL CLIPBOARD (optional — activated by site-config.json):
+#
+#   When config/site-config.json lists one or more hostnames in
+#   "clipboard_sites", an in-process clipboard is activated for those sites:
+#
+#   - Copy (Ctrl+C) on a listed site extracts the selected text and stores
+#     it in gDenInternalClipText.  The OS clipboard is never written.
+#
+#   - Paste (Ctrl+V) on a listed site reads from gDenInternalClipText via a
+#     flag (gDenServePasteFromInternal) that is checked by
+#     nsBaseClipboard::GetData before the normal OS clipboard read.
+#
+#   Data stored this way is never visible to the OS clipboard or to any
+#   unlisted site.  build.sh injects the allow-list at compile time using
+#   sentinel markers; empty config → full block, same as before.
+#
+# RELATIONSHIP TO PREFS:
+#   lockPref("dom.allow_cut_copy", false) and
+#   lockPref("dom.event.clipboardevents.enabled", false) in mozilla.cfg are
+#   belt-and-suspenders.  This patch is the authoritative block.
 
 --- a/dom/events/Clipboard.cpp
 +++ b/dom/events/Clipboard.cpp
@@ -68,18 +73,91 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
 --- a/dom/base/nsCopySupport.cpp
 +++ b/dom/base/nsCopySupport.cpp
-@@ -822,6 +822,11 @@
+@@ -68,6 +68,40 @@
+ static NS_DEFINE_CID(kCClipboardCID, NS_CLIPBOARD_CID);
+ static NS_DEFINE_CID(kCTransferableCID, NS_TRANSFERABLE_CID);
+ static NS_DEFINE_CID(kHTMLConverterCID, NS_HTMLFORMATCONVERTER_CID);
++
++// ── DenBrowser internal clipboard ────────────────────────────────────────────
++// Compile-time clipboard allow-list. build.sh injects entries from
++// site-config.json between the sentinel markers at build time.
++// ── DEN: CLIPBOARD_SITES ──
++static const char* const kDenClipboardSites[] = { nullptr };
++// ── DEN END: CLIPBOARD_SITES ──
++
++// In-process clipboard storage, shared with nsBaseClipboard via extern linkage.
++nsString gDenInternalClipText;
++bool gDenInternalClipHasData = false;
++bool gDenServePasteFromInternal = false;
++
++static bool DenClipHostMatch(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  // Subdomain match: host must end with "." + pattern.
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++static bool DenClipSiteAllowed(const nsACString& aHost) {
++  for (int i = 0; kDenClipboardSites[i]; ++i) {
++    if (DenClipHostMatch(aHost, kDenClipboardSites[i])) return true;
++  }
++  return false;
++}
+
+ // copy string data onto the transferable
+ static nsresult AppendString(nsITransferable* aTransferable,
+@@ -822,6 +856,26 @@
    BrowsingContext* bc = piWindow->GetBrowsingContext();
    const bool chromeShell = bc && bc->IsChrome();
 
 +  // DenBrowser: block clipboard cut/copy for all content including browser UI.
++  // If the site is in the clipboard allow-list, capture selected text first so
++  // it can be served on paste within another listed site.
 +  if (originalEventMessage == eCopy || originalEventMessage == eCut) {
++    if (kDenClipboardSites[0] && sel &&
++        !sel->AreNormalAndCrossShadowBoundaryRangesCollapsed()) {
++      nsAutoCString host;
++      if (nsIURI* uri = doc->GetDocumentURI()) {
++        uri->GetHost(host);
++      }
++      if (DenClipSiteAllowed(host)) {
++        nsAutoString selText;
++        IgnoredErrorResult err;
++        sel->ToString(selText, err);
++        if (!selText.IsEmpty()) {
++          gDenInternalClipText = selText;
++          gDenInternalClipHasData = true;
++        }
++      }
++    }
 +    return false;
 +  }
 +
    // next, fire the cut, copy or paste event
    bool doDefault = true;
-   RefPtr<DataTransfer> clipboardData;
+@@ -881,6 +931,18 @@
+   if (originalEventMessage == ePaste) {
+     if (aActionTaken) {
+       *aActionTaken = true;
+     }
++    // DenBrowser: if the event was not cancelled and this site is in the
++    // allow-list with stored data, signal nsBaseClipboard::GetData to serve
++    // from the in-process clipboard instead of the (always empty) OS clipboard.
++    if (doDefault && kDenClipboardSites[0] && gDenInternalClipHasData) {
++      nsAutoCString host;
++      if (nsIURI* uri = doc->GetDocumentURI()) {
++        uri->GetHost(host);
++      }
++      if (DenClipSiteAllowed(host)) {
++        gDenServePasteFromInternal = true;
++      }
++    }
+     return doDefault;
+   }
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
 @@ -5574,7 +5574,13 @@
@@ -98,7 +176,21 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    //  this might add some ugly JS dependencies?
 --- a/widget/nsBaseClipboard.cpp
 +++ b/widget/nsBaseClipboard.cpp
-@@ -387,8 +387,9 @@
+@@ -28,6 +28,16 @@
+ #include "nsXPCOM.h"
+
++// DenBrowser internal clipboard support.
++// Storage globals are defined in dom/base/nsCopySupport.cpp.
++#include "nsComponentManagerUtils.h"
++#include "nsISupportsPrimitives.h"
++extern nsString gDenInternalClipText;
++extern bool gDenInternalClipHasData;
++extern bool gDenServePasteFromInternal;
++
+ using mozilla::GenericPromise;
+ using mozilla::LogLevel;
+ using mozilla::UniquePtr;
+@@ -389,8 +399,9 @@
    nsresult rv = NS_ERROR_FAILURE;
    if (aTransferable) {
      mIgnoreEmptyNotification = true;
@@ -109,6 +201,28 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +    rv = NS_OK;
      mIgnoreEmptyNotification = false;
    }
+@@ -442,6 +453,18 @@
+   if (!nsIClipboard::IsClipboardTypeSupported(aWhichClipboard)) {
+     MOZ_CLIPBOARD_LOG("%s: clipboard %d is not supported.", __FUNCTION__,
+                       aWhichClipboard);
+     return NS_ERROR_FAILURE;
+   }
+
++  // DenBrowser: if paste was triggered by a listed site, serve from the
++  // in-process clipboard instead of reading the (always empty) OS clipboard.
++  // gDenServePasteFromInternal is set synchronously in FireClipboardEvent.
++  if (gDenServePasteFromInternal && gDenInternalClipHasData) {
++    gDenServePasteFromInternal = false;
++    nsCOMPtr<nsISupportsString> str =
++        do_CreateInstance("@mozilla.org/supports-string;1");
++    if (str) {
++      str->SetData(gDenInternalClipText);
++      aTransferable->SetTransferData("text/unicode", str);
++      return NS_OK;
++    }
++  }
++
+   if (mozilla::StaticPrefs::widget_clipboard_use_cached_data_enabled()) {
 --- a/widget/nsBaseDragService.cpp
 +++ b/widget/nsBaseDragService.cpp
 @@ -322,5 +322,7 @@

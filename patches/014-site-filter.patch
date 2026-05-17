@@ -1,0 +1,120 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 014-site-filter
+#
+# PURPOSE: Compile-time site whitelist and blacklist for HTTP/HTTPS navigation.
+#
+# THREAT MODEL ADDRESSED:
+#
+#   In some deployments, DenBrowser should only allow navigation to a known set
+#   of approved web properties (whitelist mode), or should block specific
+#   destinations known to be out-of-scope (blacklist mode).  Both lists are
+#   baked into the binary at compile time so no runtime configuration, policy
+#   file, or profile change can alter them.
+#
+# SEMANTICS:
+#
+#   - Only http:// and https:// URLs are filtered.  Browser-internal URIs
+#     (about:, chrome:, resource:, moz-extension:, data:, blob:, etc.) are
+#     never blocked by this patch, as they are required for the browser UI to
+#     function.
+#
+#   - Hostname matching is suffix-based:
+#       "example.com" matches example.com, foo.example.com, bar.foo.example.com
+#       It does NOT match notexample.com.
+#
+#   - WHITELIST MODE (site_whitelist non-empty):
+#       Only listed hosts (and their subdomains) may be navigated to.
+#       All other http/https navigations return NS_ERROR_CONTENT_BLOCKED.
+#
+#   - BLACKLIST MODE (site_whitelist empty, site_blacklist non-empty):
+#       Listed hosts are blocked; all other http/https navigations proceed.
+#
+#   - If both lists are empty (default), no filtering is applied.
+#
+# CONFIGURATION:
+#
+#   Add entries to config/site-config.json and rebuild.  build.sh injects
+#   the arrays between the sentinel markers before compiling.
+#
+# HOOK POINT:
+#
+#   nsDocShell::InternalLoad (docshell/base/nsDocShell.cpp)
+#   Called for every top-level navigation.  Checked after the javascript-URI
+#   security check and before any load processing begins.
+
+--- a/docshell/base/nsDocShell.cpp
++++ b/docshell/base/nsDocShell.cpp
+@@ -9275,6 +9275,52 @@
+              ? LOAD_NORMAL_REPLACE
+              : LOAD_LINK;
+ }
+
++// ── DenBrowser site filter ────────────────────────────────────────────────────
++// Compile-time whitelist/blacklist. build.sh injects entries from
++// site-config.json between the sentinel markers at build time.
++//
++// Whitelist takes priority: if any whitelist entries are present, only matching
++// hosts are allowed for http/https.  Blacklist is used only when whitelist is
++// empty.  Both empty = no filtering.
++// ── DEN: SITE_WHITELIST ──
++static const char* const kDenSiteWhitelist[] = { nullptr };
++// ── DEN END: SITE_WHITELIST ──
++// ── DEN: SITE_BLACKLIST ──
++static const char* const kDenSiteBlacklist[] = { nullptr };
++// ── DEN END: SITE_BLACKLIST ──
++
++static bool DenSiteHostMatch(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  // Subdomain match: host must end with "." + pattern.
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++static bool DenSiteNavAllowed(nsIURI* aURI) {
++  if (!aURI) return true;
++  nsAutoCString scheme;
++  aURI->GetScheme(scheme);
++  // Only filter http/https — browser-internal URIs always pass.
++  if (!scheme.EqualsLiteral("http") && !scheme.EqualsLiteral("https")) {
++    return true;
++  }
++  nsAutoCString host;
++  aURI->GetHost(host);
++  // Whitelist: if any entries exist, only matching hosts are allowed.
++  if (kDenSiteWhitelist[0]) {
++    for (int i = 0; kDenSiteWhitelist[i]; ++i) {
++      if (DenSiteHostMatch(host, kDenSiteWhitelist[i])) return true;
++    }
++    return false;
++  }
++  // Blacklist: block matching hosts.
++  for (int i = 0; kDenSiteBlacklist[i]; ++i) {
++    if (DenSiteHostMatch(host, kDenSiteBlacklist[i])) return false;
++  }
++  return true;
++}
++
+ // InternalLoad performs several of the steps from
+ // https://html.spec.whatwg.org/#navigate.
+ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
+@@ -9331,6 +9377,13 @@
+   MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
+
++  // DenBrowser: apply compile-time site filter.
++  if (!DenSiteNavAllowed(aLoadState->URI())) {
++    MOZ_LOG(gDocShellLeakLog, LogLevel::Warning,
++            ("DOCSHELL %p blocked navigation to %s by DenBrowser site filter\n",
++             this, aLoadState->URI()->GetSpecOrDefault().get()));
++    return NS_ERROR_CONTENT_BLOCKED;
++  }
++
+   // If we don't have a target, we're loading into ourselves, and our load
+   // delegate may want to intercept that load.
+   SameDocumentNavigationState sameDocumentNavigationState;
