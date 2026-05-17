@@ -29,22 +29,28 @@
 
     "Permissions": {
       "Camera": {
-        "Block": ["<all_urls>"]
+        "Block": ["<all_urls>"],
+        "Locked": true
       },
       "Microphone": {
-        "Block": ["<all_urls>"]
+        "Block": ["<all_urls>"],
+        "Locked": true
       },
       "Location": {
-        "Block": ["<all_urls>"]
+        "Block": ["<all_urls>"],
+        "Locked": true
       },
       "Notifications": {
-        "Block": ["<all_urls>"]
+        "Block": ["<all_urls>"],
+        "Locked": true
       },
       "Autoplay": {
-        "Default": "block-audio-video"
+        "Default": "block-audio-video",
+        "Locked": true
       },
       "VirtualReality": {
-        "Block": ["<all_urls>"]
+        "Block": ["<all_urls>"],
+        "Locked": true
       }
     },
 
@@ -100,6 +106,13 @@
       "UrlbarInterventions": false,
       "SkipOnboarding": true,
       "MoreFromMozilla": false
-    }
+    },
+
+    "PasswordManagerEnabled": false,
+    "HttpsOnlyMode": "force_enabled",
+    "TranslateEnabled": false,
+    "DisableFeedbackCommands": true,
+    "DisableProfileImport": true,
+    "DisableSystemAddonUpdate": true
   }
 }
