@@ -356,7 +356,7 @@ index b23f465..f0a5a1e 100644
    mCsp = aCsp;
    mSourceNode = aDOMNode;
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index da9b374..2e7dc42 100644
+index da9b374..3bd275a 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
 @@ -1242,6 +1242,14 @@ parent:
@@ -364,10 +364,10 @@ index da9b374..2e7dc42 100644
          returns (bool hasType);
  
 +    // DenBrowser: cross-process internal clipboard (listed sites only).
-+    // SetDenInternalClipboard stores captured copy text in the parent process.
-+    // GetDenInternalClipboard retrieves it; parent detects external OS clipboard
-+    // changes via sequence-number and returns hasData=false in that case.
-+    async SetDenInternalClipboard(nsString aText);
++    // Both messages are sync: SetDenInternalClipboard must be sync to avoid a
++    // race where an async SET from the copy-side process hasn't reached the
++    // parent before a sync GET fires from the paste-side process.
++    sync SetDenInternalClipboard(nsString aText);
 +    sync GetDenInternalClipboard()
 +        returns (nsString aText, bool aHasData);
 +
@@ -459,13 +459,15 @@ index 45eaca2..ecae4b2 100644
      nsTArray<nsCString>&& aTypes,
      const nsIClipboard::ClipboardType& aWhichClipboard, bool* aHasType) {
 diff --git a/ipc/ipdl/sync-messages.ini b/ipc/ipdl/sync-messages.ini
-index 1e000b7..52d9b8e 100644
+index 1e000b7..1f1a1d0 100644
 --- a/ipc/ipdl/sync-messages.ini
 +++ b/ipc/ipdl/sync-messages.ini
-@@ -108,6 +108,8 @@ description = Legacy synchronous clipboard API
+@@ -108,6 +108,10 @@ description = Legacy synchronous clipboard API
  description = Legacy synchronous clipboard API
  [PContent::GetClipboardDataSnapshotSync]
  description = Legacy synchronous clipboard API
++[PContent::SetDenInternalClipboard]
++description = DenBrowser internal clipboard: stores copy text in parent process; must be sync to prevent a race with GetDenInternalClipboard from a different content process
 +[PContent::GetDenInternalClipboard]
 +description = DenBrowser internal clipboard: retrieves copy text from parent process for listed-site paste intercept
  
