@@ -113,7 +113,65 @@ elif [[ ! -f "$ATTEST_SRC" ]]; then
     exit 1
 fi
 
-# ── Step 2.6: Copy DenBrowser branding assets ───────────────────────────────────
+# ── Step 2.6: Inject site configuration ──────────────────────────────────────
+# Reads config/site-config.json (if present) and fills the compile-time sentinel
+# blocks in nsCopySupport.cpp and nsDocShell.cpp that were added by patches 003
+# and 014.  If the file is absent or a list is empty, the array defaults to
+# { nullptr } and that feature is disabled for this build.
+SITE_CONFIG="$ROOT_DIR/config/site-config.json"
+NCOPY_SRC="$FIREFOX_SRC/dom/base/nsCopySupport.cpp"
+DOCSHELL_SRC="$FIREFOX_SRC/docshell/base/nsDocShell.cpp"
+CONTENT_PARENT_SRC="$FIREFOX_SRC/dom/ipc/ContentParent.cpp"
+if [[ -f "$SITE_CONFIG" ]]; then
+    python3 - "$SITE_CONFIG" "$NCOPY_SRC" "$DOCSHELL_SRC" "$CONTENT_PARENT_SRC" <<'PYEOF' || { echo "[build] ERROR: site-config injection failed — aborting build."; exit 1; }
+import json, sys, re
+
+config_path, ncopy_path, docshell_path, content_parent_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+with open(config_path) as f:
+    config = json.load(f)
+
+VAR_NAMES = {
+    'CLIPBOARD_SITES': 'kDenClipboardSites',
+    'SITE_WHITELIST':  'kDenSiteWhitelist',
+    'SITE_BLACKLIST':  'kDenSiteBlacklist',
+}
+
+def inject(filepath, sentinel_name, items):
+    varname = VAR_NAMES[sentinel_name]
+    with open(filepath) as f:
+        content = f.read()
+    start = f'// ── DEN: {sentinel_name} ──'
+    end   = f'// ── DEN END: {sentinel_name} ──'
+    pattern = re.compile(re.escape(start) + r'.*?' + re.escape(end), re.DOTALL)
+    entries = ''.join(f'  "{item}",\n' for item in items)
+    replacement = (
+        f'{start}\n'
+        f'static const char* const {varname}[] = {{\n'
+        f'{entries}'
+        f'  nullptr\n'
+        f'}};\n'
+        f'{end}'
+    )
+    new_content, n = pattern.subn(replacement, content)
+    if n == 0:
+        print(f'ERROR: sentinel {sentinel_name} not found in {filepath}',
+              file=sys.stderr)
+        sys.exit(1)
+    with open(filepath, 'w') as f:
+        f.write(new_content)
+    print(f'[build] Injected {sentinel_name} ({len(items)} entries) into {filepath}')
+
+inject(ncopy_path,         'CLIPBOARD_SITES', config.get('clipboard_sites', []))
+inject(content_parent_path,'CLIPBOARD_SITES', config.get('clipboard_sites', []))
+inject(docshell_path,      'SITE_WHITELIST',  config.get('site_whitelist',  []))
+inject(docshell_path,      'SITE_BLACKLIST',  config.get('site_blacklist',  []))
+PYEOF
+else
+    echo "[build] No site-config.json — clipboard allow-list and site filter disabled."
+fi
+
+# ── Step 2.7: Copy DenBrowser branding assets ───────────────────────────────────
 BRANDING_DIR="$FIREFOX_SRC/browser/branding/denbrowser"
 if [[ -d "$BRANDING_DIR" ]]; then
     ICONSET="$ROOT_DIR/branding/DenBrowser.iconset"

@@ -1,0 +1,12 @@
+{
+  "clipboard_sites": [
+    "reddit.com",
+    "amazon.com"
+  ],
+
+  "site_whitelist": [],
+
+  "site_blacklist": [
+    "google.com"
+  ]
+}

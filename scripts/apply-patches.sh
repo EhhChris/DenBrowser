@@ -9,10 +9,12 @@ SRC_DIR="$ROOT_DIR/src"
 PATCHES_DIR="$ROOT_DIR/patches"
 
 SKIP_PATCH_NUMS=()
+NO_REVERT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-patch) SKIP_PATCH_NUMS+=("$((10#$2))"); shift ;;
+        --no-revert)  NO_REVERT=1 ;;
         *) echo "[apply-patches] Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
@@ -30,6 +32,19 @@ FIREFOX_SRC="$SRC_DIR/firefox-${ESR_VERSION%esr}"
 if [[ ! -d "$FIREFOX_SRC" ]]; then
     echo "[apply-patches] ERROR: Firefox source not found at $FIREFOX_SRC" >&2
     exit 1
+fi
+
+# Revert source to pristine state before applying patches so builds are
+# reproducible without re-extracting the tarball.  Skipped with --no-revert.
+if [[ $NO_REVERT -eq 0 && -d "$FIREFOX_SRC/.git" ]]; then
+    echo "[apply-patches] Reverting source to pristine state..."
+    (cd "$FIREFOX_SRC" && git checkout -q HEAD -- . && git clean -qfd)
+    echo "[apply-patches] Source reverted."
+elif [[ $NO_REVERT -eq 1 ]]; then
+    echo "[apply-patches] Skipping revert (--no-revert)"
+else
+    echo "[apply-patches] WARNING: No pristine git snapshot found — skipping revert."
+    echo "[apply-patches]          Run fetch-esr.sh to create one."
 fi
 
 echo "[apply-patches] Applying patches to $FIREFOX_SRC"

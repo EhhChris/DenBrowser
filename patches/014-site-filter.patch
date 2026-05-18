@@ -1,0 +1,170 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 014-site-filter
+#
+# PURPOSE: Compile-time site whitelist and blacklist for HTTP/HTTPS navigation.
+#
+# THREAT MODEL ADDRESSED:
+#
+#   In some deployments, DenBrowser should only allow navigation to a known set
+#   of approved web properties (whitelist mode), or should block specific
+#   destinations known to be out-of-scope (blacklist mode).  Both lists are
+#   baked into the binary at compile time so no runtime configuration, policy
+#   file, or profile change can alter them.
+#
+# SEMANTICS:
+#
+#   - Only http:// and https:// URLs are filtered.  Browser-internal URIs
+#     (about:, chrome:, resource:, moz-extension:, data:, blob:, etc.) are
+#     never blocked by this patch, as they are required for the browser UI to
+#     function.
+#
+#   - Hostname matching is suffix-based:
+#       "example.com" matches example.com, foo.example.com, bar.foo.example.com
+#       It does NOT match notexample.com.
+#
+#   - WHITELIST MODE (site_whitelist non-empty):
+#       Only listed hosts (and their subdomains) may be navigated to.
+#       All other http/https navigations return NS_ERROR_BLOCKED_BY_POLICY.
+#
+#   - BLACKLIST MODE (site_whitelist empty, site_blacklist non-empty):
+#       Listed hosts are blocked; all other http/https navigations proceed.
+#
+#   - If both lists are empty (default), no filtering is applied.
+#
+# CONFIGURATION:
+#
+#   Add entries to config/site-config.json and rebuild.  build.sh injects
+#   the arrays between the sentinel markers before compiling.
+#
+# HOOK POINT:
+#
+#   nsDocShell::InternalLoad (docshell/base/nsDocShell.cpp)
+#   Called for every top-level navigation.  Checked after the javascript-URI
+#   security check and before any load processing begins.
+#
+# USER-VISIBLE BLOCK MESSAGE:
+#
+#   Returning NS_ERROR_BLOCKED_BY_POLICY (not NS_ERROR_CONTENT_BLOCKED) routes
+#   the failure through nsDocShell::FilterStatusForErrorPage, which renders the
+#   "Blocked Page" neterror page.  The body text is the localized
+#   `blockedByPolicy` string from appstrings.properties.  Two locale files are
+#   patched so the user sees a DenBrowser-specific message instead of the
+#   generic Firefox enterprise wording:
+#     - browser/locales/en-US/chrome/overrides/appstrings.properties  (override
+#       that takes precedence in DenBrowser browser builds)
+#     - dom/locales/en-US/chrome/appstrings.properties                 (source
+#       string; patched for consistency)
+#   Both are set to: "This site is not on the DenBrowser allow-list. Contact
+#   your administrator for access."
+
+diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
+index 5bcbbfb..2974706 100644
+--- a/docshell/base/nsDocShell.cpp
++++ b/docshell/base/nsDocShell.cpp
+@@ -9277,6 +9277,55 @@ uint32_t nsDocShell::GetLoadTypeForFormSubmission(
+              : LOAD_LINK;
+ }
+ 
++// ── DenBrowser site filter ────────────────────────────────────────────────────
++// Compile-time whitelist/blacklist. build.sh injects entries from
++// site-config.json between the sentinel markers at build time.
++//
++// Whitelist takes priority: if any whitelist entries are present, only matching
++// hosts are allowed for http/https.  Blacklist is used only when whitelist is
++// empty.  Both empty = no filtering.
++// ── DEN: SITE_WHITELIST ──
++static const char* const kDenSiteWhitelist[] = { nullptr };
++// ── DEN END: SITE_WHITELIST ──
++// ── DEN: SITE_BLACKLIST ──
++static const char* const kDenSiteBlacklist[] = { nullptr };
++// ── DEN END: SITE_BLACKLIST ──
++
++static bool DenSiteHostMatch(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  // Subdomain match: host must end with "." + pattern.
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++static bool DenSiteNavAllowed(nsIURI* aURI) {
++  if (!aURI) return true;
++  nsAutoCString scheme;
++  aURI->GetScheme(scheme);
++  // Only filter http/https — browser-internal URIs always pass.
++  if (!scheme.EqualsLiteral("http") && !scheme.EqualsLiteral("https")) {
++    return true;
++  }
++  nsAutoCString host;
++  aURI->GetHost(host);
++  // Whitelist: if any entries exist, only matching hosts are allowed.
++  if (kDenSiteWhitelist[0]) {
++    for (int i = 0; kDenSiteWhitelist[i]; ++i) {
++      if (DenSiteHostMatch(host, kDenSiteWhitelist[i])) return true;
++    }
++    return false;
++  }
++  // Blacklist: block matching hosts.
++  for (int i = 0; kDenSiteBlacklist[i]; ++i) {
++    if (DenSiteHostMatch(host, kDenSiteBlacklist[i])) return false;
++  }
++  return true;
++}
++
+ // InternalLoad performs several of the steps from
+ // https://html.spec.whatwg.org/#navigate.
+ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
+@@ -9330,6 +9379,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
+ 
+   MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
+ 
++  // DenBrowser: apply compile-time site filter.  Return NS_ERROR_BLOCKED_BY_POLICY
++  // so docshell maps it to the "Blocked Page" neterror (the message string is
++  // overridden in appstrings.properties below).  Call DisplayLoadError directly
++  // because InternalLoad returns BEFORE opening a channel — without an explicit
++  // call, no channel reaches OnStop and the error page never renders; the tab
++  // just sits on the previous content.
++  if (!DenSiteNavAllowed(aLoadState->URI())) {
++    MOZ_LOG(gDocShellLeakLog, LogLevel::Warning,
++            ("DOCSHELL %p blocked navigation to %s by DenBrowser site filter\n",
++             this, aLoadState->URI()->GetSpecOrDefault().get()));
++    DisplayLoadError(NS_ERROR_BLOCKED_BY_POLICY, aLoadState->URI(), nullptr,
++                     nullptr);
++    return NS_ERROR_BLOCKED_BY_POLICY;
++  }
++
+   // If we don't have a target, we're loading into ourselves, and our load
+   // delegate may want to intercept that load.
+   SameDocumentNavigationState sameDocumentNavigationState;
+diff --git a/browser/locales/en-US/chrome/overrides/appstrings.properties b/browser/locales/en-US/chrome/overrides/appstrings.properties
+index c7d3c0e..6ce7dde 100644
+--- a/browser/locales/en-US/chrome/overrides/appstrings.properties
++++ b/browser/locales/en-US/chrome/overrides/appstrings.properties
+@@ -44,7 +44,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+ ## LOCALIZATION NOTE (sslv3Used) - Do not translate "%S".
+ sslv3Used=Firefox cannot guarantee the safety of your data on %S because it uses SSLv3, a broken security protocol.
+ inadequateSecurityError=The website tried to negotiate an inadequate level of security.
+-blockedByPolicy=Your organization has blocked access to this page or website.
++blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
+ blockedByCORP=Firefox didn’t load this page because it looks like the security configuration doesn’t match the previous page.
+ invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
+ networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
+diff --git a/dom/locales/en-US/chrome/appstrings.properties b/dom/locales/en-US/chrome/appstrings.properties
+index 3248c7d..464b3dd 100644
+--- a/dom/locales/en-US/chrome/appstrings.properties
++++ b/dom/locales/en-US/chrome/appstrings.properties
+@@ -37,7 +37,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+ sslv3Used=The safety of your data on %S could not be guaranteed because it uses SSLv3, a broken security protocol.
+ weakCryptoUsed=The owner of %S has configured their website improperly. To protect your information from being stolen, the connection to this website has not been established.
+ inadequateSecurityError=The website tried to negotiate an inadequate level of security.
+-blockedByPolicy=Your organization has blocked access to this page or website.
++blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
+ blockedByCORP=This page has not been loaded because it looks like the security configuration doesn’t match the previous page.
+ invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
+ networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.

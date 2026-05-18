@@ -70,6 +70,20 @@ else
     echo "[fetch-esr] Extracted to $EXTRACT_DIR"
 fi
 
+# Snapshot pristine source in a local git repo so apply-patches.sh can revert
+# cheaply (git checkout HEAD) instead of re-extracting the full tarball.
+# One-time cost: ~30s to index 300k files. Subsequent reverts take <1s.
+if [[ ! -d "$EXTRACT_DIR/.git" ]]; then
+    echo "[fetch-esr] Initializing pristine git snapshot (one-time, ~30s)..."
+    (
+        cd "$EXTRACT_DIR"
+        git init -q
+        git add -A
+        git commit -q -m "pristine firefox-${ESR_VERSION}"
+    )
+    echo "[fetch-esr] Pristine snapshot committed."
+fi
+
 # Write version file so other scripts can reference it
 echo "$ESR_VERSION" > "$SRC_DIR/.esr_version"
 echo "[fetch-esr] Done. Source ready at: $EXTRACT_DIR"

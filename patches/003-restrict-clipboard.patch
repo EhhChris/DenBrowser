@@ -4,51 +4,96 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 003-restrict-clipboard
 #
-# Blocks all clipboard and drag-to-copy access. Five entry points covered:
+# Blocks all clipboard and drag-to-copy access, with an optional compile-time
+# allow-list that permits in-browser copy/paste between specific sites.
+#
+# CORE BLOCKS (always active — six entry points):
 #
 # 1. Clipboard::ReadHelper (dom/events/Clipboard.cpp)
-#    Covers both Clipboard.read() and Clipboard.readText() -- both funnel
-#    through this single method, so one block covers both.
+#    Blocks Clipboard.read() and Clipboard.readText() for all sites.
 #
 # 2. Clipboard::Write (dom/events/Clipboard.cpp)
-#    Covers Clipboard.write(). Clipboard.writeText() delegates to Write
-#    internally, so this also blocks writeText().
+#    Blocks Clipboard.write() / writeText() for all sites.
 #
 # 3. Document::ExecCommand (dom/base/Document.cpp)
-#    Blocks document.execCommand("cut"), execCommand("copy"), and
-#    execCommand("paste") -- the legacy synchronous clipboard API still
-#    widely used by web pages.
+#    Blocks document.execCommand("cut/copy/paste") for all sites.
 #
 # 4. nsCopySupport::FireClipboardEvent (dom/base/nsCopySupport.cpp)
-#    Blocks the user-level copy command (Ctrl+C, right-click Copy, address
-#    bar Ctrl+C, etc.) for ALL content including browser chrome. This is
-#    the path taken when the USER presses Ctrl+C -- it bypasses all JS
-#    clipboard APIs and writes directly to the clipboard. Blocking here
-#    prevents both the clipboard event dispatch AND the subsequent
-#    EncodeDocumentWithContextAndPutToClipboard write.
-#    Paste is deliberately NOT blocked so users can type into web forms.
+#    Blocks the user-level copy command (Ctrl+C / right-click Copy) for ALL
+#    content.  Listed sites fall through to the native copy path (see INTERNAL
+#    CLIPBOARD below).  Paste (Ctrl+V) is intercepted here for listed sites.
 #
 # 5. nsBaseClipboard::SetData (widget/nsBaseClipboard.cpp)
-#    The universal clipboard write funnel. Every path that writes to the OS
-#    clipboard — whether from web content JS, the C++ editor, or chrome JS
-#    via ClipboardHelper (e.g. the URL bar's doCommand()) — ultimately calls
-#    this method. Replacing the SetNativeClipboardData call with NS_OK makes
-#    all clipboard writes silently succeed without touching the OS pasteboard.
-#    This is the backstop that catches anything FireClipboardEvent doesn't see.
+#    Backstop: suppresses every remaining OS clipboard write path AND skips
+#    the in-memory ClipboardCache update.  Both are required: macOS defaults
+#    widget.clipboard.use-cached-data.enabled to true, so without the cache
+#    bypass a non-listed site's paste would hit the cache populated by a
+#    listed-site copy (SetNativeClipboardData is suppressed, OS sequence
+#    number doesn't change, cache stays "valid", non-listed-site GetData
+#    returns the listed-site text — cross-site exfiltration).  An early
+#    return inside the if(aTransferable) block in SetData skips the
+#    clipboardCache->Update() call at end-of-function.
 #
 # 6. nsBaseDragSession::InvokeDragSession (widget/nsBaseDragService.cpp)
-#    Blocks all drag-and-drop unconditionally. Earlier versions only blocked
-#    non-chrome drags, but the URL bar (chrome) could still drag text out.
-#    Returning NS_ERROR_ABORT before any data is set prevents all drags from
-#    reaching external applications.
+#    Blocks all drag-and-drop to prevent text exfiltration via URL bar drag.
 #
-# The user.js prefs dom.allow_cut_copy=false and
-# dom.event.clipboardevents.enabled=false are belt-and-suspenders on top
-# of this patch. The patch is the authoritative block.
+# INTERNAL CLIPBOARD (optional — activated by site-config.json):
+#
+#   When config/site-config.json lists one or more hostnames in
+#   "clipboard_sites", an in-process clipboard is activated for those sites:
+#
+#   - Copy (Ctrl+C) on a listed site: FireClipboardEvent does NOT intercept;
+#     it falls through to Firefox's native copy flow (nsHTMLCopyEncoder).
+#     ContentParent::RecvSetClipboard receives the transferable the native
+#     encoder produced, detects the listed-site origin via WindowGlobalParent,
+#     extracts text/plain, and stores it in gDenParentClipText (parent process).
+#     nsBaseClipboard::SetData then suppresses the actual OS clipboard write.
+#     This approach avoids the shadow-DOM text duplication that manual
+#     GetTransferableForSelection produced for Amazon-style content.
+#     The OS clipboard sequence number is recorded so an external copy (from
+#     another app) can be detected on paste and the intercept bypassed.
+#
+#   - Paste (Ctrl+V) on a listed site: FireClipboardEvent sets
+#     gDenServePasteFromInternal = true in the paste return block (outside the
+#     clipboardevents conditional — mozilla.cfg locks
+#     dom.event.clipboardevents.enabled false, which skips the entire event-
+#     dispatch block for web content, so the flag must be set after that block).
+#     nsClipboardProxy::GetDataSnapshotSync (and GetData) check this flag and
+#     call SendGetDenInternalClipboard (sync IPC) to fetch gDenParentClipText
+#     from the parent.  The parent's RecvGetDenInternalClipboard checks the OS
+#     clipboard sequence number; if it changed (external copy), it clears the
+#     stored text and returns hasData=false so the content process falls through
+#     to the normal OS clipboard IPC path.
+#     ClipboardPopulatedDataSnapshot requires AddDataFlavor to be called before
+#     SetTransferData so FlavorsTransferableCanExport populates mFlavors; the
+#     GetDataSync strict flavor check then passes for any editor transferable.
+#     The flag gDenServePasteFromInternal is NOT cleared by the intercept so
+#     both a JS event.clipboardData.getData() call and the editor's default
+#     paste (two separate clipboard reads in the same event) both succeed.
+#
+#   gDenServePasteFromInternal lives in the content process.
+#   nsClipboardProxy.cpp externs it from nsCopySupport.cpp (same binary).
+#   gDenParentClipText, gDenParentClipHasData, gDenParentCopySeqNum, and
+#   kDenClipboardSites live in the parent process (ContentParent.cpp).
+#   build.sh injects kDenClipboardSites into both nsCopySupport.cpp AND
+#   ContentParent.cpp at compile time from site-config.json.
+#
+#   Data copied from a listed site is never visible to the OS clipboard or to
+#   any unlisted site.  External clipboard content (from other apps) can flow
+#   IN to listed sites because the OS sequence-number check detects the external
+#   copy and bypasses the intercept.
+#
+# RELATIONSHIP TO PREFS:
+#   lockPref("dom.allow_cut_copy", false) and
+#   lockPref("dom.event.clipboardevents.enabled", false) in mozilla.cfg are
+#   belt-and-suspenders for external sites.  This patch is the authoritative
+#   clipboard control; the prefs do not affect listed-site internal clipboard.
 
+diff --git a/dom/events/Clipboard.cpp b/dom/events/Clipboard.cpp
+index 93a5a06..afa9ab0 100644
 --- a/dom/events/Clipboard.cpp
 +++ b/dom/events/Clipboard.cpp
-@@ -329,5 +329,8 @@
+@@ -329,6 +329,9 @@ static bool IsReadTextExposedToContent() {
  already_AddRefed<Promise> Clipboard::ReadHelper(nsIPrincipal& aSubjectPrincipal,
                                                  ReadRequestType aType,
                                                  ErrorResult& aRv) {
@@ -57,7 +102,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  return nullptr;
    // Create a new promise
    nsGlobalWindowInner* owner = GetOwnerWindow();
-@@ -679,5 +682,8 @@
+   RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
+@@ -679,6 +682,9 @@ NS_IMPL_ISUPPORTS(ClipboardWriteCallback, nsIAsyncClipboardRequestCallback)
  already_AddRefed<Promise> Clipboard::Write(
      const Sequence<OwningNonNull<ClipboardItem>>& aData,
      nsIPrincipal& aSubjectPrincipal, ErrorResult& aRv) {
@@ -66,28 +112,107 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  return nullptr;
    // Create a promise
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
+   RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
+diff --git a/dom/base/nsCopySupport.cpp b/dom/base/nsCopySupport.cpp
+index ff0badb..c08a3d3 100644
 --- a/dom/base/nsCopySupport.cpp
 +++ b/dom/base/nsCopySupport.cpp
-@@ -822,6 +822,11 @@
+@@ -69,6 +69,36 @@ static NS_DEFINE_CID(kCClipboardCID, NS_CLIPBOARD_CID);
+ static NS_DEFINE_CID(kCTransferableCID, NS_TRANSFERABLE_CID);
+ static NS_DEFINE_CID(kHTMLConverterCID, NS_HTMLFORMATCONVERTER_CID);
+ 
++// ── DenBrowser internal clipboard ────────────────────────────────────────────
++// Compile-time clipboard allow-list. build.sh injects entries from
++// site-config.json between the sentinel markers at build time.
++// ── DEN: CLIPBOARD_SITES ──
++static const char* const kDenClipboardSites[] = { nullptr };
++// ── DEN END: CLIPBOARD_SITES ──
++
++// Set by FireClipboardEvent on paste in a listed site; read by
++// nsClipboardProxy::GetDataSnapshotSync to trigger the IPC path to the
++// parent-process internal clipboard (ContentParent::gDenParentClipText).
++bool gDenServePasteFromInternal = false;
++
++static bool DenClipHostMatch(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  // Subdomain match: host must end with "." + pattern.
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++static bool DenClipSiteAllowed(const nsACString& aHost) {
++  for (int i = 0; kDenClipboardSites[i]; ++i) {
++    if (DenClipHostMatch(aHost, kDenClipboardSites[i])) return true;
++  }
++  return false;
++}
++
+ // copy string data onto the transferable
+ static nsresult AppendString(nsITransferable* aTransferable,
+                              const nsAString& aString, const char* aFlavor);
+@@ -822,6 +852,27 @@ bool nsCopySupport::FireClipboardEvent(
    BrowsingContext* bc = piWindow->GetBrowsingContext();
    const bool chromeShell = bc && bc->IsChrome();
-
+ 
 +  // DenBrowser: block clipboard cut/copy for all content including browser UI.
++  // Listed sites: let the native copy flow proceed — ContentParent::RecvSetClipboard
++  // captures text/plain before nsBaseClipboard::SetData suppresses the OS write.
++  // This avoids the shadow-DOM duplication from manual GetTransferableForSelection;
++  // Firefox's own nsHTMLCopyEncoder handles Amazon-style shadow DOM correctly.
++  // Non-listed sites (or no allow-list configured): block immediately.
 +  if (originalEventMessage == eCopy || originalEventMessage == eCut) {
-+    return false;
++    if (kDenClipboardSites[0]) {
++      nsAutoCString host;
++      if (nsIURI* uri = doc->GetDocumentURI()) {
++        uri->GetHost(host);
++      }
++      if (!DenClipSiteAllowed(host)) {
++        return false;
++      }
++      // Listed site — fall through to native copy/cut path.
++    } else {
++      return false;
++    }
 +  }
 +
    // next, fire the cut, copy or paste event
    bool doDefault = true;
    RefPtr<DataTransfer> clipboardData;
+@@ -882,6 +933,22 @@ bool nsCopySupport::FireClipboardEvent(
+     if (aActionTaken) {
+       *aActionTaken = true;
+     }
++    // DenBrowser: set the serve-from-internal flag right before returning so
++    // the editor's clipboard read (which happens synchronously after we return
++    // doDefault=true) is intercepted by nsClipboardProxy.  Placed here rather
++    // than inside the chromeShell/clipboardevents block above so it runs even
++    // when dom.event.clipboardevents.enabled is locked false.  Reset first so
++    // each paste starts from a clean state.
++    gDenServePasteFromInternal = false;
++    if (doDefault && kDenClipboardSites[0]) {
++      nsAutoCString host;
++      if (nsIURI* uri = doc->GetDocumentURI()) {
++        uri->GetHost(host);
++      }
++      if (DenClipSiteAllowed(host)) {
++        gDenServePasteFromInternal = true;
++      }
++    }
+     return doDefault;
+   }
+ 
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+index a2ca828..3e11e9d 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
-@@ -5574,7 +5574,13 @@
-   // if they are requesting UI from us, let's fail since we have no UI
-   if (aShowUI) {
+@@ -5576,6 +5576,12 @@ bool Document::ExecCommand(const nsAString& aHTMLCommandName, bool aShowUI,
      return false;
    }
-
+ 
 +  // DenBrowser: block clipboard commands from web content.
 +  if (aHTMLCommandName.LowerCaseEqualsLiteral("cut") ||
 +      aHTMLCommandName.LowerCaseEqualsLiteral("copy") ||
@@ -96,22 +221,133 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  }
    //  for optional parameters see dom/src/base/nsHistory.cpp: HistoryImpl::Go()
    //  this might add some ugly JS dependencies?
+ 
+diff --git a/widget/nsBaseClipboard.cpp b/widget/nsBaseClipboard.cpp
+index deefa58..acf4b6d 100644
 --- a/widget/nsBaseClipboard.cpp
 +++ b/widget/nsBaseClipboard.cpp
-@@ -387,8 +387,9 @@
-   nsresult rv = NS_ERROR_FAILURE;
-   if (aTransferable) {
+@@ -391,8 +391,14 @@ NS_IMETHODIMP nsBaseClipboard::SetData(
      mIgnoreEmptyNotification = true;
      // Reject existing pending asyncSetData request if any.
      RejectPendingAsyncSetDataRequestIfAny(aWhichClipboard);
 -    rv = SetNativeClipboardData(aTransferable, aWhichClipboard);
-+    // DenBrowser: suppress all clipboard writes to the OS clipboard.
-+    rv = NS_OK;
      mIgnoreEmptyNotification = false;
++    // DenBrowser: suppress OS write AND skip the cache Update() below.
++    // Otherwise the in-memory ClipboardCache exposes listed-site text to
++    // non-listed sites via nsBaseClipboard::GetData's cached-data path
++    // (widget.clipboard.use-cached-data.enabled defaults true on macOS).
++    // Listed-site paste reads gDenParentClipText (set in RecvSetClipboard),
++    // not this cache, so the early return is safe.
++    return NS_OK;
    }
+   if (NS_FAILED(rv)) {
+     MOZ_CLIPBOARD_LOG("%s: setting native clipboard data failed.",
+diff --git a/widget/nsClipboardProxy.cpp b/widget/nsClipboardProxy.cpp
+index 7e701e6..baa1a65 100644
+--- a/widget/nsClipboardProxy.cpp
++++ b/widget/nsClipboardProxy.cpp
+@@ -20,6 +20,9 @@
+ #include "nsArrayUtils.h"
+ #include "nsBaseClipboard.h"
+ #include "nsIContentAnalysis.h"
++// DenBrowser: gDenServePasteFromInternal is defined in nsCopySupport.cpp (same
++// content-process binary); externs here so nsClipboardProxy can read it.
++extern bool gDenServePasteFromInternal;
+ #include "nsISupportsPrimitives.h"
+ #include "nsCOMPtr.h"
+ #include "nsComponentManagerUtils.h"
+@@ -70,6 +73,33 @@ NS_IMETHODIMP
+ nsClipboardProxy::GetData(nsITransferable* aTransferable,
+                           nsIClipboard::ClipboardType aWhichClipboard,
+                           mozilla::dom::WindowContext* aWindowContext) {
++  // DenBrowser: serve from parent-process internal clipboard if a listed site
++  // is pasting.  Data lives in ContentParent so it is accessible cross-process
++  // (Fission puts each site in its own content process).
++  // Do NOT clear gDenServePasteFromInternal here — the editor may call both
++  // GetData and GetDataSnapshotSync during the same paste operation.
++  if (gDenServePasteFromInternal) {
++    nsString denText;
++    bool denHasData = false;
++    ContentChild::GetSingleton()->SendGetDenInternalClipboard(&denText,
++                                                              &denHasData);
++    if (denHasData) {
++      nsCOMPtr<nsISupportsString> str =
++          do_CreateInstance("@mozilla.org/supports-string;1");
++      if (str) {
++        str->SetData(denText);
++        // Set data for every flavor the transferable accepts so the editor
++        // finds a match regardless of which flavor it prioritises.
++        nsTArray<nsCString> flavors;
++        aTransferable->FlavorsTransferableCanImport(flavors);
++        for (const auto& flavor : flavors) {
++          aTransferable->SetTransferData(flavor.get(), str);
++        }
++        return NS_OK;
++      }
++    }
++    // Parent has no internal data — fall through to OS clipboard IPC.
++  }
+   MOZ_DIAGNOSTIC_ASSERT(aWindowContext && aWindowContext->IsInProcess(),
+                         "content clipboard reads must be associated with an "
+                         "in-process WindowContext");
+@@ -324,6 +354,51 @@ NS_IMETHODIMP nsClipboardProxy::GetDataSnapshotSync(
+     nsIClipboardDataSnapshot** _retval) {
+   *_retval = nullptr;
+ 
++  // DenBrowser: serve from parent-process internal clipboard if a listed site
++  // is pasting.  Data lives in ContentParent so it is accessible cross-process
++  // (Fission puts each site in its own content process).
++  // Placed before the aFlavorList.IsEmpty() check so we can return early.
++  // Do NOT clear gDenServePasteFromInternal — both GetDataSnapshotSync and
++  // GetData may be called during the same paste event (JS clipboardData read
++  // + editor default paste); both need to see the flag.
++  // Populate the snapshot transferable with every flavor in aFlavorList so
++  // ClipboardPopulatedDataSnapshot::GetDataSync's strict "all flavors must be
++  // present" check always passes.
++  if (gDenServePasteFromInternal) {
++    nsString denText;
++    bool denHasData = false;
++    ContentChild::GetSingleton()->SendGetDenInternalClipboard(&denText,
++                                                              &denHasData);
++    if (denHasData) {
++      nsresult rv;
++      nsCOMPtr<nsITransferable> trans =
++          do_CreateInstance("@mozilla.org/widget/transferable;1", &rv);
++      if (NS_SUCCEEDED(rv) && trans) {
++        trans->Init(nullptr);
++        nsCOMPtr<nsISupportsString> str =
++            do_CreateInstance("@mozilla.org/supports-string;1");
++        if (str) {
++          str->SetData(denText);
++          // AddDataFlavor must be called before SetTransferData so that
++          // FlavorsTransferableCanExport (used by ClipboardPopulatedDataSnapshot
++          // constructor to build mFlavors) includes each flavor.  Without
++          // AddDataFlavor, mFlavors is empty and GetDataSync always returns
++          // NS_ERROR_FAILURE regardless of what the editor requests.
++          for (const auto& flavor : aFlavorList) {
++            trans->AddDataFlavor(flavor.get());
++            trans->SetTransferData(flavor.get(), str);
++          }
++        }
++        auto snapshot =
++            mozilla::MakeRefPtr<nsBaseClipboard::ClipboardPopulatedDataSnapshot>(
++                trans);
++        snapshot.forget(_retval);
++        return NS_OK;
++      }
++    }
++    // Parent has no internal data — fall through to OS clipboard IPC.
++  }
++
+   if (aFlavorList.IsEmpty()) {
+     return NS_ERROR_INVALID_ARG;
+   }
+diff --git a/widget/nsBaseDragService.cpp b/widget/nsBaseDragService.cpp
+index b23f465..f0a5a1e 100644
 --- a/widget/nsBaseDragService.cpp
 +++ b/widget/nsBaseDragService.cpp
-@@ -322,5 +322,7 @@
+@@ -321,6 +321,8 @@ nsresult nsBaseDragSession::InvokeDragSession(
+ 
    // stash the document of the dom node
    mSourceDocument = aDOMNode->OwnerDoc();
 +  // DenBrowser: block all drag-and-drop to prevent text exfiltration (incl. URL bar).
@@ -119,3 +355,354 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    mTriggeringPrincipal = aPrincipal;
    mCsp = aCsp;
    mSourceNode = aDOMNode;
+diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
+index da9b374..3bd275a 100644
+--- a/dom/ipc/PContent.ipdl
++++ b/dom/ipc/PContent.ipdl
+@@ -1242,6 +1242,14 @@ parent:
+     sync ClipboardHasType(nsCString[] aTypes, ClipboardType aWhichClipboard)
+         returns (bool hasType);
+ 
++    // DenBrowser: cross-process internal clipboard (listed sites only).
++    // Both messages are sync: SetDenInternalClipboard must be sync to avoid a
++    // race where an async SET from the copy-side process hasn't reached the
++    // parent before a sync GET fires from the paste-side process.
++    sync SetDenInternalClipboard(nsString aText);
++    sync GetDenInternalClipboard()
++        returns (nsString aText, bool aHasData);
++
+     /**
+      * Notify the parent that the child has started a clipboard write request,
+      * and that the data will be sent over another IPC message once it is ready.
+diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
+index 96b1763..66e3519 100644
+--- a/dom/ipc/ContentParent.h
++++ b/dom/ipc/ContentParent.h
+@@ -987,6 +987,11 @@ class ContentParent final : public PContentParent,
+       nsTArray<nsCString>&& aTypes,
+       const nsIClipboard::ClipboardType& aWhichClipboard, bool* aHasType);
+ 
++  // DenBrowser cross-process internal clipboard.
++  mozilla::ipc::IPCResult RecvSetDenInternalClipboard(const nsString& aText);
++  mozilla::ipc::IPCResult RecvGetDenInternalClipboard(nsString* aText,
++                                                       bool* aHasData);
++
+   mozilla::ipc::IPCResult RecvGetClipboardDataSnapshot(
+       nsTArray<nsCString>&& aTypes,
+       const nsIClipboard::ClipboardType& aWhichClipboard,
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+index 45eaca2..4b2b7e8 100644
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -48,6 +48,8 @@
+ #include "mozilla/AppShutdown.h"
+ #include "mozilla/AutoRestore.h"
+ #include "mozilla/ClipboardContentAnalysisParent.h"
++#include "nsBaseClipboard.h"
++#include "nsISupportsPrimitives.h"
+ #include "mozilla/BasePrincipal.h"
+ #include "mozilla/Casting.h"
+ #include "mozilla/ClearOnShutdown.h"
+@@ -3155,6 +3157,104 @@ void ContentParent::OnVarChanged(const GfxVarUpdate& aVar) {
+   Unused << SendVarUpdate(aVar);
+ }
+ 
++// ── DenBrowser clipboard allow-list (parent-process copy capture) ─────────────
++// Listed-site text is stored here so it is accessible from any content process
++// (Fission isolates each origin into its own process).
++// Entries are injected at build time by build.sh from site-config.json.
++// ── DEN: CLIPBOARD_SITES ──
++static const char* const kDenClipboardSites[] = { nullptr };
++// ── DEN END: CLIPBOARD_SITES ──
++
++static bool DenClipHostMatchP(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++static bool DenClipSiteAllowedP(const nsACString& aHost) {
++  for (int i = 0; kDenClipboardSites[i]; ++i) {
++    if (DenClipHostMatchP(aHost, kDenClipboardSites[i])) return true;
++  }
++  return false;
++}
++
++// Parent-process globals for the DenBrowser internal clipboard.
++// Set in RecvSetClipboard when a listed-site copy arrives; read in
++// RecvGetDenInternalClipboard when a listed-site paste requests data.
++static nsString gDenParentClipText;
++static bool gDenParentClipHasData = false;
++// OS clipboard sequence number recorded at copy time.  A change on retrieval
++// means an external app copied — we then invalidate the internal clipboard.
++static int32_t gDenParentCopySeqNum = -1;
++
++// Returns true if the parent should serve gDenParentClipText to this
++// requester instead of consulting the OS clipboard.  Used by the
++// RecvGetClipboard* intercepts: listed-site requesters get the internal text;
++// non-listed requesters fall through to the (now-suppressed) OS clipboard.
++// This intercept exists at the parent level because the editor pre-fetches
++// the clipboard via DataTransfer::CacheExternalClipboardFormats during the
++// DataTransfer constructor — which runs BEFORE FireClipboardEvent sets the
++// gDenServePasteFromInternal flag — so the content-side flag-gated intercept
++// in nsClipboardProxy misses the very first paste in a new tab.  The
++// principal check here covers that path regardless of flag timing.
++static bool DenServeInternalClipboardFor(WindowGlobalParent* aRequester) {
++  if (!kDenClipboardSites[0] || !aRequester || !gDenParentClipHasData) {
++    return false;
++  }
++  nsCOMPtr<nsIPrincipal> principal = aRequester->DocumentPrincipal();
++  if (!principal) return false;
++  nsCOMPtr<nsIURI> uri = principal->GetURI();
++  if (!uri) return false;
++  nsAutoCString host;
++  uri->GetHost(host);
++  if (host.IsEmpty() || !DenClipSiteAllowedP(host)) return false;
++  // External-copy detection: if the OS clipboard sequence number changed
++  // since the listed-site copy, another app wrote to the clipboard.
++  // Invalidate the internal clipboard so the caller falls through.
++  if (gDenParentCopySeqNum != -1) {
++    if (nsCOMPtr<nsIClipboard> cb = do_GetService(kCClipboardCID)) {
++      nsBaseClipboard* base = static_cast<nsBaseClipboard*>(cb.get());
++      auto result = base->GetNativeClipboardSequenceNumber(
++          nsIClipboard::kGlobalClipboard);
++      if (result.isOk() && result.unwrap() != gDenParentCopySeqNum) {
++        gDenParentClipHasData = false;
++        gDenParentClipText.Truncate();
++        return false;
++      }
++    }
++  }
++  return true;
++}
++
++// Build a transferable containing gDenParentClipText, with each requested
++// flavor registered (via AddDataFlavor) and set to the same text data.
++// AddDataFlavor must run before SetTransferData so
++// FlavorsTransferableCanExport — used by ClipboardPopulatedDataSnapshot's
++// constructor to populate mFlavors — sees every flavor.  Without that, the
++// snapshot's GetDataSync strict flavor check fails for every editor read.
++static nsresult DenBuildInternalTransferable(const nsTArray<nsCString>& aTypes,
++                                             nsITransferable** aOutTransferable) {
++  nsresult rv;
++  nsCOMPtr<nsITransferable> trans =
++      do_CreateInstance("@mozilla.org/widget/transferable;1", &rv);
++  if (NS_FAILED(rv) || !trans) return NS_ERROR_FAILURE;
++  trans->Init(nullptr);
++  nsCOMPtr<nsISupportsString> str =
++      do_CreateInstance("@mozilla.org/supports-string;1");
++  if (!str) return NS_ERROR_FAILURE;
++  str->SetData(gDenParentClipText);
++  for (const auto& flavor : aTypes) {
++    trans->AddDataFlavor(flavor.get());
++    trans->SetTransferData(flavor.get(), str);
++  }
++  trans.forget(aOutTransferable);
++  return NS_OK;
++}
++
+ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
+     const IPCTransferable& aTransferable,
+     const nsIClipboard::ClipboardType& aWhichClipboard,
+@@ -3188,6 +3288,46 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
+   if (!aRequestingWindowContext.IsDiscarded()) {
+     window = aRequestingWindowContext.get_canonical();
+   }
++
++  // DenBrowser: if this is a global-clipboard write from a listed site, capture
++  // text/plain for cross-process paste.  nsBaseClipboard::SetData (called via
++  // clipboard->SetData below) suppresses the actual OS write, so we only need
++  // to extract the text here.  Using RecvSetClipboard rather than intercepting
++  // in FireClipboardEvent means Firefox's own nsHTMLCopyEncoder has already
++  // serialised the selection — no shadow-DOM duplication.
++  if (aWhichClipboard == nsIClipboard::kGlobalClipboard && kDenClipboardSites[0] &&
++      window) {
++    nsCOMPtr<nsIURI> principalURI;
++    if (nsCOMPtr<nsIPrincipal> principal = window->DocumentPrincipal()) {
++      principalURI = principal->GetURI();
++    }
++    if (principalURI) {
++      nsAutoCString host;
++      principalURI->GetHost(host);
++      if (!host.IsEmpty() && DenClipSiteAllowedP(host)) {
++        nsCOMPtr<nsISupports> rawData;
++        if (NS_SUCCEEDED(
++                trans->GetTransferData("text/plain", getter_AddRefs(rawData)))) {
++          if (nsCOMPtr<nsISupportsString> strData = do_QueryInterface(rawData)) {
++            nsAutoString text;
++            strData->GetData(text);
++            if (!text.IsEmpty()) {
++              gDenParentClipText = text;
++              gDenParentClipHasData = true;
++              // Record OS clipboard sequence number for external-copy detection.
++              if (nsCOMPtr<nsIClipboard> cb = do_GetService(kCClipboardCID)) {
++                nsBaseClipboard* base = static_cast<nsBaseClipboard*>(cb.get());
++                auto result = base->GetNativeClipboardSequenceNumber(
++                    nsIClipboard::kGlobalClipboard);
++                gDenParentCopySeqNum = result.unwrapOr(-1);
++              }
++            }
++          }
++        }
++      }
++    }
++  }
++
+   clipboard->SetData(trans, nullptr, aWhichClipboard, window);
+   return IPC_OK();
+ }
+@@ -3237,6 +3377,21 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboard(
+     return IPC_FAIL(this, "passed null window to RecvGetClipboard()");
+   }
+   RefPtr<WindowGlobalParent> window = aRequestingWindowContext.get_canonical();
++
++  // DenBrowser: serve from internal clipboard if the requester is a listed site.
++  if (aWhichClipboard == nsIClipboard::kGlobalClipboard &&
++      DenServeInternalClipboardFor(window)) {
++    nsCOMPtr<nsITransferable> denTrans;
++    if (NS_SUCCEEDED(
++            DenBuildInternalTransferable(aTypes, getter_AddRefs(denTrans)))) {
++      IPCTransferableData transferableData;
++      nsContentUtils::TransferableToIPCTransferableData(
++          denTrans, &transferableData, true /* aInSyncMessage */, this);
++      *aTransferableDataOrError = std::move(transferableData);
++      return IPC_OK();
++    }
++  }
++
+   // Retrieve clipboard
+   nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
+   if (NS_FAILED(rv)) {
+@@ -3277,9 +3432,63 @@ mozilla::ipc::IPCResult ContentParent::RecvEmptyClipboard(
+   return IPC_OK();
+ }
+ 
++// ── DenBrowser cross-process internal clipboard handlers ──────────────────────
++mozilla::ipc::IPCResult ContentParent::RecvSetDenInternalClipboard(
++    const nsString& aText) {
++  // Fallback path: content process can also set the internal clipboard directly
++  // (e.g. if RecvSetClipboard was not triggered).  RecvSetClipboard is the
++  // primary capture path since Firefox 140 with Fission.
++  gDenParentClipText = aText;
++  gDenParentClipHasData = !aText.IsEmpty();
++  if (nsCOMPtr<nsIClipboard> cb = do_GetService(kCClipboardCID)) {
++    nsBaseClipboard* base = static_cast<nsBaseClipboard*>(cb.get());
++    auto result =
++        base->GetNativeClipboardSequenceNumber(nsIClipboard::kGlobalClipboard);
++    gDenParentCopySeqNum = result.unwrapOr(-1);
++  }
++  return IPC_OK();
++}
++
++mozilla::ipc::IPCResult ContentParent::RecvGetDenInternalClipboard(
++    nsString* aText, bool* aHasData) {
++  // gDenParentCopySeqNum == -1 means GetNativeClipboardSequenceNumber failed
++  // at copy time; skip the check to avoid a false-positive invalidation where
++  // the copy-time call fails but the get-time call succeeds and returns a real
++  // sequence number that doesn't match the -1 sentinel.
++  if (gDenParentClipHasData && gDenParentCopySeqNum != -1) {
++    if (nsCOMPtr<nsIClipboard> cb = do_GetService(kCClipboardCID)) {
++      nsBaseClipboard* base = static_cast<nsBaseClipboard*>(cb.get());
++      auto result = base->GetNativeClipboardSequenceNumber(
++          nsIClipboard::kGlobalClipboard);
++      if (result.isOk() && result.unwrap() != gDenParentCopySeqNum) {
++        // External copy detected — invalidate so content process falls through
++        // to the OS clipboard.
++        gDenParentClipHasData = false;
++        gDenParentClipText.Truncate();
++      }
++    }
++  }
++  *aText = gDenParentClipText;
++  *aHasData = gDenParentClipHasData;
++  return IPC_OK();
++}
++
+ mozilla::ipc::IPCResult ContentParent::RecvClipboardHasType(
+     nsTArray<nsCString>&& aTypes,
+     const nsIClipboard::ClipboardType& aWhichClipboard, bool* aHasType) {
++  // DenBrowser: report internal clipboard availability without principal info.
++  // See comment on DenServeInternalClipboardFor — this side-channel is OK
++  // because the actual data is principal-gated in the read handlers below.
++  if (aWhichClipboard == nsIClipboard::kGlobalClipboard && kDenClipboardSites[0] &&
++      gDenParentClipHasData) {
++    for (const auto& flavor : aTypes) {
++      if (flavor.EqualsLiteral("text/plain")) {
++        *aHasType = true;
++        return IPC_OK();
++      }
++    }
++  }
++
+   nsresult rv;
+   nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
+   NS_ENSURE_SUCCESS(rv, IPC_OK());
+@@ -3380,6 +3589,22 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
+         this, "attempt to paste into WindowContext loaded in another process");
+   }
+ 
++  // DenBrowser: serve from internal clipboard if the requester is a listed site.
++  if (aWhichClipboard == nsIClipboard::kGlobalClipboard &&
++      DenServeInternalClipboardFor(requestingWindow)) {
++    nsCOMPtr<nsITransferable> denTrans;
++    if (NS_SUCCEEDED(
++            DenBuildInternalTransferable(aTypes, getter_AddRefs(denTrans)))) {
++      RefPtr<nsBaseClipboard::ClipboardPopulatedDataSnapshot> denSnapshot =
++          mozilla::MakeRefPtr<nsBaseClipboard::ClipboardPopulatedDataSnapshot>(
++              denTrans);
++      auto denCallback =
++          MakeRefPtr<ClipboardGetCallback>(this, std::move(aResolver));
++      denCallback->OnSuccess(denSnapshot);
++      return IPC_OK();
++    }
++  }
++
+   nsresult rv;
+   // Retrieve clipboard
+   nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
+@@ -3417,6 +3642,26 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
+         this, "attempt to paste into WindowContext loaded in another process");
+   }
+ 
++  // DenBrowser: serve from internal clipboard if the requester is a listed site.
++  // This is the path the editor hits during DataTransfer::CacheExternalClipboard
++  // Formats (called from the DataTransfer constructor in PasteAsAction, BEFORE
++  // FireClipboardEvent sets the gDenServePasteFromInternal flag).
++  if (aWhichClipboard == nsIClipboard::kGlobalClipboard &&
++      DenServeInternalClipboardFor(requestingWindow)) {
++    nsCOMPtr<nsITransferable> denTrans;
++    if (NS_SUCCEEDED(
++            DenBuildInternalTransferable(aTypes, getter_AddRefs(denTrans)))) {
++      RefPtr<nsBaseClipboard::ClipboardPopulatedDataSnapshot> denSnapshot =
++          mozilla::MakeRefPtr<nsBaseClipboard::ClipboardPopulatedDataSnapshot>(
++              denTrans);
++      auto denResult = CreateClipboardReadRequest(*this, *denSnapshot);
++      if (denResult.isOk()) {
++        *aRequestOrError = denResult.unwrap();
++        return IPC_OK();
++      }
++    }
++  }
++
+   nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID));
+   if (!clipboard) {
+     *aRequestOrError = NS_ERROR_FAILURE;
+diff --git a/ipc/ipdl/sync-messages.ini b/ipc/ipdl/sync-messages.ini
+index 1e000b7..1f1a1d0 100644
+--- a/ipc/ipdl/sync-messages.ini
++++ b/ipc/ipdl/sync-messages.ini
+@@ -108,6 +108,10 @@ description = Legacy synchronous clipboard API
+ description = Legacy synchronous clipboard API
+ [PContent::GetClipboardDataSnapshotSync]
+ description = Legacy synchronous clipboard API
++[PContent::SetDenInternalClipboard]
++description = DenBrowser internal clipboard: stores copy text in parent process; must be sync to prevent a race with GetDenInternalClipboard from a different content process
++[PContent::GetDenInternalClipboard]
++description = DenBrowser internal clipboard: retrieves copy text from parent process for listed-site paste intercept
+ 
+ # The rest
+ [PHeapSnapshotTempFileHelper::OpenHeapSnapshotTempFile]
