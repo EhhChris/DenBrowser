@@ -5,11 +5,10 @@
 # Usage: cp config/mozconfig <firefox-src>/.mozconfig
 #        OR: export MOZCONFIG=/path/to/DenBrowser/config/mozconfig
 
-# ── Application identity ──────────────────────────────────────────────────────
+# ── Application variables ──────────────────────────────────────────────────────
 export MOZ_APP_NAME=denbrowser
 export MOZ_APP_DISPLAYNAME="DenBrowser"
-export MOZ_CRASHREPORTER_API_URL=
-export MOZILLA_OFFICIAL=1
+export SCCACHE_CACHE_SIZE="50G"
 
 # ── Compiler (cross-platform) ─────────────────────────────────────────────────
 # Firefox on Windows requires clang-cl (MSVC-compatibility mode).
@@ -33,20 +32,36 @@ ac_add_options --enable-optimize="-O2"
 ac_add_options --disable-debug
 ac_add_options --enable-strip
 ac_add_options --enable-install-strip
+ac_add_options --with-compiler-wrapper=sccache
 
 # ── Security hardening ────────────────────────────────────────────────────────
 ac_add_options --enable-hardening
 
-# ── Disabled features (attack surface reduction) ─────────────────────────────
+# ── Disabled features ─────────────────────────────
 ac_add_options --disable-crashreporter
 ac_add_options --disable-updater
 ac_add_options --disable-tests
 ac_add_options --disable-parental-controls
 ac_add_options --disable-profiling
+ac_add_options --disable-accessibility
 
 # ── macOS-specific ────────────────────────────────────────────────────────────
 # Uncomment and set SDK path for your Xcode version:
 # ac_add_options --with-macos-sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+
+
+# ── Parallel builds ────────────────────────────────────────────────────────────
+_den_jobs() {
+  case "$(uname -s)" in
+    Darwin)  sysctl -n hw.logicalcpu 2>/dev/null ;;
+    Linux)   nproc 2>/dev/null ;;
+    MINGW*|MSYS*|CYGWIN*)  echo "${NUMBER_OF_PROCESSORS:-4}" ;;
+  esac
+}
+_den_j="$(_den_jobs)"
+: "${_den_j:=4}"   # fallback to 4 if detection fails
+mk_add_options MOZ_MAKE_FLAGS="-j${_den_j}"
+unset _den_jobs _den_j
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
 mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/../denbrowser-obj

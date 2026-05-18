@@ -121,11 +121,12 @@ fi
 SITE_CONFIG="$ROOT_DIR/config/site-config.json"
 NCOPY_SRC="$FIREFOX_SRC/dom/base/nsCopySupport.cpp"
 DOCSHELL_SRC="$FIREFOX_SRC/docshell/base/nsDocShell.cpp"
+CONTENT_PARENT_SRC="$FIREFOX_SRC/dom/ipc/ContentParent.cpp"
 if [[ -f "$SITE_CONFIG" ]]; then
-    python3 - "$SITE_CONFIG" "$NCOPY_SRC" "$DOCSHELL_SRC" <<'PYEOF' || { echo "[build] ERROR: site-config injection failed — aborting build."; exit 1; }
+    python3 - "$SITE_CONFIG" "$NCOPY_SRC" "$DOCSHELL_SRC" "$CONTENT_PARENT_SRC" <<'PYEOF' || { echo "[build] ERROR: site-config injection failed — aborting build."; exit 1; }
 import json, sys, re
 
-config_path, ncopy_path, docshell_path = sys.argv[1], sys.argv[2], sys.argv[3]
+config_path, ncopy_path, docshell_path, content_parent_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(config_path) as f:
     config = json.load(f)
@@ -161,9 +162,10 @@ def inject(filepath, sentinel_name, items):
         f.write(new_content)
     print(f'[build] Injected {sentinel_name} ({len(items)} entries) into {filepath}')
 
-inject(ncopy_path,    'CLIPBOARD_SITES', config.get('clipboard_sites', []))
-inject(docshell_path, 'SITE_WHITELIST',  config.get('site_whitelist',  []))
-inject(docshell_path, 'SITE_BLACKLIST',  config.get('site_blacklist',  []))
+inject(ncopy_path,         'CLIPBOARD_SITES', config.get('clipboard_sites', []))
+inject(content_parent_path,'CLIPBOARD_SITES', config.get('clipboard_sites', []))
+inject(docshell_path,      'SITE_WHITELIST',  config.get('site_whitelist',  []))
+inject(docshell_path,      'SITE_BLACKLIST',  config.get('site_blacklist',  []))
 PYEOF
 else
     echo "[build] No site-config.json — clipboard allow-list and site filter disabled."
