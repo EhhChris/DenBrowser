@@ -458,3 +458,16 @@ index 45eaca2..ecae4b2 100644
  mozilla::ipc::IPCResult ContentParent::RecvClipboardHasType(
      nsTArray<nsCString>&& aTypes,
      const nsIClipboard::ClipboardType& aWhichClipboard, bool* aHasType) {
+diff --git a/ipc/ipdl/sync-messages.ini b/ipc/ipdl/sync-messages.ini
+index 1e000b7..52d9b8e 100644
+--- a/ipc/ipdl/sync-messages.ini
++++ b/ipc/ipdl/sync-messages.ini
+@@ -108,6 +108,8 @@ description = Legacy synchronous clipboard API
+ description = Legacy synchronous clipboard API
+ [PContent::GetClipboardDataSnapshotSync]
+ description = Legacy synchronous clipboard API
++[PContent::GetDenInternalClipboard]
++description = DenBrowser internal clipboard: retrieves copy text from parent process for listed-site paste intercept
+ 
+ # The rest
+ [PHeapSnapshotTempFileHelper::OpenHeapSnapshotTempFile]
