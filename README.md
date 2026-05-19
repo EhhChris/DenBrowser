@@ -5,9 +5,13 @@
 
 A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. DenBrowser is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
 
-**Currently only built and tested against FireFox ESR 140.9.1**
+**Currently tracking Firefox ESR 140.x** (most recently built against 140.11.0esr;
+`scripts/fetch-esr.sh` pulls whatever ESR is current at fetch time).
 
 As this project progresses tags will be cut and attempt to follow the latest ESR releases.
+Patch 015 is regenerated semantically (`scripts/gen-015-patch.sh`) per ESR; the
+remaining patches use small enough context that they usually carry across
+point releases unmodified.
 
 ---
 
@@ -56,34 +60,122 @@ cd ../..
 ```
 DenBrowser/
 ├── build.sh                    # Full build orchestration
+├── branding/                   # DenBrowser branding assets (icons, etc.)
 ├── config/
-│   ├── mozconfig               # Firefox build flags & app identity
-│   ├── policies.json           # Enterprise policy enforcement
-│   └── user.js                 # Hardened preference overrides (injected at launch)
+│   ├── mozconfig               # Firefox build flags + app identity
+│   ├── policies.json           # Enterprise policy enforcement (loaded at startup)
+│   ├── mozilla.cfg             # Hardened lockPref overrides (autoconfig-locked)
+│   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
+│   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites
 ├── patches/
 │   ├── README.md               # Patch development guide
-│   ├── 000-fix-bindgen-basic-string-view.patch
-│   ├── 001-disable-screenshots.patch
-│   ├── 002-disable-screenshare.patch
-│   ├── 003-restrict-clipboard.patch
-│   ├── 004-restrict-downloads.patch
-│   ├── 005-disable-printing.patch
-│   ├── 006-enforce-vpn.patch
-│   ├── 007-ramdisk-profile.patch
-│   ├── 008-disable-devtools.patch
-│   ├── 009-denbrowser-branding.patch
-│   ├── 010-disable-diagnostics.patch
-│   └── 011-disable-extensions.patch
-├── scripts/
-│   ├── fetch-esr.sh            # Download & verify latest Firefox ESR
-│   └── apply-patches.sh        # Apply patches with dry-run validation
-└── branding/                   # DenBrowser branding assets
+│   └── NNN-*.patch             # See "Patches" table below
+├── proxy/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs             # Pingora-based attestation proxy entrypoint
+│       └── attest.rs           # ECIES verification + replay cache
+└── scripts/
+    ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
+    ├── apply-patches.sh        # Apply patches with dry-run validation
+    ├── gen-attest-key.sh       # Generate ECDSA P-256 attestation keypair
+    ├── gen-proxy-tls.sh        # Generate / register the pinned proxy TLS cert
+    └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
 ---
 
-## Patch status
+## Defense layers
 
-**TODO:** create new table for this once closer to reality and more human review is done.
+DenBrowser's protections are layered across four enforcement points so any
+single bypass still leaves the rest in place:
+
+1. **Build-time flags** (`config/mozconfig`) — `--disable-crashreporter`,
+   `--disable-updater`, `--disable-tests`, `--disable-parental-controls`,
+   `--disable-profiling`, `--disable-accessibility`, `--enable-hardening`,
+   `--enable-strip` / `--enable-install-strip`.  Code paths and symbols are
+   never compiled in.
+2. **Source patches** — applied to the Firefox source tree before build;
+   compiled into the binary and cannot be disabled at runtime by any
+   user-accessible mechanism.
+3. **Enterprise policies** (`config/policies.json`) — loaded at startup;
+   lock UI surfaces and per-URL permissions.  Cannot be overridden by
+   profile state.
+4. **Autoconfig prefs** (`config/mozilla.cfg` via `config/autoconfig.js`) —
+   `lockPref` values that override `prefs.js`, `about:config`, and all
+   profile state.
+
+The categories below summarize what is protected and where the enforcement
+lives.
+
+| Concern | Patch(es) | Policy | lockPref |
+|---|---|---|---|
+| Profile / on-disk content | — | `SanitizeOnShutdown`, `DisableFormHistory` | `browser.privatebrowsing.autostart`, `browser.cache.disk.*`, `browser.cache.offline.*`, `media.cache_size`, `places.history.enabled`, `signon.rememberSignons`, `browser.formfill.enable`, `browser.sessionstore.*`, `browser.pagethumbnails.capturing_disabled`, `browser.shell.shortcutFavicons`, `dom.serviceWorkers.enabled` |
+| Screenshots (built-in + OS capture) | 001 | `DisableScreenshots` | `extensions.screenshots.disabled` |
+| Screen / window / browser capture | 002 | — | `media.getusermedia.screensharing.enabled`, `media.getusermedia.browser.enabled`, `media.getusermedia.window.focus_source.enabled` |
+| Clipboard + drag-and-drop | 003 | — | `dom.allow_cut_copy`, `dom.event.clipboardevents.enabled` |
+| Downloads / Save As / wallpaper | 004 | `PromptForDownloadLocation` | `browser.download.useDownloadDir`, `browser.download.forbid_open_with`, `browser.download.always_ask_before_handling_new_types`, `browser.download.manager.retention`, `browser.download.start_downloads_in_tmp_dir`, `browser.helperApps.deleteTempFileOnExit` |
+| Printing + print-to-PDF | 005 | `DisablePrinting` | `print.enabled` |
+| Per-request attestation to proxy | 006 | — | — |
+| RAM-disk profile | 007 (intentional stub — FDE on host instead) | — | — |
+| Developer tools (incl. CLI debug flags) | 008, 015 | `DisableDeveloperTools`, `BlockAboutConfig`, `BlockAboutProfiles`, `BlockAboutSupport`, `BlockAboutAddons` | `devtools.policy.disabled`, `devtools.chrome.enabled`, `devtools.debugger.remote-enabled`, `devtools.debugger.prompt-connection`, `marionette.enabled` |
+| Branding | 009 | — | — |
+| Telemetry / diagnostics | 010 | `DisableTelemetry`, `DisableFirefoxStudies`, `DisableFeedbackCommands` | `datareporting.policy.dataSubmissionEnabled`, `datareporting.healthreport.uploadEnabled`, `toolkit.telemetry.enabled`, `toolkit.telemetry.unified`, `app.normandy.enabled`, `app.shield.optoutstudies.enabled` |
+| Extensions (loading + install) | 011 | `ExtensionSettings: {* blocked}`, `DisableSystemAddonUpdate` | `xpinstall.enabled` |
+| Proxy TLS SPKI pinning | 012 | — | — |
+| Sync / Firefox Accounts | 013 | `DisableFirefoxAccounts` | `identity.fxaccounts.enabled` (covered by policy) |
+| Site whitelist / blacklist | 014 | — | — |
+| Argv + env-var stripping | 015 | — | — |
+| Window-title leak | 016 | — | — |
+| Camera / Microphone / Location / Notifications / VR | — | `Permissions: Camera/Microphone/Location/Notifications/VirtualReality {Block: <all_urls>, Locked: true}`, `Autoplay: block-audio-video` | `geo.enabled`, `media.peerconnection.enabled`, `media.navigator.enabled` |
+| Cookies — in-memory, no third-party | — | `Cookies: reject-foreign + ExpireAtSessionEnd + Locked` | (via policy) |
+| DRM / EME | — | `EncryptedMediaExtensions {Enabled: false, Locked: true}` | — |
+| Password manager / form autofill | — | `PasswordManagerEnabled: false`, `DisableMasterPasswordCreation`, `DisableProfileImport` | `signon.rememberSignons`, `extensions.formautofill.available` |
+| First-run / new-tab / Pocket / messaging | — | `DisablePocket`, `OverrideFirstRunPage`, `OverridePostUpdatePage`, `NoDefaultBookmarks`, `FirefoxHome`, `UserMessaging` | — |
+| App + system-addon updates | — | `DisableAppUpdate`, `AppUpdateURL`, `DisableSystemAddonUpdate` | `app.update.background.enabled`, `extensions.update.enabled`, `extensions.systemAddon.update.enabled` |
+| HTTPS-only enforcement | — | `HttpsOnlyMode: force_enabled` | — |
+| Translation / search-suggest / DoH | — | `TranslateEnabled: false`, `SearchSuggestEnabled: false`, `DNSOverHTTPS {Enabled: false, Locked: true}`, `NetworkPrediction: false` | `network.dns.disablePrefetch`, `network.dns.disablePrefetchFromHTTPS`, `network.prefetch-next`, `network.predictor.enabled`, `network.http.speculative-parallel-limit`, `browser.urlbar.suggest.history`, `browser.urlbar.suggest.bookmark` |
+| Fingerprinting + tracking protection | — | — | `privacy.resistFingerprinting`, `privacy.resistFingerprinting.block_mozAddonManager`, `privacy.trackingprotection.enabled`, `privacy.trackingprotection.socialtracking.enabled`, `privacy.trackingprotection.cryptomining.enabled`, `privacy.trackingprotection.fingerprinting.enabled` |
+| External protocol handlers (mailto/tel/sms/…) | — | — | `network.protocol-handler.external-default`, `network.protocol-handler.external.mailto`, `network.protocol-handler.external.tel`, `network.protocol-handler.external.sms`, `dom.registerProtocolHandler.enabled` |
+| Phone-home endpoints (Safe Browsing, captive-portal, Remote Settings, OCSP, blocklist, etc.) | — | — | `browser.safebrowsing.*`, `network.captive-portal-service.enabled`, `network.connectivity-service.enabled`, `browser.discovery.enabled`, `services.settings.server`, `security.OCSP.*`, `security.remote_settings.*`, `extensions.blocklist.*`, `extensions.update.url`, `app.update.url`, `network.trr.confirmationNS` |
+| Web-platform capability APIs (Share / FS Access / USB / HID / Serial / MIDI / Bluetooth / Payments / Push / Notifications / SpeechSynth / Idle / Battery / Sensors / WebTransport / file://) | — | — | `dom.webshare.enabled`, `dom.fs.enabled`, `dom.origin-private-file-system.enabled`, `dom.webusb.enabled`, `dom.webhid.enabled`, `dom.webserial.enabled`, `dom.serial.enabled`, `dom.webmidi.enabled`, `dom.bluetooth.enabled`, `dom.payments.request.enabled`, `dom.push.enabled`, `dom.webnotifications.enabled`, `media.webspeech.synth.enabled`, `media.webspeech.recognition.enable`, `dom.idle-detection.enabled`, `dom.battery.enabled`, `device.sensors.enabled`, `network.webtransport.enabled`, `network.protocol-handler.expose.file` |
+
+Per-deployment configuration (`config/site-config.json`) drives three of the
+compile-time switches:
+
+- `clipboard_sites` — hosts that may use the in-browser internal clipboard
+  (patch 003).  Empty list = no in-browser copy/paste anywhere.
+- `site_whitelist` — if non-empty, only these hosts (and subdomains) are
+  navigable; everything else is blocked with a DenBrowser error page
+  (patch 014).
+- `site_blacklist` — used only when whitelist is empty.
+
+---
+
+## Patches
+
+Patches apply in lexicographic order via `scripts/apply-patches.sh`.  Each
+patch file's header has the full rationale; the summary below is intended
+for navigation.
+
+| # | Name | Summary |
+|---|---|---|
+| 000 | `fix-bindgen-basic-string-view` | Upstream build fix for libclang/bindgen on recent toolchains.  No security effect. |
+| 001 | `disable-screenshots` | Block built-in screenshot UI **and** exclude the window from OS screen-capture (`NSWindowSharingNone` on macOS, `WDA_EXCLUDEFROMCAPTURE` on Windows). |
+| 002 | `disable-screenshare` | Unconditionally reject `getDisplayMedia()` and legacy `getUserMedia({video:{mediaSource:"screen"}})` at both JS and C++ layers. |
+| 003 | `restrict-clipboard` | Block clipboard read/write and drag-and-drop everywhere; optional in-process clipboard for `clipboard_sites` so copy/paste works within the controlled site set without ever touching the OS clipboard. |
+| 004 | `restrict-downloads` | Cancel every file-save path: `internalSave`, `nsExternalHelperAppService::CreateListener`, `ShellService.canSetDesktopBackground`, and the Mac / Windows `SetDesktopBackground` C++ entry points. |
+| 005 | `disable-printing` | Reject `nsPrintJob::CommonPrint` for both print and print-preview — covers `window.print`, print-to-PDF, and any internal caller. |
+| 006 | `attest-requests` | Inject per-request ECIES attestation headers (v2: binds nonce + ts + host + method + path + body hash) into every outbound HTTP/HTTPS request for the Pingora proxy to verify. |
+| 007 | `ramdisk-profile` | **Intentionally not implemented** (STUB).  The header documents why: PBM + locked disk-cache prefs + `SanitizeOnShutdown` already keep content off disk, and the residual swap/hibernation risk needs FDE on the host — see [Deployment requirements](#deployment-requirements). |
+| 008 | `disable-devtools` | Hardcode `isDisabledByPolicy()` to `true` in both `DevToolsShim` and `DevToolsStartup`, so devtools stay off even if the policy/pref state is manipulated. |
+| 009 | `denbrowser-branding` | DenBrowser branding directory (icons, brand strings, Windows installer assets, Visual Elements manifest). |
+| 010 | `disable-diagnostics` | Replace `TelemetryReportingPolicy.dataSubmissionEnabled` getter with `return false`; short-circuit `TelemetryController.setupTelemetry` to a no-op. |
+| 011 | `disable-extensions` | Filter addon install locations to `SCOPE_APPLICATION` only; throw on any `AddonInstall.install()` call regardless of state. |
+| 012 | `pin-proxy-tls` | Pin the attestation proxy's TLS SPKI (sha256) into the build; abort the handshake in `AuthCertificateHook` before any application data flows if the leaf cert doesn't match. |
+| 013 | `disable-sync` | Hardcode `WeaveService.enabled` and `FXA_ENABLED` to `false`; remove the Sync preferences pane and Synced-Tabs sidebar entries from the UI. |
+| 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad`; localize the "blocked page" message. |
+| 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
+| 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
 
 ---
