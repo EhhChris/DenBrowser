@@ -1,0 +1,115 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 015-strip-blocked-args
+#
+# Strips security-sensitive command-line flags from gArgv before any Firefox
+# processing occurs, making DenBrowser's lockdowns resistant to being bypassed
+# by invoking the binary directly with custom flags.
+#
+# Without this patch, a user with shell access can bypass mozilla.cfg lockdowns
+# by launching the binary with a custom profile:
+#
+#   denbrowser --profile /tmp/mypersistentprofile
+#
+# A persistent profile may contain a prefs.js that overrides locked preferences,
+# load arbitrary extensions, or persist browsing data to disk — defeating patch
+# 007 (ramdisk profile), the autoconfig lockdown, and the ExtensionSettings
+# policy simultaneously.
+#
+# Flags stripped and why:
+#
+#   --profile <path>           Overrides the ramdisk profile (patch 007) and
+#                              bypasses all mozilla.cfg lockdowns.
+#   -P <name>                  Same effect as --profile but selects a named
+#                              profile from the profile service.
+#   --ProfileManager           Opens a UI that lets the user switch or create
+#                              profiles, achieving the same bypass interactively.
+#   --marionette               Activates the Marionette WebDriver server, allowing
+#                              full remote control of the browser. Belt-and-
+#                              suspenders over the marionette.enabled lockPref in
+#                              mozilla.cfg.
+#   --remote-debugging-port    Activates the CDP (Chrome DevTools Protocol) remote
+#                              agent. Belt-and-suspenders over the
+#                              devtools.debugger.remote-enabled lockPref.
+#   --start-debugger-server    Starts the DevTools remote debugger server.
+#
+# Implementation:
+#
+#   DenStripArg() walks gArgv and removes every occurrence of a named flag
+#   (case-insensitive, handling -, -- and Windows / prefixes). If the entry
+#   immediately following the flag does not itself begin with '-', it is treated
+#   as the flag's value and is removed together with the flag. This correctly
+#   handles both value-taking flags (--profile /tmp/p) and value-optional flags
+#   (--remote-debugging-port or --remote-debugging-port 1234).
+#
+#   DenBrowserStripBlockedArgs() calls DenStripArg() for each blocked flag and
+#   is called from XREMain::XRE_main() immediately after gArgc/gArgv are
+#   assigned, before any other flag processing takes place.
+#
+# This patch operates at the C++ level and cannot be circumvented by profile
+# configuration, mozilla.cfg edits, or enterprise policy changes.
+
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -5937,6 +5937,52 @@
+ }
+ #endif
+
++// DenBrowser: strip command-line flags that can bypass security controls.
++// --profile / -P override the ramdisk profile (patch 007). --marionette and
++// --remote-debugging-port enable remote control of the browser.
++// --ProfileManager opens a profile-picker UI allowing profile switching.
++// A following argv value without a leading '-' is treated as the flag's
++// argument and removed along with it.
++static void DenStripArg(const char* aFlag) {
++  for (int i = 1; i < gArgc;) {
++    const char* p = gArgv[i];
++    if (p[0] == '-') {
++      p += (p[1] == '-') ? 2 : 1;
++    }
++#ifdef XP_WIN
++    else if (p[0] == '/') {
++      p += 1;
++    }
++#endif
++    else {
++      ++i;
++      continue;
++    }
++    if (nsCRT::strcasecmp(p, aFlag) != 0) {
++      ++i;
++      continue;
++    }
++    // Flag matched. If the next entry is not itself a flag, treat it as
++    // this flag's value and remove both; otherwise remove the flag only.
++    int toRemove = 1;
++    if (i + 1 < gArgc && gArgv[i + 1][0] != '-') {
++      toRemove = 2;
++    }
++    gArgc -= toRemove;
++    memmove(gArgv + i, gArgv + i + toRemove, sizeof(char*) * (gArgc - i + 1));
++    // Do not increment i: the slot now holds the next argument.
++  }
++}
++
++static void DenBrowserStripBlockedArgs() {
++  DenStripArg("profile");               // --profile <path>: custom profile dir
++  DenStripArg("p");                     // -P <name>: profile by name
++  DenStripArg("profilemanager");        // --ProfileManager: profile-picker UI
++  DenStripArg("marionette");            // --marionette: WebDriver / GeckoDriver
++  DenStripArg("remote-debugging-port"); // --remote-debugging-port: CDP
++  DenStripArg("start-debugger-server"); // --start-debugger-server: DevTools
++}
++
+ /*
+  * XRE_main - A class based main entry point used by most platforms.
+  *            Note that on OSX, aAppData->xreDirectory will point to
+@@ -5945,6 +5991,7 @@
+ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+   gArgc = argc;
+   gArgv = argv;
++  DenBrowserStripBlockedArgs();  // DenBrowser: remove blocked flags before any processing.
+
+   ScopedLogging log;
