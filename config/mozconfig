@@ -30,19 +30,20 @@ ac_add_options --with-branding=browser/branding/denbrowser
 # ── Build type ────────────────────────────────────────────────────────────────
 ac_add_options --enable-optimize="-O2"
 ac_add_options --disable-debug
-ac_add_options --enable-strip
-ac_add_options --enable-install-strip
+ac_add_options --enable-strip                 # [dev-reversed] → removed (debug symbols preserved)
+ac_add_options --enable-install-strip         # [dev-reversed] → removed (debug symbols preserved)
 ac_add_options --with-compiler-wrapper=sccache
 
 # ── Security hardening ────────────────────────────────────────────────────────
 ac_add_options --enable-hardening
 
 # ── Disabled features ─────────────────────────────
-ac_add_options --disable-crashreporter
+# Flags marked [dev-reversed] are removed/overridden by build.sh when --dev is passed.
+ac_add_options --disable-crashreporter        # [dev-reversed] → --enable-crashreporter
 ac_add_options --disable-updater
 ac_add_options --disable-tests
 ac_add_options --disable-parental-controls
-ac_add_options --disable-profiling
+ac_add_options --disable-profiling            # [dev-reversed] → --enable-profiling
 ac_add_options --disable-accessibility
 
 # ── macOS-specific ────────────────────────────────────────────────────────────

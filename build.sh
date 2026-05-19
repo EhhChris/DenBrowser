@@ -25,8 +25,10 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev]"
             echo "  --skip-patch N  Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
             echo "                  Repeatable: --skip-patch 6 --skip-patch 8"
-            echo "  --dev           Enable DevTools: skips patch 008, strips devtools locks from"
-            echo "                  policies.json and mozilla.cfg."
+            echo "  --dev           Enable DevTools + testing features: skips patch 008, strips"
+            echo "                  devtools locks from policies.json and mozilla.cfg, and adjusts"
+            echo "                  mozconfig to enable marionette, crashreporter, profiling, and"
+            echo "                  preserve debug symbols (no strip)."
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -34,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $DEV_MODE -eq 1 ]]; then
-    echo "[build] DEV MODE: DevTools will be enabled (patch 008 skipped, config locks removed)"
+    echo "[build] DEV MODE: DevTools enabled, marionette/crashreporter/profiling enabled, strip disabled"
     SKIP_PATCH_ARGS+=(--skip-patch 8)
 fi
 
@@ -203,6 +205,30 @@ fi
 # ── Step 3: Install build configuration ──────────────────────────────────────
 echo "[build] Installing mozconfig..."
 cp "$CONFIG_DIR/mozconfig" "$FIREFOX_SRC/.mozconfig"
+
+# In dev mode, reverse the production-only flags marked [dev-reversed] in mozconfig.
+# Uses Python3 (already required by this script) to stay portable across macOS/Linux.
+if [[ $DEV_MODE -eq 1 ]]; then
+    python3 - "$FIREFOX_SRC/.mozconfig" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+# Strip production-only flags (comments on same line are also removed).
+for flag in ('--enable-strip', '--enable-install-strip',
+             '--disable-crashreporter', '--disable-profiling'):
+    content = re.sub(r'ac_add_options ' + re.escape(flag) + r'[^\n]*\n?', '', content)
+# Append dev-only overrides.
+content += (
+    '\n# ── Dev mode additions (injected by build.sh --dev) ─────────────────────\n'
+    'ac_add_options --enable-crashreporter\n'
+    'ac_add_options --enable-profiling\n'
+)
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+    echo "[build] DEV MODE: mozconfig adjusted (marionette+crashreporter+profiling enabled, strip disabled)"
+fi
 
 # Append job count to mozconfig
 echo "mk_add_options MOZ_MAKE_FLAGS=\"-j${JOBS}\"" >> "$FIREFOX_SRC/.mozconfig"
