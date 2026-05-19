@@ -56,7 +56,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 @@ -5937,6 +5937,52 @@
  }
  #endif
-
+ 
 +// DenBrowser: strip command-line flags that can bypass security controls.
 +// --profile / -P override the ramdisk profile (patch 007). --marionette and
 +// --remote-debugging-port enable remote control of the browser.
@@ -111,5 +111,6 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    gArgc = argc;
    gArgv = argv;
 +  DenBrowserStripBlockedArgs();  // DenBrowser: remove blocked flags before any processing.
-
+ 
    ScopedLogging log;
+ 
