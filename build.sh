@@ -215,7 +215,7 @@ path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 # Strip production-only flags (comments on same line are also removed).
-for flag in ('--disable-marionette', '--enable-strip', '--enable-install-strip',
+for flag in ('--enable-strip', '--enable-install-strip',
              '--disable-crashreporter', '--disable-profiling'):
     content = re.sub(r'ac_add_options ' + re.escape(flag) + r'[^\n]*\n?', '', content)
 # Append dev-only overrides.

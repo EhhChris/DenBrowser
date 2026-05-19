@@ -40,7 +40,6 @@ ac_add_options --enable-hardening
 # ── Disabled features ─────────────────────────────
 # Flags marked [dev-reversed] are removed/overridden by build.sh when --dev is passed.
 ac_add_options --disable-crashreporter        # [dev-reversed] → --enable-crashreporter
-ac_add_options --disable-marionette           # [dev-reversed] → removed (marionette enabled)
 ac_add_options --disable-updater
 ac_add_options --disable-tests
 ac_add_options --disable-parental-controls
