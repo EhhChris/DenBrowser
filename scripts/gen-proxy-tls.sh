@@ -70,10 +70,11 @@ if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
     chmod 600    "$KEY_OUT"
 else
     echo "[gen-proxy-tls] Generating self-signed cert for CN=$PROXY_HOST (10y)..."
-    # MSYS_NO_PATHCONV=1 stops Git Bash on Windows from mangling "/CN=..." into
-    # a Windows path. Harmless on macOS/Linux.
-    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-        -subj "/CN=$PROXY_HOST" \
+    # The "//CN=..." double-slash stops Git Bash on Windows from mangling the
+    # subject DN into a Windows path. OpenSSL tolerates the empty leading
+    # component, and Linux/macOS treat // identically to /.
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -subj "//CN=$PROXY_HOST" \
         -addext "subjectAltName=DNS:$PROXY_HOST" \
         -keyout "$KEY_OUT" -out "$CERT_OUT"
     chmod 600 "$KEY_OUT"
