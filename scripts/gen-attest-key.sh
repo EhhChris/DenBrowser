@@ -74,7 +74,7 @@ import sys, re
 cpp_path = sys.argv[1]
 new_bytes = sys.argv[2]
 
-with open(cpp_path, "r") as f:
+with open(cpp_path, "r", encoding="utf-8") as f:
     src = f.read()
 
 pattern = re.compile(
@@ -89,7 +89,7 @@ if n != 1:
     print(f"ERROR: Could not find REPLACE markers in {cpp_path}", file=sys.stderr)
     sys.exit(1)
 
-with open(cpp_path, "w") as f:
+with open(cpp_path, "w", encoding="utf-8", newline="\n") as f:
     f.write(new_src)
 
 print(f"  Updated {cpp_path}")

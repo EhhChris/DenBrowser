@@ -38,7 +38,7 @@ import sys, difflib, re
 
 target_path, target_rel, patch_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-with open(target_path) as f:
+with open(target_path, encoding='utf-8') as f:
     orig_src = f.read()
 
 src = orig_src
@@ -270,7 +270,7 @@ if not diff_lines:
 new_diff = ''.join(diff_lines)
 
 # ── Splice into existing patch file (preserve the comment header) ─────────────
-with open(patch_path) as f:
+with open(patch_path, encoding='utf-8') as f:
     patch = f.read()
 
 # Find the "--- a/" marker that starts the diff section.
@@ -281,7 +281,7 @@ if diff_start == -1:
 
 updated = patch[:diff_start + 1] + new_diff  # +1 keeps the preceding newline
 
-with open(patch_path, 'w') as f:
+with open(patch_path, 'w', encoding='utf-8', newline='\n') as f:
     f.write(updated)
 
 # Report hunk summary.

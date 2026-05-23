@@ -70,10 +70,12 @@ if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
     chmod 600    "$KEY_OUT"
 else
     echo "[gen-proxy-tls] Generating self-signed cert for CN=$PROXY_HOST (10y)..."
-    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    # MSYS_NO_PATHCONV=1 stops Git Bash on Windows from mangling "/CN=..." into
+    # a Windows path. Harmless on macOS/Linux.
+    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -subj "/CN=$PROXY_HOST" \
         -addext "subjectAltName=DNS:$PROXY_HOST" \
-        -keyout "$KEY_OUT" -out "$CERT_OUT" 2>/dev/null
+        -keyout "$KEY_OUT" -out "$CERT_OUT"
     chmod 600 "$KEY_OUT"
 fi
 
@@ -113,7 +115,7 @@ import sys, re
 
 cpp_path, host, spki_c = sys.argv[1], sys.argv[2], sys.argv[3]
 
-with open(cpp_path) as f:
+with open(cpp_path, encoding="utf-8") as f:
     src = f.read()
 
 new_block = (
@@ -135,7 +137,7 @@ if n != 1:
     print("ERROR: REPLACE TLS PIN markers not found in", cpp_path, file=sys.stderr)
     sys.exit(1)
 
-with open(cpp_path, "w") as f:
+with open(cpp_path, "w", encoding="utf-8", newline="\n") as f:
     f.write(new_src)
 print(f"  Updated {cpp_path}")
 PYEOF

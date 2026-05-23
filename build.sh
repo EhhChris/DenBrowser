@@ -80,7 +80,7 @@ for i in range(0, len(raw), 10):
     chunk = raw[i:i+10]
     key_lines.append('  ' + ', '.join(f'0x{b:02x}' for b in chunk) + ',\n')
 
-with open(src_path, 'r') as f:
+with open(src_path, 'r', encoding='utf-8') as f:
     src_lines = f.readlines()
 
 # Find the sentinel lines and replace everything between them.
@@ -100,7 +100,7 @@ if start_i is None or end_i is None:
 
 new_lines = src_lines[:start_i + 1] + key_lines + src_lines[end_i:]
 
-with open(src_path, 'w') as f:
+with open(src_path, 'w', encoding='utf-8', newline='\n') as f:
     f.writelines(new_lines)
 
 print(f'[build] Injected {len(raw)}-byte public key ({len(key_lines)} lines).')
@@ -130,7 +130,7 @@ import json, sys, re
 
 config_path, ncopy_path, docshell_path, content_parent_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
-with open(config_path) as f:
+with open(config_path, encoding='utf-8') as f:
     config = json.load(f)
 
 VAR_NAMES = {
@@ -141,7 +141,7 @@ VAR_NAMES = {
 
 def inject(filepath, sentinel_name, items):
     varname = VAR_NAMES[sentinel_name]
-    with open(filepath) as f:
+    with open(filepath, encoding='utf-8') as f:
         content = f.read()
     start = f'// ── DEN: {sentinel_name} ──'
     end   = f'// ── DEN END: {sentinel_name} ──'
@@ -160,7 +160,7 @@ def inject(filepath, sentinel_name, items):
         print(f'ERROR: sentinel {sentinel_name} not found in {filepath}',
               file=sys.stderr)
         sys.exit(1)
-    with open(filepath, 'w') as f:
+    with open(filepath, 'w', encoding='utf-8', newline='\n') as f:
         f.write(new_content)
     print(f'[build] Injected {sentinel_name} ({len(items)} entries) into {filepath}')
 
@@ -212,7 +212,7 @@ if [[ $DEV_MODE -eq 1 ]]; then
     python3 - "$FIREFOX_SRC/.mozconfig" <<'PYEOF'
 import re, sys
 path = sys.argv[1]
-with open(path) as f:
+with open(path, encoding='utf-8') as f:
     content = f.read()
 # Strip production-only flags (comments on same line are also removed).
 for flag in ('--enable-strip', '--enable-install-strip',
@@ -224,7 +224,7 @@ content += (
     'ac_add_options --enable-crashreporter\n'
     'ac_add_options --enable-profiling\n'
 )
-with open(path, 'w') as f:
+with open(path, 'w', encoding='utf-8', newline='\n') as f:
     f.write(content)
 PYEOF
     echo "[build] DEV MODE: mozconfig adjusted (marionette+crashreporter+profiling enabled, strip disabled)"
@@ -241,10 +241,10 @@ mkdir -p "$DIST_DIR"
 if [[ $DEV_MODE -eq 1 ]]; then
     python3 - "$CONFIG_DIR/policies.json" "$DIST_DIR/policies.json" <<'PYEOF'
 import json, sys
-with open(sys.argv[1]) as f:
+with open(sys.argv[1], encoding="utf-8") as f:
     p = json.load(f)
 p["policies"].pop("DisableDeveloperTools", None)
-with open(sys.argv[2], "w") as f:
+with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as f:
     json.dump(p, f, indent=2)
 PYEOF
     echo "[build] Installed policies.json (DevTools policy removed) to $DIST_DIR"
