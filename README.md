@@ -9,16 +9,27 @@ A set of patches for building a branded version of Firefox ESR browser that atte
 `scripts/fetch-esr.sh` pulls whatever ESR is current at fetch time).
 
 As this project progresses tags will be cut and attempt to follow the latest ESR releases.
-Patch 015 is regenerated semantically (`scripts/gen-015-patch.sh`) per ESR; the
-remaining patches use small enough context that they usually carry across
-point releases unmodified.
+Patches 015 and 017 are regenerated semantically (`scripts/gen-015-patch.sh`,
+`scripts/gen-017-patch.sh`) per ESR; the remaining patches use small enough
+context that they usually carry across point releases unmodified.
 
 ---
 
 ## Prerequisites
 
 - Python 3, Rust, Node.js (required by Firefox build system — see [Firefox build docs](https://firefox-source-docs.mozilla.org/setup/))
-- ~20 GB free disk space for the source + build artifacts
+- **[sccache](https://github.com/mozilla/sccache)** — required compiler wrapper.
+  `config/mozconfig` sets `--with-compiler-wrapper=sccache`, so the build will
+  fail at configure if it's not on `PATH`. It also dramatically reduces
+  incremental rebuild times (minutes instead of an hour+ on a warm cache).
+  - macOS:   `brew install sccache`
+  - Linux:   `cargo install sccache` (or your distro package)
+  - Windows: `cargo install sccache` or `choco install sccache`
+
+  The default 50 GB cache size is set via `SCCACHE_CACHE_SIZE` in
+  `config/mozconfig`; adjust there if you're tight on disk.
+- ~20 GB free disk space for the source + build artifacts (plus up to 50 GB
+  for the sccache cache, separately configurable)
 
 ## Deployment requirements
 
@@ -103,7 +114,9 @@ single bypass still leaves the rest in place:
    profile state.
 4. **Autoconfig prefs** (`config/mozilla.cfg` via `config/autoconfig.js`) —
    `lockPref` values that override `prefs.js`, `about:config`, and all
-   profile state.
+   profile state. Patch 017 additionally compiles the entire `mozilla.cfg`
+   set into `libxul`, so the same locks survive deletion or substitution
+   of the on-disk autoconfig files.
 
 The categories below summarize what is protected and where the enforcement
 lives.
@@ -177,5 +190,6 @@ for navigation.
 | 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad`; localize the "blocked page" message. |
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
+| 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
 
 ---

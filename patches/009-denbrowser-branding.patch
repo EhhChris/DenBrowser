@@ -10,6 +10,17 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # TEXT FILES (this patch):
 #   configure.sh           — MOZ_APP_DISPLAYNAME and MOZ_MACBUNDLE_ID
+#
+# Also modifies browser/moz.configure to override the default imply_option
+# values for MOZ_APP_VENDOR ("Mozilla") and MOZ_APP_BASENAME ("Firefox").
+# These two control the Windows profile directory (%APPDATA%\<Vendor>\
+# <Basename>\Profiles\); pointing them at "DenBrowser\DenBrowser" prevents
+# DenBrowser from sharing profile state with a regular Mozilla Firefox
+# install on the same host. They cannot be set from the branding
+# configure.sh because MOZ_APP_VENDOR is declared via project_flag with
+# possible_origins=("implied",) — i.e., imply_option is the only origin
+# accepted — and confvars-loaded keys must match a confvar()-declared name,
+# which MOZ_APP_BASENAME isn't either.
 #   moz.build              — build directory structure
 #   content/moz.build      — registers jar.mn for icon/CSS packaging
 #   content/jar.mn         — maps icon PNGs and aboutDialog.css into the jar
@@ -44,6 +55,24 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   disk.icns        — DMG volume icon; add when creating macOS installer
 #   document.icns    — file association icon for .html files
 
+--- a/browser/moz.configure
++++ b/browser/moz.configure
+@@ -13,7 +13,14 @@
+ imply_option("MOZ_PROFILE_MIGRATOR", True)
+
+
+-imply_option("MOZ_APP_VENDOR", "Mozilla")
++# DenBrowser: vendor + basename override the upstream defaults ("Mozilla",
++# "Firefox") so the Windows profile dir is %APPDATA%\DenBrowser\DenBrowser\
++# Profiles\ instead of %APPDATA%\Mozilla\Firefox\Profiles\.  Required here
++# (not in the branding configure.sh) because MOZ_APP_VENDOR uses
++# project_flag(possible_origins=("implied",)) — imply_option is the only
++# accepted origin.
++imply_option("MOZ_APP_VENDOR", "DenBrowser")
++imply_option("MOZ_APP_BASENAME", "DenBrowser")
+ imply_option("MOZ_APP_ID", "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}")
+ # Include the DevTools client, not just the server (which is the default)
+ imply_option("MOZ_DEVTOOLS", "all")
 --- /dev/null
 +++ b/browser/branding/denbrowser/configure.sh
 @@ -0,0 +1,6 @@
