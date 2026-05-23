@@ -31,6 +31,7 @@ that line once the patch contains real diff content.
 | Feature | Primary source file(s) |
 |---------|------------------------|
 | Command-line flag stripping | `toolkit/xre/nsAppRunner.cpp` |
+| Pref service / lockPref enforcement | `modules/libpref/Preferences.cpp`, `modules/libpref/Preferences.h` |
 | Network I/O gating | `netwerk/base/nsIOService.cpp`, `netwerk/base/nsIOService.h` |
 | Socket connections | `netwerk/socket/nsSocketTransportService.cpp` |
 | Download manager | `toolkit/components/downloads/DownloadCore.jsm`, `nsExternalHelperAppService.cpp` |

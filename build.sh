@@ -38,6 +38,11 @@ done
 if [[ $DEV_MODE -eq 1 ]]; then
     echo "[build] DEV MODE: DevTools enabled, marionette/crashreporter/profiling enabled, strip disabled"
     SKIP_PATCH_ARGS+=(--skip-patch 8)
+    # Patch 017 compiles every mozilla.cfg lockPref into libxul, including the
+    # devtools.* locks. Skipping it in dev mode lets the sed-stripped on-disk
+    # mozilla.cfg govern devtools state and keeps the compiled binary clean of
+    # dev-tools locks for marionette/inspector use.
+    SKIP_PATCH_ARGS+=(--skip-patch 17)
 fi
 
 # ── Step 1: Fetch Firefox ESR source ─────────────────────────────────────────
@@ -259,19 +264,37 @@ cd "$FIREFOX_SRC"
 ./mach build
 
 # ── Step 6: Install autoconfig lockdown ──────────────────────────────────────
-# mozilla.cfg and autoconfig.js must live in the built app bundle, not the source.
-# They cannot be installed pre-build because they are not part of the Firefox build
-# system — they are runtime files read directly from the installation directory.
+# mozilla.cfg and autoconfig.js must live in the built application directory,
+# not the source. They cannot be installed pre-build because they are not part
+# of the Firefox build system — they are runtime files read directly from the
+# installation directory at startup.
 #
-# autoconfig.js  → <app>/Contents/Resources/defaults/pref/  (tells Firefox to load mozilla.cfg)
-# mozilla.cfg    → <app>/Contents/Resources/                 (NS_GRE_DIR on macOS; this is where
-#                                                             the autoconfig system looks for it)
+# Layout differs by platform:
+#   macOS:         <app>/Contents/Resources/defaults/pref/autoconfig.js
+#                  <app>/Contents/Resources/mozilla.cfg
+#   Windows/Linux: <dist/bin>/defaults/pref/autoconfig.js
+#                  <dist/bin>/mozilla.cfg
+#
+# Detect by probing for the macOS bundle first, then falling back to dist/bin
+# (which is what Firefox produces on Windows and Linux).
 OBJDIR="$(dirname "$FIREFOX_SRC")/denbrowser-obj"
 APP_BUNDLE="$OBJDIR/dist/DenBrowser.app"
+DIST_BIN="$OBJDIR/dist/bin"
+
 if [[ -d "$APP_BUNDLE" ]]; then
-    echo "[build] Installing autoconfig lockdown..."
     PREF_DIR="$APP_BUNDLE/Contents/Resources/defaults/pref"
     GRE_DIR="$APP_BUNDLE/Contents/Resources"
+    PLATFORM_LABEL="macOS app bundle"
+elif [[ -d "$DIST_BIN" ]]; then
+    PREF_DIR="$DIST_BIN/defaults/pref"
+    GRE_DIR="$DIST_BIN"
+    PLATFORM_LABEL="dist/bin (Windows/Linux)"
+else
+    PREF_DIR=""
+fi
+
+if [[ -n "$PREF_DIR" ]]; then
+    echo "[build] Installing autoconfig lockdown into $PLATFORM_LABEL..."
     mkdir -p "$PREF_DIR"
     cp "$CONFIG_DIR/autoconfig.js" "$PREF_DIR/autoconfig.js"
     if [[ $DEV_MODE -eq 1 ]]; then
@@ -283,7 +306,7 @@ if [[ -d "$APP_BUNDLE" ]]; then
         echo "[build] Installed autoconfig.js and mozilla.cfg"
     fi
 else
-    echo "[build] WARNING: App bundle not found at $APP_BUNDLE — skipping autoconfig install"
+    echo "[build] WARNING: No build output found at $APP_BUNDLE or $DIST_BIN — skipping autoconfig install"
     echo "[build]          Run a full build first, or check MOZ_OBJDIR in mozconfig."
 fi
 
