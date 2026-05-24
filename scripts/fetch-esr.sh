@@ -9,21 +9,35 @@ SRC_DIR="$ROOT_DIR/src"
 VERSIONS_URL="https://product-details.mozilla.org/1.0/firefox_versions.json"
 DOWNLOAD_BASE="https://archive.mozilla.org/pub/firefox/releases"
 
-echo "[fetch-esr] Fetching version metadata..."
-if VERSIONS_JSON=$(curl -fsSL --max-time 10 "$VERSIONS_URL" 2>/dev/null); then
-    ESR_VERSION=$(echo "$VERSIONS_JSON" | python3 -c \
-        "import sys,json; d=json.load(sys.stdin); print(d['FIREFOX_ESR'])")
-    if [[ -z "$ESR_VERSION" ]]; then
-        echo "[fetch-esr] ERROR: Could not determine ESR version from metadata." >&2
+PINNED_VERSION=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ffversion) PINNED_VERSION="$2"; shift ;;
+        *) echo "[fetch-esr] Unknown flag: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -n "$PINNED_VERSION" ]]; then
+    ESR_VERSION="${PINNED_VERSION}esr"
+    echo "[fetch-esr] Using pinned Firefox ESR version: $ESR_VERSION"
+else
+    echo "[fetch-esr] Fetching version metadata..."
+    if VERSIONS_JSON=$(curl -fsSL --max-time 10 "$VERSIONS_URL" 2>/dev/null); then
+        ESR_VERSION=$(echo "$VERSIONS_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d['FIREFOX_ESR'])")
+        if [[ -z "$ESR_VERSION" ]]; then
+            echo "[fetch-esr] ERROR: Could not determine ESR version from metadata." >&2
+            exit 1
+        fi
+        echo "[fetch-esr] Latest Firefox ESR: $ESR_VERSION"
+    elif [[ -f "$SRC_DIR/.esr_version" ]]; then
+        ESR_VERSION=$(cat "$SRC_DIR/.esr_version")
+        echo "[fetch-esr] WARNING: Network unavailable; using cached version: $ESR_VERSION"
+    else
+        echo "[fetch-esr] ERROR: Network unavailable and no cached version found." >&2
         exit 1
     fi
-    echo "[fetch-esr] Latest Firefox ESR: $ESR_VERSION"
-elif [[ -f "$SRC_DIR/.esr_version" ]]; then
-    ESR_VERSION=$(cat "$SRC_DIR/.esr_version")
-    echo "[fetch-esr] WARNING: Network unavailable; using cached version: $ESR_VERSION"
-else
-    echo "[fetch-esr] ERROR: Network unavailable and no cached version found." >&2
-    exit 1
 fi
 
 TARBALL="firefox-${ESR_VERSION}.source.tar.xz"
