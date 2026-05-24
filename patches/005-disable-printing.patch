@@ -24,6 +24,16 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #      - Any extension or internal caller that reaches nsPrintJob directly
 #    Returns NS_ERROR_ABORT, which the caller uses to call FirePrintingErrorEvent
 #    and DestroyPrintingData — a clean shutdown path.
+#
+# 4. print.js init() (this patch)
+#    The modern print dialog renders its preview through CommonPrint with
+#    aIsPrintPreview=true. Layer 3 aborts that too, leaving the preview empty —
+#    which makes the dialog's Print button silently no-op (print() bails on
+#    previewIsEmpty) before it ever reaches layer 3's alert branch. So the only
+#    user-visible artifact was a console error, itself suppressed by patch 008.
+#    init() is the print dialog's single entry point; showing a native alert
+#    there and closing the dialog gives reliable feedback, mirroring the
+#    blocked-save alert patch 004 adds to contentAreaUtils.js internalSave().
 
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
@@ -37,9 +47,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
                                   nsIPrintSettings* aPrintSettings,
                                   nsIWebProgressListener* aWebProgressListener,
                                   Document& aSourceDoc) {
-+  // DenBrowser: printing permanently disabled.
-+  // Show a native alert for explicit print attempts (not print-preview, which
-+  // is triggered internally and never visible to the user in release builds).
++  // DenBrowser: printing permanently disabled; aborts print and preview alike.
++  // This alert only reaches non-UI callers — the print dialog's own feedback
++  // is in print.js, since its empty preview stops print() before this branch.
 +  if (!aIsPrintPreview) {
 +    if (nsCOMPtr<nsPIDOMWindowOuter> win = aSourceDoc.GetWindow()) {
 +      if (nsCOMPtr<nsIPromptService> prompt =
@@ -52,3 +62,28 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  return NS_ERROR_ABORT;
    // Callers must hold a strong reference to |this| to ensure that we stay
    // alive for the duration of this method, because our main owning reference
+
+--- a/toolkit/components/printing/content/print.js
++++ b/toolkit/components/printing/content/print.js
+@@ -163,6 +163,21 @@ var PrintEventHandler = {
+   _noPreviewUpdateSettings: new Set(["numCopies", "printDuplex"]),
+
+   async init() {
++    // DenBrowser: printing is permanently disabled. The actual block lives in
++    // nsPrintJob::CommonPrint (patch 005), which aborts the preview render too.
++    // That leaves this dialog's preview empty, which silently short-circuits
++    // the Print button (print() bails on previewIsEmpty) with no user feedback —
++    // only a console error that DenBrowser suppresses. Surface a native alert
++    // here at the print UI's single entry point, then close the dialog. Mirrors
++    // the blocked-save feedback in patch 004 (contentAreaUtils.js internalSave).
++    Services.prompt.alert(
++      Services.wm.getMostRecentWindow("navigator:browser"),
++      "DenBrowser",
++      "Printing is not available in this browser."
++    );
++    window.close();
++    return;
++
+     Glean.printing.previewOpenedTm.add(1);
+
+     this.printPreviewEl =
