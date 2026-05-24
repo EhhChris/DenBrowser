@@ -12,6 +12,7 @@ SKIP_FETCH=0
 SKIP_PATCHES=0
 SKIP_PATCH_ARGS=()
 DEV_MODE=0
+FF_VERSION=""
 JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 while [[ $# -gt 0 ]]; do
@@ -21,14 +22,17 @@ while [[ $# -gt 0 ]]; do
         --skip-patch)   SKIP_PATCH_ARGS+=(--skip-patch "$2"); shift ;;
         --jobs)         JOBS="$2"; shift ;;
         --dev)          DEV_MODE=1 ;;
+        --ffversion)    FF_VERSION="$2"; shift ;;
         -h|--help)
-            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev]"
-            echo "  --skip-patch N  Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
-            echo "                  Repeatable: --skip-patch 6 --skip-patch 8"
-            echo "  --dev           Enable DevTools + testing features: skips patch 008, strips"
-            echo "                  devtools locks from policies.json and mozilla.cfg, and adjusts"
-            echo "                  mozconfig to enable marionette, crashreporter, profiling, and"
-            echo "                  preserve debug symbols (no strip)."
+            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev] [--ffversion X.Y.Z]"
+            echo "  --skip-patch N    Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
+            echo "                    Repeatable: --skip-patch 6 --skip-patch 8"
+            echo "  --dev             Enable DevTools + testing features: skips patch 008, strips"
+            echo "                    devtools locks from policies.json and mozilla.cfg, and adjusts"
+            echo "                    mozconfig to enable marionette, crashreporter, profiling, and"
+            echo "                    preserve debug symbols (no strip)."
+            echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
+            echo "                    fetching the latest from Mozilla's product-details API."
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
@@ -47,7 +51,7 @@ fi
 
 # ── Step 1: Fetch Firefox ESR source ─────────────────────────────────────────
 if [[ $SKIP_FETCH -eq 0 ]]; then
-    bash "$SCRIPTS_DIR/fetch-esr.sh"
+    bash "$SCRIPTS_DIR/fetch-esr.sh" ${FF_VERSION:+--ffversion "$FF_VERSION"}
 else
     echo "[build] Skipping fetch (--skip-fetch)"
 fi
