@@ -1,0 +1,93 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 019-readonly-bookmarks
+#
+# Makes the bookmark store read-only: users cannot create, edit, move, reorder,
+# or remove bookmarks. DenBrowser's curated shortcuts live on the custom new-tab
+# page (patch 018) instead of the editable Firefox bookmark system.
+#
+# Enforcement is at the single service funnel — the public mutation methods of
+# toolkit/components/places/Bookmarks.sys.mjs (insert, insertTree, update,
+# moveToFolder, remove, eraseEverything, reorder). Each returns a rejected
+# promise before doing any work, so every caller (star button, Library, context
+# menus, keyboard shortcuts, drag-and-drop) fails uniformly. This is safe in
+# this build because nothing seeds bookmarks programmatically: the Bookmarks
+# enterprise policy is not used, Sync is disabled (patch 013), profile import is
+# disabled, and NoDefaultBookmarks is set. The default bookmark roots are
+# created by the Places database layer (C++), not these methods, so read paths
+# (fetch/observers) are unaffected.
+#
+# NOTE: this is the hard block / enforcement layer. Hiding the now non-functional
+# bookmark UI (star button, menus, context-menu items) is a separate cosmetic
+# change, tuned against a real build.
+
+diff --git a/toolkit/components/places/Bookmarks.sys.mjs b/toolkit/components/places/Bookmarks.sys.mjs
+index c250b3cdec..7bdf7a6864 100644
+--- a/toolkit/components/places/Bookmarks.sys.mjs
++++ b/toolkit/components/places/Bookmarks.sys.mjs
+@@ -229,6 +229,9 @@ export var Bookmarks = Object.freeze({
+    * @throws If the arguments are invalid.
+    */
+   insert(info) {
++    // DenBrowser: bookmarks are read-only — user creation/editing/removal is
++    // disabled (patch 019); shortcuts live on the custom new-tab page instead.
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     let now = new Date();
+     let addedTime = (info && info.dateAdded) || now;
+     let modTime = addedTime;
+@@ -383,6 +386,8 @@ export var Bookmarks = Object.freeze({
+    * @throws if the arguments are invalid.
+    */
+   insertTree(tree, options) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     if (!tree || typeof tree != "object") {
+       throw new Error("Should be provided a valid tree object.");
+     }
+@@ -686,6 +691,8 @@ export var Bookmarks = Object.freeze({
+    * @throws If the arguments are invalid.
+    */
+   update(info) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     // The info object is first validated here to ensure it's consistent, then
+     // it's compared to the existing item to remove any properties that don't
+     // need to be updated.
+@@ -1015,6 +1022,8 @@ export var Bookmarks = Object.freeze({
+    * @throws If the arguments are invalid.
+    */
+   moveToFolder(guids, parentGuid, index, source) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     if (!Array.isArray(guids) || guids.length < 1) {
+       throw new Error("guids should be an array of at least one item");
+     }
+@@ -1264,6 +1273,8 @@ export var Bookmarks = Object.freeze({
+    * @throws if the arguments are invalid.
+    */
+   remove(guidOrInfo, options = {}) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     let infos = guidOrInfo;
+     if (!infos) {
+       throw new Error("Input should be a valid object");
+@@ -1384,6 +1395,8 @@ export var Bookmarks = Object.freeze({
+    * @returns {Promise<void>} Resolved when the removal is complete.
+    */
+   eraseEverything(options = {}) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     if (!options.source) {
+       options.source = Bookmarks.SOURCES.DEFAULT;
+     }
+@@ -1756,6 +1769,8 @@ export var Bookmarks = Object.freeze({
+    * @throws if the arguments are invalid.
+    */
+   reorder(parentGuid, orderedChildrenGuids, options = {}) {
++    // DenBrowser: bookmarks are read-only (patch 019).
++    return Promise.reject(new Error("DenBrowser: bookmarks are disabled."));
+     let info = { guid: parentGuid };
+     info = validateBookmarkObject("Bookmarks.sys.mjs: reorder", info, {
+       guid: { required: true },

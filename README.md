@@ -77,7 +77,7 @@ DenBrowser/
 │   ├── policies.json           # Enterprise policy enforcement (loaded at startup)
 │   ├── mozilla.cfg             # Hardened lockPref overrides (autoconfig-locked)
 │   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
-│   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites
+│   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites / bookmarks
 ├── patches/
 │   ├── README.md               # Patch development guide
 │   └── NNN-*.patch             # See "Patches" table below
@@ -153,8 +153,8 @@ lives.
 | Phone-home endpoints (Safe Browsing, captive-portal, Remote Settings, OCSP, blocklist, etc.) | — | — | `browser.safebrowsing.*`, `network.captive-portal-service.enabled`, `network.connectivity-service.enabled`, `browser.discovery.enabled`, `services.settings.server`, `security.OCSP.*`, `security.remote_settings.*`, `extensions.blocklist.*`, `extensions.update.url`, `app.update.url`, `network.trr.confirmationNS` |
 | Web-platform capability APIs (Share / FS Access / USB / HID / Serial / MIDI / Bluetooth / Payments / Push / Notifications / SpeechSynth / Idle / Battery / Sensors / WebTransport / file://) | — | — | `dom.webshare.enabled`, `dom.fs.enabled`, `dom.origin-private-file-system.enabled`, `dom.webusb.enabled`, `dom.webhid.enabled`, `dom.webserial.enabled`, `dom.serial.enabled`, `dom.webmidi.enabled`, `dom.bluetooth.enabled`, `dom.payments.request.enabled`, `dom.push.enabled`, `dom.webnotifications.enabled`, `media.webspeech.synth.enabled`, `media.webspeech.recognition.enable`, `dom.idle-detection.enabled`, `dom.battery.enabled`, `device.sensors.enabled`, `network.webtransport.enabled`, `network.protocol-handler.expose.file` |
 
-Per-deployment configuration (`config/site-config.json`) drives three of the
-compile-time switches:
+Per-deployment configuration (`config/site-config.json`) drives the
+compile-time switches and the baked-in bookmarks:
 
 - `clipboard_sites` — hosts that may use the in-browser internal clipboard
   (patch 003).  Empty list = no in-browser copy/paste anywhere.
@@ -162,6 +162,25 @@ compile-time switches:
   navigable; everything else is blocked with a DenBrowser error page
   (patch 014).
 - `site_blacklist` — used only when whitelist is empty.
+- `bookmarks` — curated shortcuts shown as tiles on the custom new-tab and home
+  page (patch 018; the home button and startup page are pointed at
+  `about:denbrowserhome` via a `browser.startup.homepage` lock).  Each entry is
+  an object with required `title` and `url`; `url` must be `http(s)`.  At build
+  time (`build.sh` Step 2.7) the list is rendered as static HTML tiles into
+  `denbrowser-newtab.html` (titles/URLs are HTML-escaped, URLs restricted to
+  `http(s)` since the tiles are injected as raw HTML, and each tile uses
+  `target="_self"` so it opens in the current tab).  An empty/absent list
+  shows a "No shortcuts configured" placeholder.  These are *not* Firefox
+  bookmarks: the activity-stream new-tab page does not render in this
+  permanent-private build, and the bookmark store itself is read-only
+  (patch 019), so there is no editable bookmark UI.  Example:
+
+  ```json
+  "bookmarks": [
+    { "title": "Intranet", "url": "https://intranet.example.com" },
+    { "title": "Docs", "url": "https://docs.example.com" }
+  ]
+  ```
 
 ---
 
@@ -191,5 +210,7 @@ for navigation.
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
 | 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
+| 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
+| 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 
 ---
