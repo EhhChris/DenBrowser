@@ -1,0 +1,283 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 018-custom-newtab
+#
+# Replaces the new-tab page with a self-contained DenBrowser shortcuts page.
+#
+# Rationale: this browser runs in permanent private browsing with extensions
+# locked down, so the activity-stream new-tab page never renders — its built-in
+# add-on's background script does not run, so about:newtab is left blank/stuck.
+# We serve our own static page instead.
+#
+# Mechanism:
+#   1. about:denbrowserhome is registered as a plain chrome about: page via the
+#      C++ AboutRedirector (AboutRedirector.cpp + components.conf), exactly like
+#      about:robots and about:privatebrowsing. It maps to
+#      chrome://browser/content/denbrowser-newtab.{html,css} (registered in
+#      browser/base/jar.mn). Flags are URI_SAFE_FOR_UNTRUSTED_CONTENT |
+#      URI_MUST_LOAD_IN_CHILD: the page renders as untrusted content in a normal
+#      child content process — it deliberately avoids the privileged-about
+#      process and ALLOW_SCRIPT (the page is static, no JS). This sidesteps the
+#      newtab built-in add-on entirely, along with its init handshake.
+#   2. AboutNewTab.newTabURL is pinned to about:denbrowserhome, so every new tab
+#      (the "+" button, Ctrl+T, preloading — all of which resolve through
+#      BROWSER_NEW_TAB_URL → AboutNewTab.newTabURL) loads our page. The
+#      permanent-PBM logic in BROWSER_NEW_TAB_URL passes our about: URL through
+#      unchanged (it is not a moz-extension URL and the new tab is not
+#      extension-controlled). about:newtab itself is left untouched.
+#   3. about:denbrowserhome is added to gInitialPages so it is treated as an
+#      initial page (blank URL bar, etc.) like about:newtab.
+#
+#   The tiles between the page's DEN_SHORTCUTS markers are generated at build
+#   time by build.sh (Step 2.7) from config/site-config.json's "bookmarks".
+#   The page is pure static HTML (no script), so clicking a tile is an ordinary
+#   top-level navigation.
+
+diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
+index e586f85545..1da429d5f7 100644
+--- a/browser/base/content/browser.js
++++ b/browser/base/content/browser.js
+@@ -706,6 +706,8 @@ var gInitialPages = [
+   "about:home",
+   "about:firefoxview",
+   "about:newtab",
++  // DenBrowser: our custom new-tab page is an initial page like about:newtab.
++  "about:denbrowserhome",
+   "about:privatebrowsing",
+   "about:sessionrestore",
+   "about:welcome",
+diff --git a/browser/base/content/denbrowser-newtab.css b/browser/base/content/denbrowser-newtab.css
+new file mode 100644
+index 0000000000..3ddc34fb45
+--- /dev/null
++++ b/browser/base/content/denbrowser-newtab.css
+@@ -0,0 +1,108 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* Styles for the DenBrowser custom new-tab page (about:denbrowserhome).
++ * Loaded as chrome://browser/content/denbrowser-newtab.css — see patch 018. */
++
++:root {
++  --den-bg: #f9f9fb;
++  --den-fg: #15141a;
++  --den-tile-bg: #ffffff;
++  --den-tile-border: #cfcfd8;
++  --den-accent: #0060df;
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --den-bg: #1c1b22;
++    --den-fg: #fbfbfe;
++    --den-tile-bg: #2b2a33;
++    --den-tile-border: #52525e;
++    --den-accent: #00ddff;
++  }
++}
++
++* {
++  box-sizing: border-box;
++}
++
++html,
++body {
++  margin: 0;
++  height: 100%;
++  background: var(--den-bg);
++  color: var(--den-fg);
++  font: menu;
++  font-size: 15px;
++}
++
++.den-newtab {
++  min-height: 100%;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  padding: 48px 24px;
++}
++
++.den-tiles {
++  display: grid;
++  grid-template-columns: repeat(auto-fit, minmax(140px, 160px));
++  gap: 20px;
++  justify-content: center;
++  max-width: 960px;
++}
++
++.den-tile {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 12px;
++  padding: 20px 12px;
++  border: 1px solid var(--den-tile-border);
++  border-radius: 12px;
++  background: var(--den-tile-bg);
++  color: inherit;
++  text-decoration: none;
++  transition:
++    border-color 0.15s,
++    transform 0.15s;
++}
++
++.den-tile:hover {
++  border-color: var(--den-accent);
++  transform: translateY(-2px);
++}
++
++.den-tile:focus-visible {
++  outline: 2px solid var(--den-accent);
++  outline-offset: 2px;
++}
++
++.den-badge {
++  width: 48px;
++  height: 48px;
++  border-radius: 50%;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  background: var(--den-accent);
++  color: #fff;
++  font-size: 22px;
++  font-weight: 600;
++  text-transform: uppercase;
++}
++
++.den-label {
++  max-width: 100%;
++  font-size: 14px;
++  font-weight: 500;
++  text-align: center;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
++.den-empty {
++  opacity: 0.6;
++}
+diff --git a/browser/base/content/denbrowser-newtab.html b/browser/base/content/denbrowser-newtab.html
+new file mode 100644
+index 0000000000..9c3b364c85
+--- /dev/null
++++ b/browser/base/content/denbrowser-newtab.html
+@@ -0,0 +1,39 @@
++<!doctype html>
++
++<!-- This Source Code Form is subject to the terms of the Mozilla Public
++   - License, v. 2.0. If a copy of the MPL was not distributed with this
++   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
++
++<!-- DenBrowser custom new-tab page. Served for about:denbrowserhome by the C++
++   - AboutRedirector (see patch 018), the same mechanism that renders about:robots
++   - and about:privatebrowsing. New tabs are pointed here because the stock
++   - activity-stream new-tab page never initializes in this hardened,
++   - permanent-private-browsing build. The shortcut tiles between the
++   - DEN_SHORTCUTS markers are generated at build time by build.sh from
++   - config/site-config.json's "bookmarks" list — do not edit them by hand. -->
++
++<html xmlns="http://www.w3.org/1999/xhtml">
++  <head>
++    <meta charset="utf-8" />
++    <meta
++      http-equiv="Content-Security-Policy"
++      content="default-src chrome:; object-src 'none';"
++    />
++    <meta name="color-scheme" content="light dark" />
++    <title>New Tab</title>
++    <link
++      rel="stylesheet"
++      href="chrome://browser/content/denbrowser-newtab.css"
++      media="all"
++    />
++  </head>
++  <body>
++    <main class="den-newtab">
++      <nav class="den-tiles" aria-label="Shortcuts">
++        <!-- DEN_SHORTCUTS_START -->
++        <p class="den-empty">No shortcuts configured.</p>
++        <!-- DEN_SHORTCUTS_END -->
++      </nav>
++    </main>
++  </body>
++</html>
+diff --git a/browser/base/jar.mn b/browser/base/jar.mn
+index ad10fe2c55..d476b0e6f9 100644
+--- a/browser/base/jar.mn
++++ b/browser/base/jar.mn
+@@ -13,6 +13,8 @@ browser.jar:
+         content/browser/aboutRobots.xhtml             (content/aboutRobots.xhtml)
+         content/browser/aboutRobots.js                (content/aboutRobots.js)
+         content/browser/aboutRobots.css               (content/aboutRobots.css)
++        content/browser/denbrowser-newtab.html        (content/denbrowser-newtab.html)
++        content/browser/denbrowser-newtab.css         (content/denbrowser-newtab.css)
+         content/browser/logos/etp-mobile.svg          (content/logos/etp-mobile.svg)
+         content/browser/logos/fxa-logo.svg            (content/logos/fxa-logo.svg)
+         content/browser/logos/lockwise.svg            (content/logos/lockwise.svg)
+diff --git a/browser/components/about/AboutRedirector.cpp b/browser/components/about/AboutRedirector.cpp
+index bf9ca0914f..36972fa160 100644
+--- a/browser/components/about/AboutRedirector.cpp
++++ b/browser/components/about/AboutRedirector.cpp
+@@ -152,6 +152,15 @@ static const RedirEntry kRedirMap[] = {
+          nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
+          nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
+          nsIAboutModule::IS_SECURE_CHROME_UI},
++    // DenBrowser: the custom new-tab shortcuts page. New tabs are routed here
++    // (see AboutNewTab.sys.mjs) because the activity-stream about:newtab page
++    // never initializes in this hardened, permanent-private-browsing build.
++    // Flags mirror about:privatebrowsing minus the privileged-about process:
++    // untrusted content, loaded in a normal child content process. The page is
++    // static HTML with no script, so ALLOW_SCRIPT is intentionally omitted.
++    {"denbrowserhome", "chrome://browser/content/denbrowser-newtab.html",
++     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
++         nsIAboutModule::URI_MUST_LOAD_IN_CHILD},
+ #ifdef MOZ_SELECTABLE_PROFILES
+     {"profilemanager", "chrome://browser/content/profiles/profiles.html",
+      nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
+diff --git a/browser/components/about/components.conf b/browser/components/about/components.conf
+index e0a87d43ef..db34eca601 100644
+--- a/browser/components/about/components.conf
++++ b/browser/components/about/components.conf
+@@ -8,6 +8,7 @@ pages = [
+     'asrouter',
+     'blocked',
+     'certerror',
++    'denbrowserhome',
+     'downloads',
+     'framecrashed',
+     'logins',
+diff --git a/browser/modules/AboutNewTab.sys.mjs b/browser/modules/AboutNewTab.sys.mjs
+index 42c9c3889f..4641043ec4 100644
+--- a/browser/modules/AboutNewTab.sys.mjs
++++ b/browser/modules/AboutNewTab.sys.mjs
+@@ -14,6 +14,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
+ });
+ 
+ const ABOUT_URL = "about:newtab";
++// DenBrowser: new tabs load our static shortcuts page instead of about:newtab.
++// about:newtab is rendered by the activity-stream built-in add-on, whose
++// background script never runs in this hardened, permanent-private-browsing
++// build, leaving new tabs blank. about:denbrowserhome is a plain chrome about:
++// page served by the C++ AboutRedirector — see patch 018.
++const DENBROWSER_NEWTAB_URL = "about:denbrowserhome";
+ const PREF_ACTIVITY_STREAM_DEBUG = "browser.newtabpage.activity-stream.debug";
+ // AboutHomeStartupCache needs us in "quit-application", so stay alive longer.
+ // TODO: We could better have a shared async shutdown blocker?
+@@ -112,7 +118,10 @@ export const AboutNewTab = {
+   },
+ 
+   get newTabURL() {
+-    return this._newTabURL;
++    // DenBrowser: always route new tabs to our shortcuts page. Returning a
++    // constant (rather than this._newTabURL) keeps the stock activity-stream
++    // toggling and override machinery inert — see DENBROWSER_NEWTAB_URL above.
++    return DENBROWSER_NEWTAB_URL;
+   },
+ 
+   set newTabURL(aNewTabURL) {

@@ -51,7 +51,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3658,6 +3658,452 @@
+@@ -3658,6 +3658,455 @@
  
  #endif  // MOZ_WIDGET_ANDROID
  
@@ -64,7 +64,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +// on-disk mozilla.cfg cannot win — even one with the SAME pref names but
 +// different values is overwritten here.
 +//
-+// 144 prefs locked.
++// 145 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
@@ -355,6 +355,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  Preferences::SetBool("browser.newtabpage.activity-stream.telemetry", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("browser.newtabpage.activity-stream.telemetry");
++  Preferences::SetCString("browser.startup.homepage", "about:denbrowserhome",
++                          PrefValueKind::Default);
++  Preferences::Lock("browser.startup.homepage");
 +  Preferences::SetBool("toolkit.telemetry.coverage.opt-out", true,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("toolkit.telemetry.coverage.opt-out");
@@ -504,7 +507,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -3708,6 +4154,11 @@
+@@ -3708,6 +4157,11 @@
            static_cast<nsISupports*>(static_cast<void*>(sPreferences)),
            "pref-config-startup");
      }

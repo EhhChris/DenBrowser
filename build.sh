@@ -178,7 +178,66 @@ else
     echo "[build] No site-config.json — clipboard allow-list and site filter disabled."
 fi
 
-# ── Step 2.7: Copy DenBrowser branding assets ───────────────────────────────────
+# ── Step 2.7: Generate custom new-tab page shortcuts ─────────────────────────
+# Injects config/site-config.json's "bookmarks" list as static <a> tiles into
+# the custom new-tab page added by patch 018 (between its DEN_SHORTCUTS markers).
+# URLs are restricted to http(s) and every value is HTML-escaped, because the
+# tiles are injected as raw HTML — an unescaped title or a javascript:/chrome:
+# URL would otherwise be an injection vector. Empty/absent list → "No shortcuts".
+NEWTAB_PAGE="$FIREFOX_SRC/browser/base/content/denbrowser-newtab.html"
+if [[ -f "$NEWTAB_PAGE" ]]; then
+    python3 - "$NEWTAB_PAGE" "$SITE_CONFIG" <<'PYEOF' || { echo "[build] ERROR: new-tab shortcut injection failed — aborting build."; exit 1; }
+import html, json, os, re, sys
+
+page_path, site_config_path = sys.argv[1], sys.argv[2]
+
+bookmarks = []
+if os.path.isfile(site_config_path):
+    with open(site_config_path, encoding="utf-8") as f:
+        bookmarks = json.load(f).get("bookmarks", [])
+
+tiles = []
+for b in bookmarks:
+    title, url = b.get("title"), b.get("url")
+    if not title or not url:
+        print(f"ERROR: bookmark entry needs both title and url: {b!r}",
+              file=sys.stderr)
+        sys.exit(1)
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        print(f"ERROR: bookmark url must be http(s): {url!r}", file=sys.stderr)
+        sys.exit(1)
+    badge = html.escape(title.strip()[0].upper())
+    # target="_self" forces the click to navigate the current tab. A plain
+    # (empty-target) top-level link can be defaulted to a new tab by Gecko
+    # (nsDocShell::ShouldOpenInBlankTarget); an explicit non-empty target
+    # bypasses that path so the shortcut consumes the tab in use.
+    tiles.append(
+        f'<a class="den-tile" target="_self" href="{html.escape(url, quote=True)}">'
+        f'<span class="den-badge">{badge}</span>'
+        f'<span class="den-label">{html.escape(title)}</span></a>'
+    )
+
+inner = ("\n        ".join(tiles) if tiles
+         else '<p class="den-empty">No shortcuts configured.</p>')
+
+start, end = "<!-- DEN_SHORTCUTS_START -->", "<!-- DEN_SHORTCUTS_END -->"
+with open(page_path, encoding="utf-8") as f:
+    content = f.read()
+pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
+new_content, n = pattern.subn(f"{start}\n        {inner}\n        {end}", content)
+if n == 0:
+    print(f"ERROR: DEN_SHORTCUTS markers not found in {page_path}",
+          file=sys.stderr)
+    sys.exit(1)
+with open(page_path, "w", encoding="utf-8", newline="\n") as f:
+    f.write(new_content)
+print(f"[build] Injected {len(tiles)} new-tab shortcut(s) into denbrowser-newtab.html")
+PYEOF
+else
+    echo "[build] WARNING: denbrowser-newtab.html not found (patch 018 not applied?) — skipping shortcut injection"
+fi
+
+# ── Step 2.8: Copy DenBrowser branding assets ───────────────────────────────────
 BRANDING_DIR="$FIREFOX_SRC/browser/branding/denbrowser"
 if [[ -d "$BRANDING_DIR" ]]; then
     ICONSET="$ROOT_DIR/branding/DenBrowser.iconset"
@@ -238,9 +297,17 @@ fi
 # Append job count to mozconfig
 echo "mk_add_options MOZ_MAKE_FLAGS=\"-j${JOBS}\"" >> "$FIREFOX_SRC/.mozconfig"
 
-# ── Step 4: Install enterprise policies ──────────────────────────────────────
-# policies.json goes into distribution/ inside the build; install it into source
-# so it gets picked up at build time.
+# ── Step 4: Generate enterprise policies ─────────────────────────────────────
+# Writes the effective policies.json to a staging path here; it is installed
+# into the packaged app's distribution/ directory in Step 6 (after the build).
+# NOTE: mach does NOT package browser/app/distribution/, so this file is a
+# runtime artifact like mozilla.cfg — the Step 6 copy is what actually makes the
+# policy engine read it.
+#
+# Default bookmarks/shortcuts are NOT delivered via the Bookmarks policy: the
+# activity-stream new-tab page does not render in this hardened, permanent-PBM
+# build, so they are baked into the custom new-tab page instead (patch 018,
+# injected in Step 2.7 from config/site-config.json).
 DIST_DIR="$FIREFOX_SRC/browser/app/distribution"
 mkdir -p "$DIST_DIR"
 if [[ $DEV_MODE -eq 1 ]]; then
@@ -248,6 +315,7 @@ if [[ $DEV_MODE -eq 1 ]]; then
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     p = json.load(f)
+# Dev builds: drop the DevTools lock so the toolbox is usable.
 p["policies"].pop("DisableDeveloperTools", None)
 with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as f:
     json.dump(p, f, indent=2)
@@ -305,8 +373,17 @@ if [[ -n "$PREF_DIR" ]]; then
         cp "$CONFIG_DIR/mozilla.cfg" "$GRE_DIR/mozilla.cfg"
         echo "[build] Installed autoconfig.js and mozilla.cfg"
     fi
+
+    # Enterprise policies: the policy engine reads <app>/distribution/policies.json
+    # (relative to the binary on Windows/Linux, or Contents/Resources on macOS).
+    # mach does not package browser/app/distribution/, so install the file
+    # generated in Step 4 here — without this, NO policy (Bookmarks, FirefoxHome,
+    # DisablePocket, …) takes effect; the lockdown otherwise rides on mozilla.cfg.
+    mkdir -p "$GRE_DIR/distribution"
+    cp "$DIST_DIR/policies.json" "$GRE_DIR/distribution/policies.json"
+    echo "[build] Installed policies.json into $PLATFORM_LABEL distribution/"
 else
-    echo "[build] WARNING: No build output found at $APP_BUNDLE or $DIST_BIN — skipping autoconfig install"
+    echo "[build] WARNING: No build output found at $APP_BUNDLE or $DIST_BIN — skipping autoconfig/policies install"
     echo "[build]          Run a full build first, or check MOZ_OBJDIR in mozconfig."
 fi
 

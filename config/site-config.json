@@ -7,5 +7,11 @@
 
   "site_whitelist": [],
 
-  "site_blacklist": []
+  "site_blacklist": [],
+
+  "bookmarks": [
+    { "title": "Wikipedia", "url": "https://www.wikipedia.org" },
+    { "title": "DuckDuckGo", "url": "https://duckduckgo.com" },
+    { "title": "Internal Docs", "url": "https://docs.example.com" }
+  ]
 }
