@@ -15,6 +15,18 @@ LIST_ONLY=0
 XZ_THREADS=0   # 0 = auto (use all cores)
 XZ_LEVEL=6     # balance of speed vs size; original Mozilla tarballs use -9
 
+# Convert a possibly-Windows path (C:\... or with backslashes) to MSYS/POSIX form.
+# GNU tar treats a leading "drive:" as a remote host (host:path syntax), so an
+# output like C:\...\out.tar.xz makes it try to "connect to C". cygpath -u fixes
+# this by yielding /c/... ; the fallback just swaps backslashes for slashes.
+to_posix() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$1"
+    else
+        printf '%s\n' "${1//\\//}"
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o|--output)   OUTPUT="$2"; shift ;;
@@ -59,6 +71,7 @@ if [[ ! -f "$INPUT" ]]; then
     exit 1
 fi
 
+INPUT="$(to_posix "$INPUT")"
 INPUT="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
 
 # ── List-only mode ─────────────────────────────────────────────────────────────
@@ -80,6 +93,7 @@ if [[ -z "$OUTPUT" ]]; then
     base="$(basename "$INPUT" .tar.xz)"
     OUTPUT="$(dirname "$INPUT")/${base}-stripped.tar.xz"
 fi
+OUTPUT="$(to_posix "$OUTPUT")"
 
 if [[ -e "$OUTPUT" ]]; then
     echo "[strip-test-files] ERROR: Output file already exists: $OUTPUT" >&2
@@ -115,39 +129,22 @@ FF_DIRNAME=$(basename "${FF_DIR%/}")
 
 BEFORE_KB=$(du -sk "$FF_DIR" | cut -f1)
 
-# ── Remove test directories ────────────────────────────────────────────────────
+# ── Neutralize test payloads (keep the build graph intact) ────────────────────
 #
-# Patterns covered:
-#   testing/      top-level testing framework (mochitest runner, xpcshell runner,
-#                 marionette, fuzzing harnesses, etc.)
-#   test/tests/   per-module unit/integration tests
-#   mochitest/    mochitest suites embedded inside modules
-#   reftest/      pixel-comparison reference tests
-#   reftests/     same, plural variant
-#   crashtests/   crash-trigger test cases (contain intentionally malformed inputs)
-#   crashtest/    same, singular variant
-#   jit-test/     SpiderMonkey JIT test suite
-#   gtest/        per-module Google Test suites
+# Rather than DELETING test files — which breaks the build wherever a moz.build
+# references a test-dir path (DIRS, *_MANIFESTS, and especially GeneratedFile
+# inputs whose paths are computed dynamically and so can't be found statically) —
+# we keep every file and directory and blank only the CONTENTS of payload files
+# (.html/.js/.svg/... fixtures) inside test dirs. Build inputs (.yaml/.pem/.conf/...,
+# plus anything a moz.build names as a real input) are kept intact. Because no path
+# is ever removed, the configure/emitter stage cannot fail on a missing file.
 
-echo "[strip-test-files] Removing test directories..."
-
-find "$FF_DIR" -mindepth 1 -type d \( \
-    -name "testing"    \
-    -o -name "test"    \
-    -o -name "tests"   \
-    -o -name "mochitest"  \
-    -o -name "mochitests" \
-    -o -name "reftest"    \
-    -o -name "reftests"   \
-    -o -name "crashtests" \
-    -o -name "crashtest"  \
-    -o -name "jit-test"   \
-    -o -name "gtest"      \
-\) -prune -exec rm -rf {} \;
+echo "[strip-test-files] Blanking test payload files (keeping the build graph intact)..."
+python3 "$SCRIPT_DIR/blank-test-payloads.py" "$FF_DIR"
 
 AFTER_KB=$(du -sk "$FF_DIR" | cut -f1)
 REMOVED_MB=$(( (BEFORE_KB - AFTER_KB) / 1024 ))
-echo "[strip-test-files] Removed approximately ${REMOVED_MB} MB of test files."
+echo "[strip-test-files] Blanked approximately ${REMOVED_MB} MB of test payload content."
 
 # ── Repack ─────────────────────────────────────────────────────────────────────
 

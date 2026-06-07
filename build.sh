@@ -13,6 +13,7 @@ SKIP_PATCHES=0
 SKIP_PATCH_ARGS=()
 DEV_MODE=0
 FF_VERSION=""
+TARBALL_PATH=""
 JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 while [[ $# -gt 0 ]]; do
@@ -23,8 +24,9 @@ while [[ $# -gt 0 ]]; do
         --jobs)         JOBS="$2"; shift ;;
         --dev)          DEV_MODE=1 ;;
         --ffversion)    FF_VERSION="$2"; shift ;;
+        --tarball)      TARBALL_PATH="$2"; shift ;;
         -h|--help)
-            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev] [--ffversion X.Y.Z]"
+            echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev] [--ffversion X.Y.Z] [--tarball PATH]"
             echo "  --skip-patch N    Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
             echo "                    Repeatable: --skip-patch 6 --skip-patch 8"
             echo "  --dev             Enable DevTools + testing features: skips patch 008, strips"
@@ -33,11 +35,24 @@ while [[ $# -gt 0 ]]; do
             echo "                    preserve debug symbols (no strip)."
             echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
             echo "                    fetching the latest from Mozilla's product-details API."
+            echo "  --tarball PATH    Use a specific source tarball (firefox-X.Y.Zesr.source.tar.xz)."
+            echo "                    Implies --skip-fetch and --no-revert (no git snapshot is created)."
+            echo "                    Cannot be combined with --ffversion."
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+if [[ -n "$TARBALL_PATH" && -n "$FF_VERSION" ]]; then
+    echo "[build] ERROR: --tarball and --ffversion are mutually exclusive." >&2
+    exit 1
+fi
+
+if [[ -n "$TARBALL_PATH" && ! -f "$TARBALL_PATH" ]]; then
+    echo "[build] ERROR: Tarball not found: $TARBALL_PATH" >&2
+    exit 1
+fi
 
 if [[ $DEV_MODE -eq 1 ]]; then
     echo "[build] DEV MODE: DevTools enabled, marionette/crashreporter/profiling enabled, strip disabled"
@@ -50,7 +65,28 @@ if [[ $DEV_MODE -eq 1 ]]; then
 fi
 
 # ── Step 1: Fetch Firefox ESR source ─────────────────────────────────────────
-if [[ $SKIP_FETCH -eq 0 ]]; then
+if [[ -n "$TARBALL_PATH" ]]; then
+    TARBALL_PATH="$(cd "$(dirname "$TARBALL_PATH")" && pwd)/$(basename "$TARBALL_PATH")"
+    # Discover the top-level directory from the archive itself rather than parsing
+    # the filename — handles stripped/renamed tarballs without caring about the name.
+    _topdir=$(tar -tf "$TARBALL_PATH" 2>/dev/null | head -1 | cut -d/ -f1) || true
+    if [[ -z "$_topdir" ]]; then
+        echo "[build] ERROR: Could not read tarball: $TARBALL_PATH" >&2
+        exit 1
+    fi
+    mkdir -p "$SRC_DIR"
+    # Strip the firefox- prefix so firefox-${ESR_VERSION%esr} in the path construction resolves correctly.
+    echo "${_topdir#firefox-}" > "$SRC_DIR/.esr_version"
+    EXTRACT_DIR="$SRC_DIR/$_topdir"
+    if [[ -d "$EXTRACT_DIR" ]]; then
+        echo "[build] Source already extracted at $EXTRACT_DIR, skipping extraction."
+    else
+        echo "[build] Extracting $(basename "$TARBALL_PATH") (this may take a few minutes)..."
+        tar -xJf "$TARBALL_PATH" -C "$SRC_DIR"
+        echo "[build] Extracted to $EXTRACT_DIR"
+    fi
+    unset _topdir
+elif [[ $SKIP_FETCH -eq 0 ]]; then
     bash "$SCRIPTS_DIR/fetch-esr.sh" ${FF_VERSION:+--ffversion "$FF_VERSION"}
 else
     echo "[build] Skipping fetch (--skip-fetch)"
@@ -62,7 +98,9 @@ echo "[build] Firefox source: $FIREFOX_SRC"
 
 # ── Step 2: Apply DenBrowser patches ────────────────────────────────────────────
 if [[ $SKIP_PATCHES -eq 0 ]]; then
-    bash "$SCRIPTS_DIR/apply-patches.sh" ${SKIP_PATCH_ARGS[@]+"${SKIP_PATCH_ARGS[@]}"}
+    PATCH_ARGS=(${SKIP_PATCH_ARGS[@]+"${SKIP_PATCH_ARGS[@]}"})
+    [[ -n "$TARBALL_PATH" ]] && PATCH_ARGS+=(--no-revert)
+    bash "$SCRIPTS_DIR/apply-patches.sh" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"}
 else
     echo "[build] Skipping patches (--skip-patches)"
 fi
