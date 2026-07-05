@@ -75,8 +75,14 @@ if [[ -n "$TARBALL_PATH" ]]; then
         exit 1
     fi
     mkdir -p "$SRC_DIR"
-    # Strip the firefox- prefix so firefox-${ESR_VERSION%esr} in the path construction resolves correctly.
-    echo "${_topdir#firefox-}" > "$SRC_DIR/.esr_version"
+    # Derive the version from the archive's top-level dir (e.g. firefox-140.12.0).
+    # Mozilla's ESR tarballs extract to firefox-<ver> WITHOUT the "esr" suffix (it
+    # only appears in the filename), so normalize to the canonical "<ver>esr" form
+    # that fetch-esr.sh writes. The %esr strip makes this idempotent regardless of
+    # whether a renamed/stripped tarball happens to carry esr in its dir name.
+    _ver="${_topdir#firefox-}"
+    echo "${_ver%esr}esr" > "$SRC_DIR/.esr_version"
+    unset _ver
     EXTRACT_DIR="$SRC_DIR/$_topdir"
     if [[ -d "$EXTRACT_DIR" ]]; then
         echo "[build] Source already extracted at $EXTRACT_DIR, skipping extraction."
