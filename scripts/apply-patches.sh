@@ -98,14 +98,17 @@ echo "[apply-patches] Applied: $APPLIED  Skipped: $SKIPPED  Failed: $FAILED"
 
 # ── Windows branding binary assets ───────────────────────────────────────────
 # These binary files are required by browser/branding/denbrowser/ on Windows builds.
-# Copied from nightly branding as placeholders; replace with custom DenBrowser
-# artwork before distribution.
+# Each asset is sourced from this repo's branding/denbrowser/ if present (custom
+# DenBrowser art), otherwise from Firefox nightly branding as a placeholder. As
+# more assets are authored in-repo they automatically override the nightly copy;
+# the nightly fallback shrinks toward zero.  See TASKS.md §4a/§4b for the split.
 DENBROWSER_BRANDING="$FIREFOX_SRC/browser/branding/denbrowser"
 NIGHTLY_BRANDING="$FIREFOX_SRC/browser/branding/nightly"
+REPO_BRANDING="$ROOT_DIR/branding/denbrowser"
 
-if [[ -d "$NIGHTLY_BRANDING" ]]; then
-    echo "[apply-patches] Copying branding binary assets to denbrowser branding..."
-    mkdir -p "$DENBROWSER_BRANDING/stubinstaller" "$DENBROWSER_BRANDING/msix/Assets"
+if [[ -d "$REPO_BRANDING" || -d "$NIGHTLY_BRANDING" ]]; then
+    echo "[apply-patches] Installing branding binary assets to denbrowser branding..."
+    mkdir -p "$DENBROWSER_BRANDING/stubinstaller" "$DENBROWSER_BRANDING/msix/Assets" "$DENBROWSER_BRANDING/content"
     for asset in \
         VisualElements_150.png VisualElements_70.png \
         PrivateBrowsing_150.png PrivateBrowsing_70.png \
@@ -133,11 +136,15 @@ if [[ -d "$NIGHTLY_BRANDING" ]]; then
         content/document_pdf.svg content/firefox-wordmark.svg \
         stubinstaller/installing_page.css \
         stubinstaller/profile_cleanup_page.css; do
-        if [[ -f "$NIGHTLY_BRANDING/$asset" ]]; then
+        mkdir -p "$(dirname "$DENBROWSER_BRANDING/$asset")"
+        if [[ -f "$REPO_BRANDING/$asset" ]]; then
+            cp "$REPO_BRANDING/$asset" "$DENBROWSER_BRANDING/$asset"
+            echo "[apply-patches]   Copied (repo):    $asset"
+        elif [[ -f "$NIGHTLY_BRANDING/$asset" ]]; then
             cp "$NIGHTLY_BRANDING/$asset" "$DENBROWSER_BRANDING/$asset"
-            echo "[apply-patches]   Copied: $asset"
+            echo "[apply-patches]   Copied (nightly): $asset"
         else
-            echo "[apply-patches]   WARNING: $asset not found in nightly branding" >&2
+            echo "[apply-patches]   WARNING: $asset not found in repo or nightly branding" >&2
         fi
     done
 fi

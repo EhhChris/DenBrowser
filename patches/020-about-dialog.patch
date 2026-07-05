@@ -1,0 +1,81 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 020-about-dialog
+#
+# Rebrands the About dialog (Help > About / macOS app menu) for DenBrowser.
+#
+# browser/base/content/aboutDialog.xhtml:
+#   - Replaces the Mozilla community ("designed by Mozilla ...") and contribute
+#     ("Make a donation / get involved") blurbs with a single DenBrowser
+#     description stating DenBrowser is built on Mozilla Firefox and distributed
+#     under the same Mozilla Public License, linking to the DenBrowser GitHub
+#     repository.
+#   - Drops contributeDesc from aria-describedby (that block is removed).
+#   - Adds a cold-face credit (U+1F976) in the bottom-right corner whose tooltip
+#     reads "DenBrowser developed by Chill".
+#
+# browser/branding/denbrowser/locales/en-US/brand.ftl:
+#   - Adds about-denbrowser-description. The github-link label is overlaid onto
+#     the <label data-l10n-name="github-link"> element in aboutDialog.xhtml,
+#     which supplies the href. brand.ftl is already loaded by the dialog
+#     (rel="localization" href="branding/brand.ftl"), so no new wiring is needed.
+#
+# Depends on 009 (creates brand.ftl). The Licensing Information bottom link
+# (about:license) is intentionally left in place.
+
+diff --git a/browser/base/content/aboutDialog.xhtml b/browser/base/content/aboutDialog.xhtml
+index c64980810570..a22a715682ef 100644
+--- a/browser/base/content/aboutDialog.xhtml
++++ b/browser/base/content/aboutDialog.xhtml
+@@ -14,7 +14,7 @@
+         data-l10n-id="aboutDialog-title"
+ #endif
+         role="dialog"
+-        aria-describedby="version distribution distributionId communityDesc contributeDesc trademark"
++        aria-describedby="version distribution distributionId communityDesc trademark"
+         >
+ #ifdef XP_MACOSX
+ #include macWindow.inc.xhtml
+@@ -124,13 +124,8 @@
+               <label is="text-link" useoriginprincipal="true" href="about:credits" data-l10n-name="community-exp-creditsLink"/>
+             </description>
+           </vbox>
+-          <description class="text-blurb" id="communityDesc" data-l10n-id="community-2">
+-            <label is="text-link" href="https://www.mozilla.org/?utm_source=firefox-browser&#38;utm_medium=firefox-desktop&#38;utm_campaign=about-dialog" data-l10n-name="community-mozillaLink"/>
+-            <label is="text-link" useoriginprincipal="true" href="about:credits" data-l10n-name="community-creditsLink"/>
+-          </description>
+-          <description class="text-blurb" id="contributeDesc" data-l10n-id="helpus">
+-            <label is="text-link" href="https://foundation.mozilla.org/?form=firefox-about" data-l10n-name="helpus-donateLink"/>
+-            <label is="text-link" href="https://www.mozilla.org/contribute/?utm_source=firefox-browser&#38;utm_medium=firefox-desktop&#38;utm_campaign=about-dialog" data-l10n-name="helpus-getInvolvedLink"/>
++          <description class="text-blurb" id="communityDesc" data-l10n-id="about-denbrowser-description">
++            <label is="text-link" href="https://github.com/EhhChris/DenBrowser" data-l10n-name="github-link"/>
+           </description>
+         </vbox>
+       </vbox>
+@@ -142,6 +137,10 @@
+         <label is="text-link" class="bottom-link" href="https://www.mozilla.org/privacy/firefox/?utm_source=firefox-browser&#38;utm_medium=firefox-desktop&#38;utm_campaign=about-dialog" data-l10n-id="bottom-links-privacy"/>
+       </hbox>
+       <description id="trademark" data-l10n-id="trademarkInfo"></description>
++      <hbox pack="end">
++        <label id="denbrowserCredit"
++               tooltiptext="DenBrowser developed by Chill">&#129398;</label>
++      </hbox>
+     </vbox>
+   </html:div>
+ 
+diff --git a/browser/branding/denbrowser/locales/en-US/brand.ftl b/browser/branding/denbrowser/locales/en-US/brand.ftl
+index bbfde3da7143..7c04e397c1a8 100644
+--- a/browser/branding/denbrowser/locales/en-US/brand.ftl
++++ b/browser/branding/denbrowser/locales/en-US/brand.ftl
+@@ -12,3 +12,9 @@
+ -brand-product-name = DenBrowser
+ -vendor-short-name = DenBrowser
+ trademarkInfo = { " " }
++
++## About dialog
++# Shown in the About { -brand-short-name } dialog. The github-link label is
++# overlaid onto the <label data-l10n-name="github-link"> element in
++# aboutDialog.xhtml, which supplies the href.
++about-denbrowser-description = { -brand-short-name } is a hardened web browser built on Mozilla Firefox and distributed under the same Mozilla Public License. View the source code and patches on <label data-l10n-name="github-link">GitHub</label>.
