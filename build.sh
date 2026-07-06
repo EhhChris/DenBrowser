@@ -102,6 +102,26 @@ ESR_VERSION=$(cat "$SRC_DIR/.esr_version")
 FIREFOX_SRC="$SRC_DIR/firefox-${ESR_VERSION%esr}"
 echo "[build] Firefox source: $FIREFOX_SRC"
 
+# config/mozconfig pins MOZ_OBJDIR to a fixed path next to the source tree
+# (@TOPSRCDIR@/../denbrowser-obj) that does NOT encode the ESR version. fetch-esr.sh
+# always grabs whatever ESR point release is current, so a rebuild after Mozilla
+# ships a new point release extracts a new firefox-<version> tree but would reuse
+# an objdir last built against the old one. Mach only regenerates some Makefiles
+# incrementally, so stale per-directory Makefiles keep absolute paths into the old
+# (possibly deleted) tree, and mozmake fails deep into the build with "No rule to
+# make target .../firefox-<old-version>/...". Clobber automatically on version
+# mismatch so this can never resurface on either platform.
+OBJDIR="$(dirname "$FIREFOX_SRC")/denbrowser-obj"
+OBJ_VERSION_MARKER="$OBJDIR/.denbrowser_esr_version"
+if [[ -d "$OBJDIR" ]]; then
+    PREV_VERSION=$(cat "$OBJ_VERSION_MARKER" 2>/dev/null || echo "")
+    if [[ "$PREV_VERSION" != "$ESR_VERSION" ]]; then
+        echo "[build] Object directory was built against a different Firefox source version (${PREV_VERSION:-unknown} -> $ESR_VERSION)."
+        echo "[build] Removing stale object directory to avoid mismatched-path build failures: $OBJDIR"
+        rm -rf "$OBJDIR"
+    fi
+fi
+
 # ── Step 2: Apply DenBrowser patches ────────────────────────────────────────────
 if [[ $SKIP_PATCHES -eq 0 ]]; then
     PATCH_ARGS=(${SKIP_PATCH_ARGS[@]+"${SKIP_PATCH_ARGS[@]}"})
@@ -379,6 +399,11 @@ echo "[build] Starting Firefox build (this will take 30–90 minutes)..."
 cd "$FIREFOX_SRC"
 ./mach build
 
+# Record the source version this objdir is now built against, so the next run
+# can detect a mismatch (see the clobber guard above) instead of silently
+# reusing stale Makefiles from a different ESR release.
+echo "$ESR_VERSION" > "$OBJ_VERSION_MARKER"
+
 # ── Step 6: Install autoconfig lockdown ──────────────────────────────────────
 # mozilla.cfg and autoconfig.js must live in the built application directory,
 # not the source. They cannot be installed pre-build because they are not part
@@ -393,7 +418,6 @@ cd "$FIREFOX_SRC"
 #
 # Detect by probing for the macOS bundle first, then falling back to dist/bin
 # (which is what Firefox produces on Windows and Linux).
-OBJDIR="$(dirname "$FIREFOX_SRC")/denbrowser-obj"
 APP_BUNDLE="$OBJDIR/dist/DenBrowser.app"
 DIST_BIN="$OBJDIR/dist/bin"
 
