@@ -147,33 +147,47 @@ single instance is overwhelmed" answer.
 
 ## Notes & caveats
 
-- **Rejections are handshake-bound, and that matters.** When the proxy rejects a
-  request (any `403`) it closes the connection, so the client cannot keep-alive
-  and every *next* rejected request pays a full TLS handshake — including the
-  proxy's RSA private-key operation. In local testing, valid (keep-alive)
-  traffic sustained ~**330 req/s** while pure rejection traffic collapsed to
-  ~**35–65 req/s** on the same instance. Two takeaways:
-    - Use **`-m valid`** to measure the proxy's *request-processing* capacity
-      (connections are reused).
-    - Use **`-m reject` / `-m attacks`** to measure its *handshake* capacity.
-      This is the more security-relevant number: a flood of invalid tokens is a
-      cheap way to force constant TLS handshakes, which is exactly what future
-      rate limiting should blunt.
-- **Run the client off-box for a clean proxy number.** This generator and the
-  proxy both burn CPU on TLS. On one machine they contend (running two client
-  copies raised *aggregate* rejection throughput above one copy's), so for a
-  true single-instance ceiling, drive the proxy from a separate host.
-- **Client vs. proxy bottleneck.** Valid traffic costs a fresh ECDH + AES-GCM
-  per request on the client. If measured throughput approaches the `--calibrate`
-  number, you're measuring the *client*, not the proxy — add threads, run
-  several copies of the script (or from several hosts), or lean on attack/reject
-  modes whose templates are cached and cheap to send.
+- **This Python generator is usually the bottleneck, not the proxy.** In local
+  measurement (4 vCPU Xeon @ 2.10 GHz, 16 GiB) the proxy stayed remarkably light
+  while *the client* saturated:
+
+  | Load (12s)              | req/s        | proxy CPU  | proxy RSS | box busy   |
+  |-------------------------|--------------|------------|-----------|-----------|
+  | idle                    | —            | ~0         | 14 MB     | —         |
+  | `-m valid  -c 100` (1 client)  | ~304  | 0.15 core  | 26 MB     | ~2.1/4 cores |
+  | `-m valid  -c 60` ×3 clients   | ~1000 agg | 0.36 core | 43 MB   | ~2.8/4 cores |
+  | `-m reject -c 100` (1 client)  | ~41   | 0.05 core  | 29 MB     | ~3.7/4 cores |
+
+  The proxy never exceeded **~0.4 of one core** or **~45 MB**, even while
+  serving ~1000 valid req/s. The measured req/s figures are therefore a **floor
+  on proxy capacity set by the load generator** (Python's GIL serialises token
+  minting and connection setup), not the proxy's ceiling. To find the proxy's
+  real limit, drive it with a multi-process or multi-host generator (or a
+  non-Python tool); `--calibrate` reports the single-thread mint rate so you can
+  see the client ceiling coming.
+- **Rejections are far more expensive per request than accepts.** A `403` closes
+  the connection, so the client can't keep-alive and every *next* rejected
+  request re-handshakes (the proxy's RSA private-key op included). That's why
+  reject throughput (~41 req/s here) sits an order of magnitude below valid
+  keep-alive throughput and pegged the box at ~3.7/4 cores — almost all of it
+  connection-churn cost, split between client and kernel. Security-relevant: a
+  flood of invalid tokens is a cheap way to force constant TLS handshakes, which
+  is exactly what future rate limiting (ideally rejecting *before* the
+  handshake, or per-source connection caps) should blunt. Use `-m reject` /
+  `-m attacks` to exercise this path and `-m valid` to exercise steady-state
+  compute.
 - **Replay priming.** `replay` mode first sends a few real valid requests so the
   proxy commits their nonces, then resends them (re-priming every ~20s to stay
   inside the timestamp window) so the rejection is genuinely `NonceReplay` and
   not `TimestampDrift`.
-- **Nonce cache growth.** Sustained valid traffic fills the proxy's in-memory
-  nonce cache (swept on a 90s TTL). Very high valid throughput is therefore also
-  a memory-pressure test, which is realistic.
+- **Memory is not the constraint for header traffic.** The proxy's footprint is
+  dominated by fixed runtime, not per-request state. The nonce cache holds only
+  a 16-byte key + timestamp per committed request and is swept on a 90s TTL, so
+  even sustained thousands-per-second valid traffic adds single-digit MB. The
+  one real memory vector is **request bodies**: `request_body_filter` buffers the
+  whole body (up to `MAX_BODY_BYTES`, 10 MB) before forwarding, so worst-case
+  memory ≈ concurrent-uploads × body size. This tool sends tiny bodies, so it
+  does not exercise that path — test it deliberately with large `-m tamper`-style
+  POSTs if body-buffer memory is a concern.
 - **Attack templates refresh** every ~20s so their timestamps stay inside the
   drift window and keep tripping their *intended* check.
