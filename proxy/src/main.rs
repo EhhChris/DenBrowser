@@ -46,16 +46,24 @@ struct Args {
     /// Path to the TLS server private key (PEM).
     #[arg(long, env = "DENBROWSER_TLS_KEY", default_value = "../build/proxy-tls.key")]
     tls_key: String,
+
+    /// DEV ONLY: skip TLS certificate and hostname verification of the
+    /// upstream, allowing self-signed local upstreams.  Never enable in
+    /// production — it removes the guarantee that the proxy is talking to the
+    /// intended upstream and not a MITM.
+    #[arg(long, env = "DENBROWSER_INSECURE_UPSTREAM", default_value_t = false)]
+    insecure_upstream: bool,
 }
 
 struct DenBrowserProxy {
     verifier: Arc<Verifier>,
     upstream_host: String,
     upstream_port: u16,
+    insecure_upstream: bool,
 }
 
 impl DenBrowserProxy {
-    fn new(verifier: Verifier, upstream: &str) -> anyhow::Result<Self> {
+    fn new(verifier: Verifier, upstream: &str, insecure_upstream: bool) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
             .ok_or_else(|| anyhow::anyhow!("upstream must be host:port, got {upstream:?}"))?;
@@ -64,6 +72,7 @@ impl DenBrowserProxy {
             verifier: Arc::new(verifier),
             upstream_host: host.to_owned(),
             upstream_port: port,
+            insecure_upstream,
         })
     }
 }
@@ -92,11 +101,17 @@ impl ProxyHttp for DenBrowserProxy {
         _session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        Ok(Box::new(HttpPeer::new(
+        let mut peer = HttpPeer::new(
             (self.upstream_host.as_str(), self.upstream_port),
-            false,
-            String::new(),
-        )))
+            true,
+            self.upstream_host.clone(),
+        );
+        peer.options.set_http_version(2, 1);
+        if self.insecure_upstream {
+            peer.options.verify_cert = false;
+            peer.options.verify_hostname = false;
+        }
+        Ok(Box::new(peer))
     }
 
     /// Phase 1.  Validate every attestation field except the body hash;
@@ -240,8 +255,14 @@ fn main() {
         .unwrap_or_else(|e| panic!("cannot read {}: {}", args.key, e));
     let verifier = Verifier::from_pem(&pem)
         .unwrap_or_else(|e| panic!("cannot parse key {}: {}", args.key, e));
-    let proxy =
-        DenBrowserProxy::new(verifier, &args.upstream).unwrap_or_else(|e| panic!("{e}"));
+    if args.insecure_upstream {
+        warn!(
+            "INSECURE: upstream TLS verification disabled (--insecure-upstream) — \
+             for local testing only, never production"
+        );
+    }
+    let proxy = DenBrowserProxy::new(verifier, &args.upstream, args.insecure_upstream)
+        .unwrap_or_else(|e| panic!("{e}"));
 
     let mut server = Server::new(None).expect("Pingora server init failed");
     server.bootstrap();
