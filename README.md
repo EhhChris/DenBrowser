@@ -83,9 +83,12 @@ DenBrowser/
 │   └── NNN-*.patch             # See "Patches" table below
 ├── proxy/
 │   ├── Cargo.toml
+│   ├── proxy.example.toml      # Example operational config (rate limiting, …)
 │   └── src/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
-│       └── attest.rs           # ECIES verification + replay cache
+│       ├── attest.rs           # ECIES verification + replay cache
+│       ├── config.rs           # Operational TOML config loader
+│       └── ratelimit.rs        # Per-origin-IP request rate limiting
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
     ├── apply-patches.sh        # Apply patches with dry-run validation
@@ -181,6 +184,47 @@ compile-time switches and the baked-in bookmarks:
     { "title": "Docs", "url": "https://docs.example.com" }
   ]
   ```
+
+### Proxy runtime configuration (`proxy/proxy.toml`)
+
+The attestation proxy takes an optional TOML config file (`--config <path>`, or
+the `DENBROWSER_CONFIG` env var) for *operational* settings tuned per deployment
+without rebuilding.  It is separate from the compile-time attestation/TLS key
+flags, and separate from `config/site-config.json` (which feeds the browser
+build).  With no config file, every feature below stays off and the proxy
+behaves exactly as before.  See `proxy/proxy.example.toml` for a full annotated
+example.  This file is the place to grow as more runtime options are added.
+
+**Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
+config aborts startup rather than starting unprotected, and a request over any
+applicable limit is answered `429` *before* attestation or the upstream is
+touched, so floods are shed cheaply.
+
+- `enabled` — master on/off switch for the whole feature.
+- `window_secs` / `max_requests` — the **universal cap**: at most `max_requests`
+  per `window_secs` from any single client IP, across every request.  Set either
+  to `0` to disable the universal cap and rely on `rules` alone.
+- `[[rate_limiting.rules]]` — **per-URL-pattern** limits, each with its own
+  window and cap and its own counter keyed by origin IP, so a burst against one
+  pattern is throttled independently of the others and of the universal cap.
+  `pattern` is a glob matched against `"{host}{path}"` (where `*` matches any run
+  of characters, including `/`); rules are evaluated top-to-bottom, first match
+  wins.  Counting uses `pingora-limits`' sliding-window estimator.
+
+  ```toml
+  [rate_limiting]
+  enabled = true
+  window_secs = 1        # universal: 100 requests / second / IP
+  max_requests = 100
+
+  [[rate_limiting.rules]]
+  pattern = "example.com/secrets/*"   # 5 requests / minute / IP
+  window_secs = 60
+  max_requests = 5
+  ```
+
+  Note: when clients share an egress IP (NAT), the per-IP counters are shared —
+  size caps for the deployment's real per-IP concurrency.
 
 ---
 
