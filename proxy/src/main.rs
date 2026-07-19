@@ -25,6 +25,8 @@ use attest::{AttestInputs, BodyBinding, Verifier};
 /// it is rejected with 413.  The browser is expected to send anything larger as
 /// an *unbound* upload (see `BodyBinding::Unbound`), which streams straight
 /// through with no size cap and no per-body hash.
+/// TODO: Revisit this... inspection before streaming should be possible per: https://github.com/cloudflare/pingora/issues/67
+/// Likely to do with how we're holding back headers before streaming as well though.
 const BOUND_BODY_MAX: usize = 64 * 1024;
 
 #[derive(Parser, Debug)]
