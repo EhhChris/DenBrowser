@@ -160,9 +160,21 @@ def _run(pub_key):
     check("Captured POST token cannot ship a different body",
           method="POST", path="/echo", body=b"tampered", headers=h, expect=403)
 
+    # ── Bound body at the 64 KB cap streams through ──────────────────────────
+    # The bound path buffers + hashes the whole body before contacting the
+    # upstream, so it is capped at pingora's 64 KiB retry-buffer limit.  A body
+    # exactly at the cap is still forwarded.
+    ts = str(int(time.time()))
+    nonce = _fresh_nonce_b64()
+    edge = b"z" * (64 * 1024)
+    h = _make_attest(pub_key, nonce_b64=nonce, ts=ts, host=host,
+                     method="POST", path="/echo", body=edge)  # bound (hashed)
+    check("Bound body at 64 KB cap forwarded",
+          method="POST", path="/echo", body=edge, headers=h, expect=200)
+
     # ── Large unbound upload streams through (no body hash) ──────────────────
-    # 20 MB is over the proxy's 10 MB bound-body cap; the unbound marker makes
-    # the proxy stream it straight through instead of buffering + hashing.
+    # 20 MB is far over the 64 KB bound-body cap; the unbound marker makes the
+    # proxy stream it straight through instead of buffering + hashing.
     ts = str(int(time.time()))
     nonce = _fresh_nonce_b64()
     big = b"x" * (20 * 1024 * 1024)
@@ -171,13 +183,16 @@ def _run(pub_key):
     check("Large unbound upload streams through (20 MB)",
           method="POST", path="/echo", body=big, headers=h, expect=200)
 
-    # ── Bound body over the 10 MB cap is still rejected ──────────────────────
+    # ── Bound body over the 64 KB cap is rejected ────────────────────────────
+    # A hashed (bound) body larger than the retry-buffer cap cannot be replayed
+    # to the upstream, so the proxy rejects it with 413 — the browser is
+    # expected to send anything this large as an unbound upload instead.
     ts = str(int(time.time()))
     nonce = _fresh_nonce_b64()
-    big = b"y" * (11 * 1024 * 1024)
+    big = b"y" * (64 * 1024 + 1)
     h = _make_attest(pub_key, nonce_b64=nonce, ts=ts, host=host,
                      method="POST", path="/echo", body=big)  # bound (hashed)
-    check("Bound body over 10 MB cap rejected",
+    check("Bound body over 64 KB cap rejected",
           method="POST", path="/echo", body=big, headers=h, expect=413)
 
     # ── Missing headers ─────────────────────────────────────────────────────

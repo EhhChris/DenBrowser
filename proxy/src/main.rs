@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use clap::Parser;
 use log::{info, warn};
 use pingora_core::listeners::tls::TlsSettings;
@@ -15,10 +14,20 @@ use sha2::{Digest, Sha256};
 mod attest;
 use attest::{AttestInputs, BodyBinding, Verifier};
 
-/// Maximum bytes of request body we are willing to buffer for verification.
-/// Anything larger is rejected with 413.  Adjust per deployment if the upstream
-/// legitimately accepts very large uploads.
-const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum bytes of a *bound* (hash-verified) request body.
+///
+/// A bound body is buffered and hashed in `request_filter` *before* the upstream
+/// is ever contacted, so the backend never sees an unverified byte.  To forward
+/// the body afterwards we rely on pingora's request retry buffer, which natively
+/// replays it to the upstream — and that buffer is a `FixedBuffer` hardcoded to
+/// `BODY_BUF_LIMIT` (64 KiB) that silently truncates past its capacity.  So the
+/// bound path is capped at exactly that limit: a bound request whose body exceeds
+/// it is rejected with 413.  The browser is expected to send anything larger as
+/// an *unbound* upload (see `BodyBinding::Unbound`), which streams straight
+/// through with no size cap and no per-body hash.
+/// TODO: Revisit this... inspection before streaming should be possible per: https://github.com/cloudflare/pingora/issues/67
+/// Likely to do with how we're holding back headers before streaming as well though.
+const BOUND_BODY_MAX: usize = 64 * 1024;
 
 #[derive(Parser, Debug)]
 #[command(about = "DenBrowser attestation proxy — verifies ECIES tokens, strips headers, forwards")]
@@ -77,27 +86,14 @@ impl DenBrowserProxy {
     }
 }
 
-/// Per-request state.  For bound requests both verification phases run in
-/// `request_filter` before the upstream is ever contacted, and the
-/// fully-verified request body is stashed here and handed to the upstream by
-/// `request_body_filter`.  For unbound (large-upload) requests there is no body
-/// to verify, so `stream_through` is set and the body is streamed to the
-/// upstream chunk-by-chunk instead of buffered.
-#[derive(Default)]
-pub struct ProxyCtx {
-    verified_body: Vec<u8>,
-    body_emitted: bool,
-    /// Unbound upload: stream the body straight through, do not buffer it.
-    stream_through: bool,
-}
-
 #[async_trait]
 impl ProxyHttp for DenBrowserProxy {
-    type CTX = ProxyCtx;
+    // No per-request state is needed: bound bodies are verified and captured in
+    // `request_filter`, and pingora forwards them; unbound bodies stream through
+    // untouched.
+    type CTX = ();
 
-    fn new_ctx(&self) -> Self::CTX {
-        ProxyCtx::default()
-    }
+    fn new_ctx(&self) -> Self::CTX {}
 
     async fn upstream_peer(
         &self,
@@ -117,30 +113,31 @@ impl ProxyHttp for DenBrowserProxy {
         Ok(Box::new(peer))
     }
 
-    /// Verify the request completely — headers (phase 1) *and* body (phase 2)
-    /// — before the upstream is ever contacted.  Any failure answers the client
+    /// Verify the request completely — headers (phase 1) *and* body (phase 2) —
+    /// before the upstream is ever contacted.  Any failure answers the client
     /// here and returns `Ok(true)`, so pingora never opens the upstream
-    /// connection: the backend only ever sees requests that passed both phases
+    /// connection: the backend only ever sees requests that passed every check
     /// and needs no awareness of attestation at all.
     ///
-    /// The whole request body is buffered and hashed here (bounded by
-    /// `MAX_BODY_BYTES`).  Verifying before forwarding — rather than streaming
-    /// the body upstream and checking as it goes — is what guarantees a
-    /// tampered or unattested request cannot reach the backend at all.  The
-    /// verified body is stashed in `ctx` and emitted upstream by
-    /// `request_body_filter`.
+    /// Bound requests: the whole body is buffered (into pingora's retry buffer)
+    /// and hashed here, then verified, all before `upstream_peer`.  Once
+    /// verification passes, pingora replays the retry-buffered body to the
+    /// upstream on its own — so there is no `request_body_filter` to override and
+    /// no second copy of the body to carry.  The body is capped at
+    /// `BOUND_BODY_MAX` (the retry buffer's own limit); larger bound bodies are
+    /// rejected with 413.
     ///
-    /// Exception — unbound (large-upload) requests: the token carries no body
-    /// hash, so there is nothing to verify or buffer.  We commit the nonce here
-    /// and return without reading the body, letting `request_body_filter` stream
-    /// it straight to the upstream (O(1) memory, no size cap).  Origin, replay,
-    /// timestamp, and method/host/path binding are still fully verified before
-    /// the upstream is contacted; only per-body integrity is intentionally
-    /// skipped for these uploads.
+    /// Unbound (large-upload) requests: the token carries no body hash, so there
+    /// is nothing to verify or buffer.  We commit the nonce here and return
+    /// without reading the body, letting pingora stream it straight to the
+    /// upstream (O(1) memory, no size cap).  Origin, replay, timestamp, and
+    /// method/host/path binding are still fully verified before the upstream is
+    /// contacted; only per-body integrity is intentionally skipped for these
+    /// uploads.
     async fn request_filter(
         &self,
         session: &mut Session,
-        ctx: &mut Self::CTX,
+        _ctx: &mut Self::CTX,
     ) -> Result<bool> {
         let req = session.req_header();
 
@@ -186,35 +183,39 @@ impl ProxyHttp for DenBrowserProxy {
             }
         };
 
-        // Unbound upload: no body hash to verify.  Commit the nonce now (there
-        // is no phase 2 to defer it to) and return without draining the body so
-        // pingora streams it straight to the upstream via request_body_filter.
+        // Unbound upload: no body hash to verify.  Commit the nonce now (there is
+        // no phase 2 to defer it to) and return without draining the body so
+        // pingora streams it straight to the upstream.
         if matches!(p1.body_binding, BodyBinding::Unbound) {
             if let Err(e) = self.verifier.commit_nonce(&p1.nonce) {
                 warn!("rejected — {e} (host={host} {method} {path})");
                 let _ = session.respond_error(403).await;
                 return Ok(true);
             }
-            ctx.stream_through = true;
             return Ok(false);
         }
 
-        // Phase 2 — buffer and hash the entire body, then verify it.  Reading
-        // the body here (before `upstream_peer`) drains the downstream stream;
-        // `request_body_filter` replays the buffered bytes to the upstream once
-        // verification has passed.
+        // Phase 2 — buffer and hash the entire body, then verify it.  Enabling
+        // retry buffering *before* the first read captures the body into
+        // pingora's retry buffer; reading it here (before `upstream_peer`) drains
+        // the downstream stream, and pingora replays the retry buffer to the
+        // upstream once we return `Ok(false)`.
+        session.enable_retry_buffering();
         let mut hasher = Sha256::new();
-        let mut body = Vec::new();
+        let mut total = 0usize;
         loop {
             match session.read_request_body().await {
                 Ok(Some(chunk)) => {
-                    if body.len() + chunk.len() > MAX_BODY_BYTES {
-                        warn!("rejected — request body exceeds {MAX_BODY_BYTES} bytes (DoS guard)");
+                    total += chunk.len();
+                    if total > BOUND_BODY_MAX {
+                        warn!(
+                            "rejected — bound body exceeds {BOUND_BODY_MAX} bytes \
+                             (must be sent as an unbound upload)"
+                        );
                         let _ = session.respond_error(413).await;
                         return Ok(true);
                     }
                     hasher.update(&chunk);
-                    body.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -232,44 +233,9 @@ impl ProxyHttp for DenBrowserProxy {
             return Ok(true);
         }
 
-        // Fully verified: forward it.  Hand the buffered body to
-        // `request_body_filter` for emission to the upstream.
-        ctx.verified_body = body;
+        // Fully verified.  Pingora's retry buffer holds the body and replays it
+        // to the upstream on its own.
         Ok(false)
-    }
-
-    /// Emit the request body to the upstream.
-    ///
-    /// Bound requests: the body was read and verified in `request_filter` before
-    /// the upstream was contacted, so the downstream stream is drained and
-    /// pingora hands us no data here — it calls this once at end-of-stream and
-    /// we replay the buffered bytes in one shot (a bodyless request emits
-    /// nothing).
-    ///
-    /// Unbound requests: the body was *not* read in `request_filter`, so pingora
-    /// delivers it here chunk-by-chunk.  We leave each chunk untouched so it
-    /// streams straight to the upstream with no buffering and no size cap.
-    async fn request_body_filter(
-        &self,
-        _session: &mut Session,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        if ctx.stream_through {
-            // Unbound upload: pass the chunk through as-is.
-            return Ok(());
-        }
-
-        *body = None;
-        if end_of_stream && !ctx.body_emitted {
-            let buf = std::mem::take(&mut ctx.verified_body);
-            if !buf.is_empty() {
-                *body = Some(Bytes::from(buf));
-            }
-            ctx.body_emitted = true;
-        }
-        Ok(())
     }
 
     /// Strip attestation headers from the request forwarded upstream.
