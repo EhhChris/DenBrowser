@@ -177,7 +177,7 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,409 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -376,12 +376,15 @@ new file mode 100644
 +
 +// ── Body binding policy ─────────────────────────────────────────────────────
 +// Uploads larger than this are sent "unbound" (no body hash) so the proxy can
-+// stream them straight through instead of buffering + hashing.  Keep this at or
-+// below the proxy's MAX_BODY_BYTES (10 MiB) so a *bound* upload is never
-+// buffered past the proxy's cap and rejected with 413.  Origin, replay,
-+// timestamp, and method/host/path binding still apply to unbound uploads; only
-+// per-body integrity is dropped for them.
-+static const uint64_t kMaxBoundBodyBytes = 8 * 1024 * 1024;  // 8 MiB
++// stream them straight through instead of buffering + hashing.  This must stay
++// at or below the proxy's BOUND_BODY_MAX so a *bound* upload is never buffered
++// past the proxy's cap and rejected with 413.  That cap is pingora's request
++// retry-buffer limit (BODY_BUF_LIMIT, 64 KiB): the proxy verifies a bound body
++// in full before contacting the upstream and then relies on that retry buffer
++// to replay it, and the buffer silently truncates past its capacity.  Origin,
++// replay, timestamp, and method/host/path binding still apply to unbound
++// uploads; only per-body integrity is dropped for them.
++static const uint64_t kMaxBoundBodyBytes = 64 * 1024;  // 64 KiB (proxy retry-buffer cap)
 +
 +// Decide whether to skip the body hash (emit the "unbound" sentinel) for this
 +// upload.  We skip when the body is too large to hash cheaply up front, or when
