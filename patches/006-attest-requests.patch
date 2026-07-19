@@ -42,8 +42,17 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #     4. Generate random 12-byte IV.
 #     5. Generate random 16-byte nonce  N.
 #     6. Compute  body_hash = sha256(request_body)  in lowercase hex.
+#        EXCEPTION — large uploads: if the upload body exceeds kMaxBoundBodyBytes
+#        (or the stream cannot be cloned to hash it), the body field is set to
+#        the literal "unbound" instead of a hash.  The proxy then streams the
+#        body straight through without buffering it.  Origin, replay, timestamp,
+#        and method/host/path binding still apply; only per-body integrity is
+#        dropped for these large uploads.  Because "unbound" lives inside the
+#        GCM-authenticated plaintext, a client cannot forge it or downgrade a
+#        normal (bound) request without the proxy's private key.
 #     7. Build the canonical plaintext:
 #          "denbrowser-attest:v2\n<base64(N)>\n<ts>\n<host>\n<method>\n<path>\n<body_hash>"
+#          (the final field is the literal "unbound" for large uploads)
 #     8. AES-128-GCM-Encrypt(K_enc, IV, plaintext) → ciphertext || 16-byte tag.
 #     9. token = base64( ephem_pub(65) || IV(12) || ciphertext_and_tag )
 #
@@ -59,8 +68,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #     4. Decode token, ECDH + KDF, AES-128-GCM decrypt.
 #     5. Compare every plaintext field (prefix, nonce, ts, host, method, path)
 #        against the request the proxy actually received.  Reject on mismatch.
-#     6. Stream the request body, hash it, compare to the body_hash field of
-#        the plaintext.  Reject on mismatch.
+#     6. If the body_hash field is a hash: buffer the request body, hash it,
+#        compare to the body_hash field of the plaintext, reject on mismatch.
+#        If it is the "unbound" sentinel: commit the nonce now and stream the
+#        body straight through without buffering (large uploads).
 #     7. Atomically insert the nonce into the replay cache and forward.
 #
 # WHAT THIS PROTECTS AGAINST  (vs. the v1 design):
@@ -166,7 +177,7 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
 new file mode 100644
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,406 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -204,6 +215,7 @@ new file mode 100644
 +#include "nsComponentManagerUtils.h"
 +#include "nsHttp.h"
 +#include "nsHttpRequestHead.h"
++#include "nsICloneableInputStream.h"
 +#include "nsICryptoHash.h"
 +#include "nsIInputStream.h"
 +#include "nsIURI.h"
@@ -362,6 +374,40 @@ new file mode 100644
 +  return NS_OK;
 +}
 +
++// ── Body binding policy ─────────────────────────────────────────────────────
++// Uploads larger than this are sent "unbound" (no body hash) so the proxy can
++// stream them straight through instead of buffering + hashing.  Keep this at or
++// below the proxy's MAX_BODY_BYTES (10 MiB) so a *bound* upload is never
++// buffered past the proxy's cap and rejected with 413.  Origin, replay,
++// timestamp, and method/host/path binding still apply to unbound uploads; only
++// per-body integrity is dropped for them.
++static const uint64_t kMaxBoundBodyBytes = 8 * 1024 * 1024;  // 8 MiB
++
++// Decide whether to skip the body hash (emit the "unbound" sentinel) for this
++// upload.  We skip when the body is too large to hash cheaply up front, or when
++// the stream cannot be cloned (we cannot hash it without consuming the bytes the
++// actual upload still needs to send).
++static bool ShouldSkipBodyHash(nsIInputStream* aUploadStream) {
++  if (!aUploadStream) {
++    return false;  // No body: sha256("") is correct and trivial to bind.
++  }
++
++  // Not cloneable → hashing would consume the upload bytes.  Stream unbound.
++  nsCOMPtr<nsICloneableInputStream> cloneable = do_QueryInterface(aUploadStream);
++  if (!cloneable || !cloneable->GetCloneable()) {
++    return true;
++  }
++
++  // Large enough that a full pre-upload hashing pass (and proxy buffering) is
++  // not worth it: send it unbound and let the proxy stream it.
++  uint64_t avail = 0;
++  if (NS_SUCCEEDED(aUploadStream->Available(&avail)) &&
++      avail > kMaxBoundBodyBytes) {
++    return true;
++  }
++  return false;
++}
++
 +// ── Public API ────────────────────────────────────────────────────────────────
 +
 +nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
@@ -410,9 +456,14 @@ new file mode 100644
 +      reinterpret_cast<const char*>(nonceBytes), sizeof(nonceBytes), nonceB64);
 +  if (NS_FAILED(nsrv)) return NS_OK;
 +
-+  // ── 6. Body hash (sha256 hex) ────────────────────────────────────────────
++  // ── 6. Body binding (sha256 hex, or the "unbound" sentinel) ──────────────
 +  nsAutoCString bodyHex;
-+  if (NS_FAILED(HashBody(aUploadStream, bodyHex))) {
++  if (ShouldSkipBodyHash(aUploadStream)) {
++    // Large / unhashable upload: emit the authenticated "unbound" marker and
++    // let the proxy stream the body without buffering.  (See the proxy's
++    // request_body_filter and attest.rs BodyBinding::Unbound.)
++    bodyHex.AssignLiteral("unbound");
++  } else if (NS_FAILED(HashBody(aUploadStream, bodyHex))) {
 +    return NS_OK;
 +  }
 +

@@ -20,6 +20,11 @@ const TOKEN_MIN_LEN: usize = 94;
 
 const PLAINTEXT_PREFIX: &[u8] = b"denbrowser-attest:v2";
 
+/// Sentinel that replaces the body-hash field when the DenBrowser client
+/// declines to bind the body (large uploads).  It can never collide with a
+/// real hash: a hex SHA-256 is always 64 chars, and this is not.
+const UNBOUND_SENTINEL: &[u8] = b"unbound";
+
 /// Header values + URL fields the verifier compares against the decrypted
 /// plaintext.  The body is handled separately by `verify_body_and_commit`
 /// because it streams in after the head has been parsed.
@@ -32,10 +37,25 @@ pub struct AttestInputs<'a> {
     pub path: &'a str,
 }
 
+/// How the request body is (or isn't) cryptographically bound to the token.
+///
+/// `Hash` is the normal case: the token commits to `sha256(body)` and the proxy
+/// buffers + verifies the body before forwarding.  `Unbound` is the large-upload
+/// escape hatch: the DenBrowser client omits the body hash for uploads too large
+/// to hash up front, so the proxy streams the body straight through without
+/// buffering.  Origin attestation, nonce replay, timestamp, and method/host/path
+/// binding still apply — only per-body integrity is dropped for these requests.
+/// The `Unbound` state lives inside the AES-GCM-authenticated plaintext, so a
+/// client cannot forge it or downgrade a normal (bound) request without the key.
+pub enum BodyBinding {
+    Hash([u8; 32]),
+    Unbound,
+}
+
 /// State carried from phase 1 (header verify) into phase 2 (body verify).
 pub struct PhaseOne {
     pub nonce: [u8; NONCE_LEN],
-    pub expected_body_hash: [u8; 32],
+    pub body_binding: BodyBinding,
 }
 
 pub struct Verifier {
@@ -159,48 +179,70 @@ impl Verifier {
             return Err(AttestError::PlaintextMismatch);
         }
 
-        // 8. Decode the body hash; phase 2 compares it against the actual body.
-        if parts[6].len() != HEX_HASH_LEN {
-            return Err(AttestError::PlaintextMismatch);
-        }
-        let mut expected_body_hash = [0u8; 32];
-        for (idx, pair) in parts[6].chunks(2).enumerate() {
-            let s = std::str::from_utf8(pair).map_err(|_| AttestError::PlaintextMismatch)?;
-            expected_body_hash[idx] =
-                u8::from_str_radix(s, 16).map_err(|_| AttestError::PlaintextMismatch)?;
-        }
+        // 8. Body binding.  Either the `unbound` sentinel (large upload, streamed
+        //    through without a body check) or a hex SHA-256 that phase 2 compares
+        //    against the actual body.
+        let body_binding = if parts[6] == UNBOUND_SENTINEL {
+            BodyBinding::Unbound
+        } else {
+            if parts[6].len() != HEX_HASH_LEN {
+                return Err(AttestError::PlaintextMismatch);
+            }
+            let mut expected_body_hash = [0u8; 32];
+            for (idx, pair) in parts[6].chunks(2).enumerate() {
+                let s = std::str::from_utf8(pair).map_err(|_| AttestError::PlaintextMismatch)?;
+                expected_body_hash[idx] =
+                    u8::from_str_radix(s, 16).map_err(|_| AttestError::PlaintextMismatch)?;
+            }
+            BodyBinding::Hash(expected_body_hash)
+        };
 
         Ok(PhaseOne {
             nonce,
-            expected_body_hash,
+            body_binding,
         })
     }
 
-    /// Phase 2.  Compare the actual body hash to the expected one; on success
-    /// atomically inserts the nonce into the replay cache (so a TOCTOU race
-    /// with a parallel replay still loses).
-    pub fn verify_body_and_commit(
-        &self,
-        p1: &PhaseOne,
-        actual_body_hash: &[u8; 32],
-    ) -> Result<(), AttestError> {
-        if &p1.expected_body_hash != actual_body_hash {
-            return Err(AttestError::BodyHashMismatch);
-        }
-
+    /// Atomically insert a nonce into the replay cache, rejecting if it is
+    /// already present (so a TOCTOU race with a parallel replay still loses).
+    /// Also sweeps expired entries on the way through.
+    pub fn commit_nonce(&self, nonce: &[u8; NONCE_LEN]) -> Result<(), AttestError> {
         let mut cache = self.nonce_cache.lock().unwrap();
         let now = Instant::now();
 
         // Cheap TTL sweep — every commit, not every peek.
         cache.retain(|_, t| now.duration_since(*t) < NONCE_TTL);
 
-        match cache.entry(p1.nonce) {
+        match cache.entry(*nonce) {
             Entry::Occupied(_) => Err(AttestError::NonceReplay), // lost a parallel race
             Entry::Vacant(e) => {
                 e.insert(now);
                 Ok(())
             }
         }
+    }
+
+    /// Phase 2 (bound bodies only).  Compare the actual body hash to the
+    /// expected one; on success atomically commit the nonce.  Unbound requests
+    /// never reach here — their nonce is committed in phase 1 (see
+    /// `commit_nonce`) because there is no body hash to wait for.
+    pub fn verify_body_and_commit(
+        &self,
+        p1: &PhaseOne,
+        actual_body_hash: &[u8; 32],
+    ) -> Result<(), AttestError> {
+        match &p1.body_binding {
+            BodyBinding::Hash(expected) => {
+                if expected != actual_body_hash {
+                    return Err(AttestError::BodyHashMismatch);
+                }
+            }
+            // Defensive: an unbound request is streamed through and its nonce is
+            // committed in phase 1, so this path should not be exercised.
+            BodyBinding::Unbound => return Ok(()),
+        }
+
+        self.commit_nonce(&p1.nonce)
     }
 }
 
@@ -237,6 +279,28 @@ mod tests {
         path: &str,
         body: &[u8],
     ) -> String {
+        make_token_with_body_field(
+            proxy_pub,
+            nonce_b64,
+            ts,
+            host,
+            method,
+            path,
+            &sha256_hex(body),
+        )
+    }
+
+    /// Like `make_token` but takes the raw body-binding field so tests can
+    /// build the `unbound` sentinel (or malformed values) directly.
+    fn make_token_with_body_field(
+        proxy_pub: &PublicKey,
+        nonce_b64: &str,
+        ts: &str,
+        host: &str,
+        method: &str,
+        path: &str,
+        body_field: &str,
+    ) -> String {
         let ephem_priv = SecretKey::random(&mut OsRng);
         let ephem_pub = ephem_priv.public_key();
         let shared = diffie_hellman(ephem_priv.to_nonzero_scalar(), proxy_pub.as_affine());
@@ -249,8 +313,7 @@ mod tests {
 
         let iv = [0u8; 12]; // fixed IV is fine for unit tests
         let plaintext = format!(
-            "denbrowser-attest:v2\n{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{}",
-            sha256_hex(body)
+            "denbrowser-attest:v2\n{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{body_field}"
         );
         let cipher = Aes128Gcm::new_from_slice(aes_key).unwrap();
         let ct_tag = cipher
@@ -313,6 +376,37 @@ mod tests {
             .expect("body matches");
 
         // Replay attempt with the same nonce is caught by the fast path.
+        assert!(matches!(
+            v.verify_headers(&inputs),
+            Err(AttestError::NonceReplay)
+        ));
+    }
+
+    #[test]
+    fn unbound_token_yields_unbound_binding_and_commits_nonce() {
+        let (v, pk) = fresh_verifier();
+        let ts = now_ts();
+        let nonce = fresh_nonce_b64();
+        // Client declined to bind the body (large upload): body field == sentinel.
+        let token = make_token_with_body_field(
+            &pk, &nonce, &ts, "example.com", "POST", "/upload", "unbound",
+        );
+        let inputs = AttestInputs {
+            ts: &ts,
+            nonce_b64: &nonce,
+            token_b64: &token,
+            host: "example.com",
+            method: "POST",
+            path: "/upload",
+        };
+
+        let p1 = v.verify_headers(&inputs).expect("headers verify");
+        assert!(matches!(p1.body_binding, BodyBinding::Unbound));
+
+        // Unbound requests commit the nonce in phase 1 (no body hash to await).
+        v.commit_nonce(&p1.nonce).expect("first commit succeeds");
+
+        // A replay of the same nonce is now rejected on the fast path.
         assert!(matches!(
             v.verify_headers(&inputs),
             Err(AttestError::NonceReplay)

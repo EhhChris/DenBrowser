@@ -13,7 +13,7 @@ use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use sha2::{Digest, Sha256};
 
 mod attest;
-use attest::{AttestInputs, Verifier};
+use attest::{AttestInputs, BodyBinding, Verifier};
 
 /// Maximum bytes of request body we are willing to buffer for verification.
 /// Anything larger is rejected with 413.  Adjust per deployment if the upstream
@@ -77,13 +77,18 @@ impl DenBrowserProxy {
     }
 }
 
-/// Per-request state.  Both verification phases run in `request_filter`,
-/// before the upstream is ever contacted.  The fully-verified request body is
-/// stashed here and handed to the upstream by `request_body_filter`.
+/// Per-request state.  For bound requests both verification phases run in
+/// `request_filter` before the upstream is ever contacted, and the
+/// fully-verified request body is stashed here and handed to the upstream by
+/// `request_body_filter`.  For unbound (large-upload) requests there is no body
+/// to verify, so `stream_through` is set and the body is streamed to the
+/// upstream chunk-by-chunk instead of buffered.
 #[derive(Default)]
 pub struct ProxyCtx {
     verified_body: Vec<u8>,
     body_emitted: bool,
+    /// Unbound upload: stream the body straight through, do not buffer it.
+    stream_through: bool,
 }
 
 #[async_trait]
@@ -124,6 +129,14 @@ impl ProxyHttp for DenBrowserProxy {
     /// tampered or unattested request cannot reach the backend at all.  The
     /// verified body is stashed in `ctx` and emitted upstream by
     /// `request_body_filter`.
+    ///
+    /// Exception — unbound (large-upload) requests: the token carries no body
+    /// hash, so there is nothing to verify or buffer.  We commit the nonce here
+    /// and return without reading the body, letting `request_body_filter` stream
+    /// it straight to the upstream (O(1) memory, no size cap).  Origin, replay,
+    /// timestamp, and method/host/path binding are still fully verified before
+    /// the upstream is contacted; only per-body integrity is intentionally
+    /// skipped for these uploads.
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -173,6 +186,19 @@ impl ProxyHttp for DenBrowserProxy {
             }
         };
 
+        // Unbound upload: no body hash to verify.  Commit the nonce now (there
+        // is no phase 2 to defer it to) and return without draining the body so
+        // pingora streams it straight to the upstream via request_body_filter.
+        if matches!(p1.body_binding, BodyBinding::Unbound) {
+            if let Err(e) = self.verifier.commit_nonce(&p1.nonce) {
+                warn!("rejected — {e} (host={host} {method} {path})");
+                let _ = session.respond_error(403).await;
+                return Ok(true);
+            }
+            ctx.stream_through = true;
+            return Ok(false);
+        }
+
         // Phase 2 — buffer and hash the entire body, then verify it.  Reading
         // the body here (before `upstream_peer`) drains the downstream stream;
         // `request_body_filter` replays the buffered bytes to the upstream once
@@ -212,12 +238,17 @@ impl ProxyHttp for DenBrowserProxy {
         Ok(false)
     }
 
-    /// Emit the already-verified request body to the upstream.
+    /// Emit the request body to the upstream.
     ///
-    /// The body was read and verified in `request_filter` before the upstream
-    /// was contacted, so the downstream stream is drained and pingora hands us
-    /// no data here — it calls this once at end-of-stream.  We replay the
-    /// buffered bytes in one shot; a bodyless request emits nothing.
+    /// Bound requests: the body was read and verified in `request_filter` before
+    /// the upstream was contacted, so the downstream stream is drained and
+    /// pingora hands us no data here — it calls this once at end-of-stream and
+    /// we replay the buffered bytes in one shot (a bodyless request emits
+    /// nothing).
+    ///
+    /// Unbound requests: the body was *not* read in `request_filter`, so pingora
+    /// delivers it here chunk-by-chunk.  We leave each chunk untouched so it
+    /// streams straight to the upstream with no buffering and no size cap.
     async fn request_body_filter(
         &self,
         _session: &mut Session,
@@ -225,6 +256,11 @@ impl ProxyHttp for DenBrowserProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        if ctx.stream_through {
+            // Unbound upload: pass the chunk through as-is.
+            return Ok(());
+        }
+
         *body = None;
         if end_of_stream && !ctx.body_emitted {
             let buf = std::mem::take(&mut ctx.verified_body);
