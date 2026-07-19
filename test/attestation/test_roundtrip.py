@@ -54,12 +54,17 @@ def _load_public_key(path):
         return serialization.load_pem_public_key(f.read())
 
 
-def _make_attest(pub_key, *, nonce_b64, ts, host, method, path, body):
-    """Mirror DenBrowserAttest.cpp::AddAttestHeaders — produce v2 headers."""
-    body_hash_hex = hashlib.sha256(body).hexdigest()
+def _make_attest(pub_key, *, nonce_b64, ts, host, method, path, body, unbound=False):
+    """Mirror DenBrowserAttest.cpp::AddAttestHeaders — produce v2 headers.
+
+    When ``unbound`` is set the body-hash field is replaced with the ``unbound``
+    sentinel, matching what the browser emits for uploads too large to hash up
+    front.  The proxy then streams the body straight through without buffering
+    or hashing (origin/replay/method/host/path binding still apply)."""
+    body_field = "unbound" if unbound else hashlib.sha256(body).hexdigest()
     plaintext = (
         f"denbrowser-attest:v2\n"
-        f"{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{body_hash_hex}"
+        f"{nonce_b64}\n{ts}\n{host}\n{method}\n{path}\n{body_field}"
     ).encode()
 
     ephem_priv = generate_private_key(SECP256R1())
@@ -154,6 +159,26 @@ def _run(pub_key):
                      method="POST", path="/echo", body=b"original")
     check("Captured POST token cannot ship a different body",
           method="POST", path="/echo", body=b"tampered", headers=h, expect=403)
+
+    # ── Large unbound upload streams through (no body hash) ──────────────────
+    # 20 MB is over the proxy's 10 MB bound-body cap; the unbound marker makes
+    # the proxy stream it straight through instead of buffering + hashing.
+    ts = str(int(time.time()))
+    nonce = _fresh_nonce_b64()
+    big = b"x" * (20 * 1024 * 1024)
+    h = _make_attest(pub_key, nonce_b64=nonce, ts=ts, host=host,
+                     method="POST", path="/echo", body=big, unbound=True)
+    check("Large unbound upload streams through (20 MB)",
+          method="POST", path="/echo", body=big, headers=h, expect=200)
+
+    # ── Bound body over the 10 MB cap is still rejected ──────────────────────
+    ts = str(int(time.time()))
+    nonce = _fresh_nonce_b64()
+    big = b"y" * (11 * 1024 * 1024)
+    h = _make_attest(pub_key, nonce_b64=nonce, ts=ts, host=host,
+                     method="POST", path="/echo", body=big)  # bound (hashed)
+    check("Bound body over 10 MB cap rejected",
+          method="POST", path="/echo", body=big, headers=h, expect=413)
 
     # ── Missing headers ─────────────────────────────────────────────────────
     check("Missing all attestation headers",
