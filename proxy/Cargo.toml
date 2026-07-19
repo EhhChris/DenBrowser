@@ -1,7 +1,7 @@
 [package]
 name = "denbrowser-proxy"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 
 [[bin]]
 name = "denbrowser-proxy"
@@ -15,7 +15,6 @@ pingora-http  = "0.8"
 
 async-trait = "0.1"
 
-# Crypto — RustCrypto stack, no system OpenSSL dependency
 p256    = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"
 sha2    = "0.10"
