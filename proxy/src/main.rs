@@ -7,13 +7,13 @@ use log::{info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
 use pingora_core::upstreams::peer::HttpPeer;
-use pingora_core::{Error, ErrorType, Result};
+use pingora_core::Result;
 use pingora_http::RequestHeader;
 use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use sha2::{Digest, Sha256};
 
 mod attest;
-use attest::{AttestInputs, PhaseOne, Verifier};
+use attest::{AttestInputs, Verifier};
 
 /// Maximum bytes of request body we are willing to buffer for verification.
 /// Anything larger is rejected with 413.  Adjust per deployment if the upstream
@@ -77,14 +77,12 @@ impl DenBrowserProxy {
     }
 }
 
-/// Per-request state.  Phase 1 (header verify) runs in `request_filter`;
-/// phase 2 (body verify) runs in `request_body_filter` once all chunks have
-/// been buffered.
+/// Per-request state.  Both verification phases run in `request_filter`,
+/// before the upstream is ever contacted.  The fully-verified request body is
+/// stashed here and handed to the upstream by `request_body_filter`.
 #[derive(Default)]
 pub struct ProxyCtx {
-    phase_one: Option<PhaseOne>,
-    body_buffer: Vec<u8>,
-    body_hasher: Sha256,
+    verified_body: Vec<u8>,
     body_emitted: bool,
 }
 
@@ -114,9 +112,18 @@ impl ProxyHttp for DenBrowserProxy {
         Ok(Box::new(peer))
     }
 
-    /// Phase 1.  Validate every attestation field except the body hash;
-    /// short-circuit with 403 on any failure.  The body hash is checked in
-    /// `request_body_filter` once the body has streamed in.
+    /// Verify the request completely — headers (phase 1) *and* body (phase 2)
+    /// — before the upstream is ever contacted.  Any failure answers the client
+    /// here and returns `Ok(true)`, so pingora never opens the upstream
+    /// connection: the backend only ever sees requests that passed both phases
+    /// and needs no awareness of attestation at all.
+    ///
+    /// The whole request body is buffered and hashed here (bounded by
+    /// `MAX_BODY_BYTES`).  Verifying before forwarding — rather than streaming
+    /// the body upstream and checking as it goes — is what guarantees a
+    /// tampered or unattested request cannot reach the backend at all.  The
+    /// verified body is stashed in `ctx` and emitted upstream by
+    /// `request_body_filter`.
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -146,37 +153,71 @@ impl ProxyHttp for DenBrowserProxy {
             .map(|p| p.as_str().to_owned())
             .unwrap_or_else(|| "/".to_owned());
 
-        let inputs = AttestInputs {
-            ts: &ts,
-            nonce_b64: &nonce,
-            token_b64: &token,
-            host: &host,
-            method: &method,
-            path: &path,
+        // Phase 1 — every attestation field except the body hash.
+        let p1 = {
+            let inputs = AttestInputs {
+                ts: &ts,
+                nonce_b64: &nonce,
+                token_b64: &token,
+                host: &host,
+                method: &method,
+                path: &path,
+            };
+            match self.verifier.verify_headers(&inputs) {
+                Ok(p1) => p1,
+                Err(e) => {
+                    warn!("rejected — {e} (host={host} {method} {path})");
+                    let _ = session.respond_error(403).await;
+                    return Ok(true);
+                }
+            }
         };
 
-        match self.verifier.verify_headers(&inputs) {
-            Ok(p1) => {
-                ctx.phase_one = Some(p1);
-                Ok(false)
-            }
-            Err(e) => {
-                warn!("rejected — {e} (host={host} {method} {path})");
-                let _ = session.respond_error(403).await;
-                Ok(true)
+        // Phase 2 — buffer and hash the entire body, then verify it.  Reading
+        // the body here (before `upstream_peer`) drains the downstream stream;
+        // `request_body_filter` replays the buffered bytes to the upstream once
+        // verification has passed.
+        let mut hasher = Sha256::new();
+        let mut body = Vec::new();
+        loop {
+            match session.read_request_body().await {
+                Ok(Some(chunk)) => {
+                    if body.len() + chunk.len() > MAX_BODY_BYTES {
+                        warn!("rejected — request body exceeds {MAX_BODY_BYTES} bytes (DoS guard)");
+                        let _ = session.respond_error(413).await;
+                        return Ok(true);
+                    }
+                    hasher.update(&chunk);
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    warn!("rejected — could not read request body: {e}");
+                    let _ = session.respond_error(400).await;
+                    return Ok(true);
+                }
             }
         }
+
+        let actual: [u8; 32] = hasher.finalize().into();
+        if let Err(e) = self.verifier.verify_body_and_commit(&p1, &actual) {
+            warn!("rejected — {e} (host={host} {method} {path})");
+            let _ = session.respond_error(403).await;
+            return Ok(true);
+        }
+
+        // Fully verified: forward it.  Hand the buffered body to
+        // `request_body_filter` for emission to the upstream.
+        ctx.verified_body = body;
+        Ok(false)
     }
 
-    /// Phase 2.  Buffer body chunks (suppressing them from upstream), hash on
-    /// the fly, then at end-of-stream verify against the expected hash and
-    /// emit the buffered body for upstream forwarding.
+    /// Emit the already-verified request body to the upstream.
     ///
-    /// Trade-off: the upstream connection is opened and request headers are
-    /// sent before body verification completes.  Upstream sees no body bytes
-    /// until verification passes; on failure the connection is aborted before
-    /// any body reaches upstream.  For services that act only after receiving
-    /// a full body (the common case) this is equivalent to a 403.
+    /// The body was read and verified in `request_filter` before the upstream
+    /// was contacted, so the downstream stream is drained and pingora hands us
+    /// no data here — it calls this once at end-of-stream.  We replay the
+    /// buffered bytes in one shot; a bodyless request emits nothing.
     async fn request_body_filter(
         &self,
         _session: &mut Session,
@@ -184,48 +225,14 @@ impl ProxyHttp for DenBrowserProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if let Some(chunk) = body.as_ref() {
-            if ctx.body_buffer.len() + chunk.len() > MAX_BODY_BYTES {
-                warn!(
-                    "rejected — request body exceeds {MAX_BODY_BYTES} bytes (DoS guard)"
-                );
-                return Err(Error::explain(
-                    ErrorType::HTTPStatus(413),
-                    "request body too large",
-                ));
-            }
-            ctx.body_hasher.update(chunk);
-            ctx.body_buffer.extend_from_slice(chunk);
-        }
-
-        // Suppress every chunk while we accumulate; we'll emit the verified
-        // buffer in one shot at end-of-stream.
         *body = None;
-
-        if end_of_stream {
-            let actual: [u8; 32] = ctx.body_hasher.clone().finalize().into();
-            let p1 = ctx
-                .phase_one
-                .as_ref()
-                .expect("request_body_filter without successful request_filter");
-
-            if let Err(e) = self.verifier.verify_body_and_commit(p1, &actual) {
-                warn!("rejected — {e}");
-                return Err(Error::explain(
-                    ErrorType::HTTPStatus(403),
-                    "attestation body verification failed",
-                ));
+        if end_of_stream && !ctx.body_emitted {
+            let buf = std::mem::take(&mut ctx.verified_body);
+            if !buf.is_empty() {
+                *body = Some(Bytes::from(buf));
             }
-
-            if !ctx.body_emitted {
-                let buf = std::mem::take(&mut ctx.body_buffer);
-                if !buf.is_empty() {
-                    *body = Some(Bytes::from(buf));
-                }
-                ctx.body_emitted = true;
-            }
+            ctx.body_emitted = true;
         }
-
         Ok(())
     }
 
