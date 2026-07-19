@@ -52,7 +52,9 @@ scripts/gen-proxy-tls.sh
 
 # Start an upstream and the proxy (example — see test/target-server/):
 docker compose -f test/target-server/compose.yml up -d
-(cd proxy && DENBROWSER_UPSTREAM=localhost:8080 cargo run --release)
+# The proxy speaks TLS to its upstream, so target the target's TLS port (8443).
+# The target reuses build/proxy-tls.* (self-signed), so pass --insecure-upstream.
+(cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run --release -- --insecure-upstream)
 ```
 
 ## Usage
