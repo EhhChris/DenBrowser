@@ -88,12 +88,15 @@ DenBrowser/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
 │       ├── attest.rs           # ECIES verification + replay cache
 │       ├── config.rs           # Operational TOML config loader
-│       └── ratelimit.rs        # Per-origin-IP request rate limiting
+│       ├── ratelimit.rs        # Per-origin-IP request rate limiting
+│       ├── mtls.rs             # Baseline mutual-TLS client authentication
+│       └── passthrough.rs      # Attestation bypass (IP + cert-subject allowlist)
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
     ├── apply-patches.sh        # Apply patches with dry-run validation
     ├── gen-attest-key.sh       # Generate ECDSA P-256 attestation keypair
     ├── gen-proxy-tls.sh        # Generate / register the pinned proxy TLS cert
+    ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
@@ -187,13 +190,15 @@ compile-time switches and the baked-in bookmarks:
 
 ### Proxy runtime configuration (`proxy/proxy.toml`)
 
-The attestation proxy takes an optional TOML config file (`--config <path>`, or
-the `DENBROWSER_CONFIG` env var) for *operational* settings tuned per deployment
-without rebuilding.  It is separate from the compile-time attestation/TLS key
-flags, and separate from `config/site-config.json` (which feeds the browser
-build).  With no config file, every feature below stays off and the proxy
-behaves exactly as before.  See `proxy/proxy.example.toml` for a full annotated
-example.  This file is the place to grow as more runtime options are added.
+The attestation proxy loads a **required** TOML config file for *operational*
+settings tuned per deployment without rebuilding.  It defaults to `proxy.toml`
+in the working directory (override with `--config <path>` or the
+`DENBROWSER_CONFIG` env var); the proxy **exits on startup** if the file is
+missing or unparseable, so it never comes up with unintended (e.g.
+mTLS-disabled) settings.  Copy the annotated `proxy/proxy.example.toml` to
+`proxy/proxy.toml` and edit it.  This config is separate from the compile-time
+attestation/TLS key flags, and from `config/site-config.json` (which feeds the
+browser build), and is the place to grow as more runtime options are added.
 
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any
@@ -225,6 +230,57 @@ touched, so floods are shed cheaply.
 
   Note: when clients share an egress IP (NAT), the per-IP counters are shared —
   size caps for the deployment's real per-IP concurrency.
+
+**Baseline mTLS** (`[mtls]`) requires every client to authenticate with a
+certificate at the TLS handshake — a third orthogonal layer alongside the
+existing two, replacing neither:
+
+- **mTLS** authenticates the *user/device* to the proxy (client → proxy).
+- **TLS SPKI pinning** (patch 012) authenticates the *proxy* to the browser
+  (proxy → client); the browser pins the proxy's cert, defeating MITM even by a
+  validly-CA-issued cert. mTLS is the opposite direction and does not replace it.
+- **Attestation** (ECIES headers) proves the request came from a genuine
+  DenBrowser build and binds it against replay/tampering — properties a client
+  cert doesn't provide. mTLS proves *who* holds a key but not *what software*
+  produced the request, so the two are complementary.
+
+  When `[mtls] enabled = true`, the listener is configured with
+  `SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT` against `client_ca`, so a
+  client with no certificate or one that doesn't chain to the CA is **rejected at
+  the handshake** and never reaches the request path.  Disabled by default (no
+  client certificate requested; behaviour identical to before).  A bad config
+  (missing/unreadable/empty CA bundle) aborts startup.
+
+  ```toml
+  [mtls]
+  enabled = true
+  client_ca = "/etc/denbrowser/user-ca.pem"
+  ```
+
+**Attestation bypass** (`[proxy_bypass]`) is an opt-in escape hatch that lets
+trusted infrastructure (health checks, internal automation) that can't run the
+DenBrowser attestation client reach the upstream.  It **builds on baseline mTLS**
+(and requires `[mtls]` enabled): the client certificate is already verified at
+the handshake, so bypass adds only two conditions on top of that verified
+identity, and is **default-deny**:
+
+- `enabled` — master switch. When off, every request is attested.
+- `allowed_ip_ranges` — CIDR ranges; the client's source IP must be inside one.
+- `allowed_subjects` — the mTLS-verified cert's CN or a SAN DNS entry must be on
+  this allowlist (so one CA can issue many user certs while only named identities
+  may bypass).
+
+  A request is forwarded straight upstream (skipping attestation) only when the
+  source IP **and** the cert-subject checks both pass; any miss falls through to
+  normal attestation.  A bad config (bypass enabled without mTLS, empty
+  ranges/allowlist, invalid CIDR) aborts startup.
+
+  ```toml
+  [proxy_bypass]
+  enabled = true
+  allowed_ip_ranges = ["10.0.0.0/8"]
+  allowed_subjects = ["health-checker"]
+  ```
 
 ---
 

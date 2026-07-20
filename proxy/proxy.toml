@@ -1,0 +1,67 @@
+# DenBrowser proxy — operational configuration.
+
+[rate_limiting]
+# Master on/off switch.  When false, nothing below takes effect — keep a tuned
+# ruleset in the file and flip it off with this one line.
+enabled = true
+
+# Universal cap, applied per client IP across *every* request:
+#   at most `max_requests` per `window_secs` seconds from any single origin IP.
+# Set either to 0 to disable the universal cap (the per-pattern `rules` below can
+# still apply on their own).
+window_secs  = 1
+max_requests = 100
+
+# Per-URL-pattern rules.  Each rule keeps its OWN counter keyed by origin IP, so
+# a burst against one pattern is throttled independently of the others and of the
+# universal cap above.  `pattern` is a glob matched against "{host}{path}"; `*`
+# matches any run of characters (including `/`), so `.../secrets/*` covers
+# everything nested under that prefix.  Rules are evaluated top-to-bottom and the
+# first match wins.
+
+# Tight limit on a sensitive area: 5 requests / minute / IP.
+#[[rate_limiting.rules]]
+#pattern      = "example.com/secrets/*"
+#window_secs  = 60
+#max_requests = 5
+
+# Looser limit on a high-traffic area: 50 requests / second / IP.
+#[[rate_limiting.rules]]
+#pattern      = "example.com/news/*"
+#window_secs  = 1
+#max_requests = 50
+
+# ---------------------------------------------------------------------------
+
+[mtls]
+# Baseline mutual-TLS client authentication. When enabled, EVERY connection
+# (attestation clients and bypass clients alike) must present a client
+# certificate that chains to client_ca — verified at the TLS handshake, so a
+# client with no certificate or an untrusted one is rejected before it reaches
+# the request path.
+enabled = true
+
+# PEM bundle of CA certificate(s) that presented client certs must chain to.
+# Required when enabled.
+client_ca = "/etc/denbrowser/user-ca.pem"
+
+# ---------------------------------------------------------------------------
+
+[proxy_bypass]
+# Attestation bypass: let specific, strongly authenticated callers skip
+# attestation and be forwarded straight upstream.  Intended for trusted
+# infrastructure (health checks, internal automation, otherwise trusted
+# origins) that can't run the DenBrowser attestation client.
+#
+# When enabled, a request is bypassed ONLY if BOTH conditions hold; any miss
+# falls through to normal attestation, so this can never block a legitimate
+# client.
+enabled = false
+
+# Source IP ranges (CIDR) permitted to bypass. A request from any other address
+# is attested normally. Required (non-empty) when enabled.
+allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
+
+# Subject allowlist matched against the mTLS-verified client certificate's Common
+# Name or one of its SubjectAltName DNS entries. Required (non-empty) when enabled.
+allowed_subjects = ["health-checker", "ops.internal", "denbrowser-user"]

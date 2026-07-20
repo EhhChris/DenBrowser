@@ -5,6 +5,7 @@ use clap::Parser;
 use log::{info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
+use pingora_core::tls::ssl::{SslFiletype, SslVerifyMode};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::RequestHeader;
@@ -13,9 +14,13 @@ use sha2::{Digest, Sha256};
 
 mod attest;
 mod config;
+mod mtls;
+mod passthrough;
 mod ratelimit;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
+use mtls::ClientCert;
+use passthrough::BypassPolicy;
 use ratelimit::RateLimiter;
 
 /// Maximum bytes of a *bound* (hash-verified) request body.
@@ -67,11 +72,12 @@ struct Args {
     #[arg(long, env = "DENBROWSER_INSECURE_UPSTREAM", default_value_t = false)]
     insecure_upstream: bool,
 
-    /// Path to the operational TOML config file (rate limiting, and future
-    /// runtime options).  Optional — with no config file every gated feature
-    /// stays off and the proxy behaves as it did before configs existed.
-    #[arg(long, env = "DENBROWSER_CONFIG")]
-    config: Option<String>,
+    /// Path to the operational TOML config file (rate limiting, mTLS, proxy
+    /// bypass, and future runtime options).  Required: the proxy loads this file
+    /// on startup and exits if it cannot be read or parsed.  Defaults to
+    /// `proxy.toml` in the working directory.
+    #[arg(long, env = "DENBROWSER_CONFIG", default_value = "proxy.toml")]
+    config: String,
 }
 
 struct DenBrowserProxy {
@@ -81,6 +87,10 @@ struct DenBrowserProxy {
     insecure_upstream: bool,
     /// `None` when rate limiting is disabled (no config or `enabled = false`).
     rate_limiter: Option<RateLimiter>,
+    /// Attestation-bypass policy (source-IP ranges + subject allowlist); `None`
+    /// when bypass is disabled.  The client certificate it matches against is
+    /// verified by baseline mTLS at the TLS layer and read here from the digest.
+    bypass: Option<BypassPolicy>,
 }
 
 impl DenBrowserProxy {
@@ -89,6 +99,7 @@ impl DenBrowserProxy {
         upstream: &str,
         insecure_upstream: bool,
         rate_limiter: Option<RateLimiter>,
+        bypass: Option<BypassPolicy>,
     ) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
@@ -100,6 +111,7 @@ impl DenBrowserProxy {
             upstream_port: port,
             insecure_upstream,
             rate_limiter,
+            bypass,
         })
     }
 }
@@ -157,32 +169,48 @@ impl ProxyHttp for DenBrowserProxy {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<bool> {
+        // Origin IP, keyed on by both rate limiting and bypass.  Owned copy so
+        // the immutable borrow of `session` ends before any `respond_error`.
+        let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
+
         // Rate limiting runs *before* attestation so a flood from one IP is shed
         // cheaply here — it never reaches the crypto path or the upstream.  The
         // counter is keyed on the origin IP and the rule glob is matched against
         // `host + path`, so per-URL-pattern limits work even on requests that
         // would later fail attestation.
-        if let Some(limiter) = &self.rate_limiter {
-            // Owned copy so the immutable borrow of `session` ends before the
-            // (mutable) `respond_error` below.
-            let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
-            // Enforce only when we have an IP to key on (always true for a
-            // TCP/TLS client); otherwise fail open rather than throttle blindly.
-            if let Some(ip) = client_ip {
-                let target = {
-                    let req = session.req_header();
-                    let host = header_str(&req.headers, "host")
-                        .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
-                        .unwrap_or_default();
-                    let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-                    format!("{host}{path}")
-                };
-                if !limiter.admit(&ip, &target) {
-                    warn!("rate limited — {ip} {target}");
-                    let _ = session.respond_error(429).await;
-                    return Ok(true);
-                }
+        // Enforce only when we have an IP to key on (always true for a TCP/TLS
+        // client); otherwise fail open rather than throttle blindly.
+        if let Some(limiter) = &self.rate_limiter
+            && let Some(ip) = client_ip
+        {
+            let target = {
+                let req = session.req_header();
+                let host = header_str(&req.headers, "host")
+                    .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
+                    .unwrap_or_default();
+                let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+                format!("{host}{path}")
+            };
+            if !limiter.admit(&ip, &target) {
+                warn!("rate limited — {ip} {target}");
+                let _ = session.respond_error(429).await;
+                return Ok(true);
             }
+        }
+
+        // Attestation bypass: a request is forwarded straight upstream (skipping
+        // all attestation) only if BOTH halves of the policy pass — its source IP
+        // is in range AND the mTLS-verified client certificate's subject is on the
+        // allowlist (the cert itself was already verified against the mTLS CA at
+        // the handshake and recorded in the digest as a `ClientCert`).  Any miss
+        // falls through to normal attestation, so bypass never weakens the path.
+        if let Some(policy) = &self.bypass
+            && let Some(ip) = client_ip
+            && let Some(cert) = client_cert(session)
+            && let Some(subject) = policy.authorizes(&ip, cert)
+        {
+            info!("attestation bypass — ip={ip} cert_subject={subject}");
+            return Ok(false);
         }
 
         let req = session.req_header();
@@ -302,6 +330,19 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
 }
 
+/// Read the mTLS client identity the TLS layer recorded on this connection's
+/// digest (see `mtls::Recorder`).  `None` means mTLS is disabled or the peer
+/// presented no certificate — with baseline mTLS enforced at the handshake, a
+/// present value is an already-verified identity.
+fn client_cert(session: &Session) -> Option<&ClientCert> {
+    session
+        .digest()?
+        .ssl_digest
+        .as_ref()?
+        .extension
+        .get::<ClientCert>()
+}
+
 fn main() {
     env_logger::init();
     let args = Args::parse();
@@ -317,10 +358,10 @@ fn main() {
         );
     }
 
-    let config = match &args.config {
-        Some(path) => Config::load(path).unwrap_or_else(|e| panic!("{e}")),
-        None => Config::default(),
-    };
+    // The config file is mandatory — fail loudly rather than fall back to
+    // silent defaults, so a missing or unreadable config never starts a proxy
+    // with unintended (e.g. mTLS-disabled) settings.
+    let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
     let rate_limiter = RateLimiter::from_config(&config.rate_limiting)
         .unwrap_or_else(|e| panic!("invalid rate_limiting config: {e}"));
     match &rate_limiter {
@@ -328,11 +369,30 @@ fn main() {
         None => info!("rate limiting disabled"),
     }
 
+    // Baseline mTLS: when enabled, every client must present a certificate
+    // chaining to the configured CA (enforced at the TLS handshake below).
+    let mtls = mtls::Mtls::from_config(&config.mtls)
+        .unwrap_or_else(|e| panic!("invalid mtls config: {e}"));
+    match &mtls {
+        Some(_) => info!("mTLS enabled — client certificates required"),
+        None => info!("mTLS disabled"),
+    }
+
+    // Attestation bypass builds on baseline mTLS and matches the mTLS-verified
+    // identity against a subject allowlist plus a source-IP range.
+    let bypass = passthrough::from_config(&config.proxy_bypass, mtls.is_some())
+        .unwrap_or_else(|e| panic!("invalid proxy_bypass config: {e}"));
+    match &bypass {
+        Some(_) => info!("attestation bypass enabled"),
+        None => info!("attestation bypass disabled"),
+    }
+
     let proxy = DenBrowserProxy::new(
         verifier,
         &args.upstream,
         args.insecure_upstream,
         rate_limiter,
+        bypass,
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
@@ -345,9 +405,31 @@ fn main() {
     // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
-    let tls = TlsSettings::intermediate(&args.cert, &args.tls_key)
-        .unwrap_or_else(|e| panic!("TLS cert/key load failed ({}, {}): {e}",
-                                   args.cert, args.tls_key));
+    let tls = match &mtls {
+        // mTLS on: build the acceptor with the identity-recording callback and
+        // hard-require a client cert — request one AND fail the handshake if it
+        // is absent or does not chain to the configured CA.  A client without a
+        // valid certificate never reaches the request path.
+        Some(m) => {
+            let mut tls = TlsSettings::with_callbacks(m.tls_callbacks())
+                .unwrap_or_else(|e| panic!("TLS callback setup failed: {e}"));
+            tls.set_certificate_chain_file(&args.cert)
+                .unwrap_or_else(|e| panic!("TLS cert load failed ({}): {e}", args.cert));
+            tls.set_private_key_file(&args.tls_key, SslFiletype::PEM)
+                .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", args.tls_key));
+            tls.set_ca_file(m.ca_path())
+                .unwrap_or_else(|e| panic!("mTLS CA load failed ({}): {e}", m.ca_path()));
+            tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+            tls
+        }
+        // mTLS off: the original listener, unchanged — no client cert requested.
+        None => TlsSettings::intermediate(&args.cert, &args.tls_key).unwrap_or_else(|e| {
+            panic!(
+                "TLS cert/key load failed ({}, {}): {e}",
+                args.cert, args.tls_key
+            )
+        }),
+    };
     svc.add_tls_with_settings(&args.listen, None, tls);
 
     info!("listening TLS on {} → {}", args.listen, args.upstream);

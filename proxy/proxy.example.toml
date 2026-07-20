@@ -1,9 +1,16 @@
 # DenBrowser proxy — operational configuration (example).
 #
-# Pass this file to the proxy with `--config proxy.toml` (or the
-# DENBROWSER_CONFIG env var).  It is optional: with no config file, every
-# feature below stays OFF and the proxy behaves as it did before configs
-# existed.  This is the file to grow as more runtime options are added.
+# Copy this file to `proxy.toml` and edit it.  The proxy loads `proxy.toml` from
+# its working directory by default (override with `--config <path>` or the
+# DENBROWSER_CONFIG env var) and is REQUIRED: the proxy exits on startup if the
+# config file is missing or unparseable.  Every feature below is off by default,
+# so a copy of this file with no edits runs the proxy exactly as it behaved
+# before configs existed.  This is the file to grow as more runtime options are
+# added.
+#
+# Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
+# so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
+# single-quoted literal ('C:\Users\...') or forward slashes ("C:/Users/...").
 
 [rate_limiting]
 # Master on/off switch.  When false, nothing below takes effect — keep a tuned
@@ -35,3 +42,50 @@ max_requests = 5
 pattern      = "example.com/news/*"
 window_secs  = 1
 max_requests = 50
+
+# ---------------------------------------------------------------------------
+
+[mtls]
+# Baseline mutual-TLS client authentication. When enabled, EVERY connection
+# (attestation clients and bypass clients alike) must present a client
+# certificate that chains to client_ca — verified at the TLS handshake, so a
+# client with no certificate or an untrusted one is rejected before it reaches
+# the request path.
+#
+# This is one of three orthogonal layers and replaces none of them: mTLS
+# authenticates the user/device (client -> proxy), TLS SPKI pinning authenticates
+# the proxy to the browser (proxy -> client), and attestation proves the request
+# came from a genuine DenBrowser build and binds it against replay/tampering.
+#
+# Disabled by default: with enabled = false, no client certificate is requested
+# and the listener behaves exactly as before.
+enabled = false
+
+# PEM bundle of CA certificate(s) that presented client certs must chain to.
+# Required when enabled.
+client_ca = "/etc/denbrowser/user-ca.pem"
+
+# ---------------------------------------------------------------------------
+
+[proxy_bypass]
+# Attestation bypass: let specific, strongly authenticated callers skip
+# attestation and be forwarded straight upstream.  Intended for trusted
+# infrastructure (health checks, internal automation) that can't run the
+# DenBrowser attestation client.
+#
+# Builds on baseline mTLS and REQUIRES [mtls] to be enabled — the client cert is
+# already verified against the mTLS CA at the handshake, so bypass adds only the
+# two conditions below. DEFAULT-DENY: with enabled = false, every request is
+# attested. When enabled, a request is bypassed ONLY if BOTH conditions hold; any
+# miss falls through to normal attestation, so this can never block a legitimate
+# client.
+enabled = false
+
+# Source IP ranges (CIDR) permitted to bypass. A request from any other address
+# is attested normally. Required (non-empty) when enabled.
+allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
+
+# Subject allowlist matched against the mTLS-verified client certificate's Common
+# Name or one of its SubjectAltName DNS entries. Lets one CA issue many user
+# certs while only these identities may bypass. Required (non-empty) when enabled.
+allowed_subjects = ["health-checker", "ops.internal"]

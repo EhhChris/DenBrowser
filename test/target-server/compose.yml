@@ -1,3 +1,9 @@
+# Note on mTLS: the proxy's [mtls] layer authenticates the *browser* to the
+# *proxy* (client -> proxy). This nginx is the upstream *behind* the proxy, so it
+# needs no changes for mTLS — the proxy still dials it with its own TLS client and
+# --insecure-upstream. To exercise mTLS end-to-end, run gen-user-cert.sh and have
+# the test client present build/user-cert.* to the proxy (see the roundtrip test
+# and proxy/stress/README.md); nothing below changes.
 services:
   target:
     image: nginx:alpine
