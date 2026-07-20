@@ -20,13 +20,13 @@ max_requests = 100
 # first match wins.
 
 # Tight limit on a sensitive area: 5 requests / minute / IP.
-[[rate_limiting.rules]]
+#[[rate_limiting.rules]]
 #pattern      = "example.com/secrets/*"
 #window_secs  = 60
 #max_requests = 5
 
 # Looser limit on a high-traffic area: 50 requests / second / IP.
-[[rate_limiting.rules]]
+#[[rate_limiting.rules]]
 #pattern      = "example.com/news/*"
 #window_secs  = 1
 #max_requests = 50
