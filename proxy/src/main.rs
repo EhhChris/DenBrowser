@@ -49,12 +49,6 @@ struct Args {
     #[arg(long, env = "DENBROWSER_UPSTREAM")]
     upstream: String,
 
-    /// Path to the EC P-256 attestation private key PEM file.
-    /// (Separate from the TLS server key below — this one decrypts
-    /// per-request attestation tokens.)
-    #[arg(long, env = "DENBROWSER_KEY", default_value = "../build/proxy-private.pem")]
-    key: String,
-
     /// Path to the TLS server certificate (PEM).  The browser pins this
     /// cert's SPKI; rotating the cert requires rebuilding DenBrowser with
     /// the new pin.
@@ -347,21 +341,26 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
 
-    let pem = std::fs::read_to_string(&args.key)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", args.key, e));
-    let verifier = Verifier::from_pem(&pem)
-        .unwrap_or_else(|e| panic!("cannot parse key {}: {}", args.key, e));
+    // The config file is mandatory — fail loudly rather than fall back to
+    // silent defaults, so a missing or unreadable config never starts a proxy
+    // with unintended (e.g. mTLS-disabled) settings.  It is loaded first
+    // because it carries the attestation private key path.
+    let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
+
+    // Attestation key: required, and validated here so a proxy that could
+    // never decrypt a token refuses to start instead of 403-ing every request.
+    let verifier = Verifier::from_config(&config.attestation).unwrap_or_else(|e| panic!("{e}"));
+    info!(
+        "attestation key loaded from {}",
+        config.attestation.private_key
+    );
+
     if args.insecure_upstream {
         warn!(
             "INSECURE: upstream TLS verification disabled (--insecure-upstream) — \
              for local testing only, never production"
         );
     }
-
-    // The config file is mandatory — fail loudly rather than fall back to
-    // silent defaults, so a missing or unreadable config never starts a proxy
-    // with unintended (e.g. mTLS-disabled) settings.
-    let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
     let rate_limiter = RateLimiter::from_config(&config.rate_limiting)
         .unwrap_or_else(|e| panic!("invalid rate_limiting config: {e}"));
     match &rate_limiter {

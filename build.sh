@@ -131,61 +131,241 @@ else
     echo "[build] Skipping patches (--skip-patches)"
 fi
 
-# ── Step 2.5: Inject attestation public key ──────────────────────────────────
-# If build/proxy-public.der exists, replace the all-zeros placeholder in
-# DenBrowserAttest.cpp with the real key bytes so attestation is active in this
-# build. Skipped (with a warning) if the key hasn't been generated yet; aborts
-# if the key exists but injection fails (e.g. sentinels missing from source).
+# ── Step 2.5: Generate the attestation proxy table ───────────────────────────
+# A deployment fronts N partner applications, each behind its own attestation
+# proxy with its own keypair and TLS cert.  Reads the "proxies" array from
+# config/site-config.json and regenerates the DEN: PROXY_TABLE block in
+# DenBrowserAttest.cpp (patch 006) with, per proxy: the domains it fronts, its
+# attestation public key (patch 006), and its TLS SPKI pin (patch 012).
+#
+# This is the ONLY writer of that block — the gen-* scripts only produce key
+# material in build/ and never touch the source tree, so what is compiled in
+# always matches the checked-in config.
+#
+# With no "proxies" configured the table stays empty: attestation headers and
+# proxy pinning are both inert and requests go out unmodified, so a dev build
+# works before any proxy exists.  A configured proxy whose key material is
+# missing or malformed aborts the build rather than silently producing a
+# binary that attests nothing.
+SITE_CONFIG="$ROOT_DIR/config/site-config.json"
 ATTEST_SRC="$FIREFOX_SRC/netwerk/base/DenBrowserAttest.cpp"
-ATTEST_KEY="$ROOT_DIR/build/proxy-public.der"
-if [[ -f "$ATTEST_KEY" && -f "$ATTEST_SRC" ]]; then
-    echo "[build] Injecting attestation public key into DenBrowserAttest.cpp..."
-    python3 - "$ATTEST_KEY" "$ATTEST_SRC" <<'PYEOF' || { echo "[build] ERROR: key injection failed — aborting build."; exit 1; }
-import sys
+if [[ -f "$SITE_CONFIG" ]]; then
+    python3 - "$SITE_CONFIG" "$ATTEST_SRC" "$ROOT_DIR" <<'PYEOF' || { echo "[build] ERROR: proxy-table generation failed — aborting build."; exit 1; }
+import base64, hashlib, json, os, re, subprocess, sys
 
-der_path, src_path = sys.argv[1], sys.argv[2]
-with open(der_path, 'rb') as f:
-    raw = f.read()
+config_path, src_path, root_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# Format as a C hex array, 10 bytes per line, indented to match the source.
-key_lines = []
-for i in range(0, len(raw), 10):
-    chunk = raw[i:i+10]
-    key_lines.append('  ' + ', '.join(f'0x{b:02x}' for b in chunk) + ',\n')
+# Entry name: goes into a C string literal and log messages.
+NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+# Hostname (already lowercased).  A single label ("localhost") is allowed so
+# dev deployments work; a wildcard is not — see the no-catch-all note below.
+HOST_RE = re.compile(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$')
 
-with open(src_path, 'r', encoding='utf-8') as f:
-    src_lines = f.readlines()
-
-# Find the sentinel lines and replace everything between them.
-START = '// ── REPLACE:'
-END   = '// ── END REPLACE'
-start_i = end_i = None
-for i, line in enumerate(src_lines):
-    if START in line:
-        start_i = i
-    elif END in line and start_i is not None:
-        end_i = i
-        break
-
-if start_i is None or end_i is None:
-    print('ERROR: REPLACE sentinels not found in source file', file=sys.stderr)
+def die(msg):
+    print(f'ERROR: {msg}', file=sys.stderr)
     sys.exit(1)
 
-new_lines = src_lines[:start_i + 1] + key_lines + src_lines[end_i:]
+with open(config_path, encoding='utf-8') as f:
+    config = json.load(f)
 
+proxies = config.get('proxies', [])
+if not isinstance(proxies, list):
+    die('site-config.json: "proxies" must be an array')
+
+if not proxies:
+    print('[build] No "proxies" in site-config.json — request attestation and '
+          'proxy TLS pinning are DISABLED for this build.')
+    legacy = os.path.join(root_dir, 'build', 'proxy-public.der')
+    if os.path.isfile(legacy):
+        print('[build]   NOTE: build/proxy-public.der exists but a key alone no '
+              'longer configures attestation.')
+        print('[build]   Name it from a proxy entry, e.g.:')
+        print('[build]     "proxies": [{ "name": "proxy", "domains": '
+              '["app.example.com"], "attest_key": "proxy-public.der", '
+              '"tls_cert": "proxy-tls.crt" }]')
+    sys.exit(0)
+
+if not os.path.isfile(src_path):
+    die(f'"proxies" is configured but {src_path} is missing.\n'
+        '       Patch 006 must be applied before the proxy table can be '
+        'generated.\n'
+        '       Check that apply-patches.sh succeeded for '
+        '006-attest-requests.patch.')
+
+def resolve(value, kind, name):
+    """A bare filename lives in build/; a path is taken relative to the repo."""
+    if os.path.isabs(value):
+        path = value
+    elif '/' in value or os.sep in value:
+        path = os.path.join(root_dir, value)
+    else:
+        path = os.path.join(root_dir, 'build', value)
+    if not os.path.isfile(path):
+        die(f'proxy "{name}": {kind} not found: {path}')
+    return path
+
+def spki_sha256_from_cert(cert_path, name):
+    """sha256 of the cert's SubjectPublicKeyInfo (RFC 7469 style)."""
+    try:
+        pem = subprocess.run(
+            ['openssl', 'x509', '-in', cert_path, '-pubkey', '-noout'],
+            capture_output=True, text=True, check=True).stdout
+    except FileNotFoundError:
+        die(f'proxy "{name}": openssl is not on PATH and is needed to read '
+            f'tls_cert.\n       Install openssl, or paste the hash into '
+            f'"tls_spki_sha256" instead.')
+    except subprocess.CalledProcessError as exc:
+        die(f'proxy "{name}": openssl could not read {cert_path}: '
+            f'{exc.stderr.strip()}')
+    # The body of a "BEGIN PUBLIC KEY" PEM *is* the DER SubjectPublicKeyInfo.
+    body = ''.join(l for l in pem.splitlines() if not l.startswith('-----'))
+    return hashlib.sha256(base64.b64decode(body)).digest()
+
+def spki_sha256_from_literal(value, name):
+    """Accept the pin as 64 hex chars (with optional colons) or base64."""
+    stripped = re.sub(r'[\s:]', '', value)
+    if re.fullmatch(r'[0-9a-fA-F]{64}', stripped):
+        return bytes.fromhex(stripped)
+    try:
+        raw = base64.b64decode(stripped, validate=True)
+    except Exception:
+        raw = b''
+    if len(raw) != 32:
+        die(f'proxy "{name}": tls_spki_sha256 must be a 32-byte sha256 as 64 '
+            f'hex characters or base64, got {value!r}')
+    return raw
+
+def c_bytes(raw, per_line=12):
+    return '\n'.join(
+        '    ' + ' '.join(f'0x{b:02x},' for b in raw[i:i + per_line])
+        for i in range(0, len(raw), per_line))
+
+def claims(domain, host):
+    """True if `domain` matches `host` exactly or as a parent domain —
+    the same rule FindProxyForHost() applies at runtime."""
+    return host == domain or host.endswith('.' + domain)
+
+# ── Validate every entry before writing anything ────────────────────────────
+entries = []
+seen_names = set()
+for raw_entry in proxies:
+    if not isinstance(raw_entry, dict):
+        die('site-config.json: each "proxies" entry must be an object')
+
+    name = raw_entry.get('name')
+    if not name or not isinstance(name, str) or not NAME_RE.match(name):
+        die(f'proxy entry needs a "name" of letters/digits/._- : {raw_entry!r}')
+    if name in seen_names:
+        die(f'duplicate proxy name: {name!r}')
+    seen_names.add(name)
+
+    domains = raw_entry.get('domains')
+    if not isinstance(domains, list) or not domains:
+        die(f'proxy "{name}": "domains" must be a non-empty array of hostnames')
+    normalized = []
+    for domain in domains:
+        if not isinstance(domain, str):
+            die(f'proxy "{name}": domain entries must be strings')
+        domain = domain.strip().lower().rstrip('.')
+        if '*' in domain:
+            die(f'proxy "{name}": wildcard domains are not supported ({domain!r}).\n'
+                '       There is no catch-all: list every hostname this proxy '
+                'fronts.  Hosts no proxy claims are sent unattested, and a\n'
+                '       listed domain already covers its subdomains.')
+        if not HOST_RE.match(domain):
+            die(f'proxy "{name}": invalid hostname {domain!r}')
+        normalized.append(domain)
+
+    attest_key = raw_entry.get('attest_key')
+    if not attest_key or not isinstance(attest_key, str):
+        die(f'proxy "{name}": "attest_key" (public key DER) is required')
+    with open(resolve(attest_key, 'attest_key', name), 'rb') as f:
+        key_der = f.read()
+    if not key_der or key_der[0] != 0x30:
+        die(f'proxy "{name}": {attest_key} is not a DER SubjectPublicKeyInfo '
+            f'(expected first byte 0x30).\n'
+            f'       Point at the .der written by scripts/gen-attest-key.sh '
+            f'--name {name}, not the .pem.')
+    if len(key_der) != 91:
+        print(f'[build] WARNING: proxy "{name}": attestation key is '
+              f'{len(key_der)} bytes; an EC P-256 SPKI is normally 91. '
+              f'Verify it is a P-256 key.')
+
+    if raw_entry.get('tls_cert') and raw_entry.get('tls_spki_sha256'):
+        die(f'proxy "{name}": set only one of "tls_cert" / "tls_spki_sha256"')
+    if raw_entry.get('tls_cert'):
+        pin = spki_sha256_from_cert(
+            resolve(raw_entry['tls_cert'], 'tls_cert', name), name)
+    elif raw_entry.get('tls_spki_sha256'):
+        pin = spki_sha256_from_literal(raw_entry['tls_spki_sha256'], name)
+    else:
+        pin = None
+        print(f'[build] WARNING: proxy "{name}" has no "tls_cert" or '
+              f'"tls_spki_sha256" — its TLS hop is NOT pinned, so a MITM with '
+              f'a trusted cert could read its attestation headers.')
+
+    entries.append({'name': name, 'domains': normalized, 'key': key_der,
+                    'pin': pin})
+
+# First match wins at runtime, so warn when an earlier entry's domain already
+# covers a later entry's — the later one would never be reached for those hosts.
+for i, entry in enumerate(entries):
+    for other in entries[:i]:
+        for domain in entry['domains']:
+            shadowing = [d for d in other['domains'] if claims(d, domain)]
+            if shadowing:
+                print(f'[build] WARNING: proxy "{other["name"]}" claims '
+                      f'{shadowing[0]!r}, which already covers '
+                      f'{domain!r} from proxy "{entry["name"]}". '
+                      f'"{other["name"]}" wins — list the more specific proxy '
+                      f'first if that is backwards.')
+
+# ── Emit the table ───────────────────────────────────────────────────────────
+out = ['// ── DEN: PROXY_TABLE ──',
+       '// GENERATED by build.sh (Step 2.5) from the "proxies" array in',
+       '// config/site-config.json.  Do not edit here — edit the JSON, rebuild.']
+for i, entry in enumerate(entries):
+    out.append(f'static const char* const kDenProxyDomains_{i}[] = {{')
+    out.extend(f'    "{d}",' for d in entry['domains'])
+    out.append('    nullptr')
+    out.append('};')
+    out.append(f'static const uint8_t kDenProxyKey_{i}[] = {{')
+    out.append(c_bytes(entry['key']))
+    out.append('};')
+    if entry['pin'] is not None:
+        out.append(f'static const uint8_t kDenProxyPin_{i}[32] = {{')
+        out.append(c_bytes(entry['pin']))
+        out.append('};')
+out.append('static const DenProxyEntry kDenProxies[] = {')
+for i, entry in enumerate(entries):
+    pin_ref = f'kDenProxyPin_{i}' if entry['pin'] is not None else 'nullptr'
+    out.append(f'  {{"{entry["name"]}", kDenProxyDomains_{i}, '
+               f'kDenProxyKey_{i}, '
+               f'static_cast<uint32_t>(sizeof(kDenProxyKey_{i})), {pin_ref}}},')
+out.append('  {nullptr, nullptr, nullptr, 0, nullptr},')
+out.append('};')
+out.append('// ── DEN END: PROXY_TABLE ──')
+
+with open(src_path, encoding='utf-8') as f:
+    content = f.read()
+pattern = re.compile(r'// ── DEN: PROXY_TABLE ──.*?// ── DEN END: PROXY_TABLE ──',
+                     re.DOTALL)
+new_content, n = pattern.subn(lambda _: '\n'.join(out), content)
+if n != 1:
+    die(f'PROXY_TABLE sentinels not found in {src_path} '
+        f'(expected exactly 1, found {n})')
 with open(src_path, 'w', encoding='utf-8', newline='\n') as f:
-    f.writelines(new_lines)
+    f.write(new_content)
 
-print(f'[build] Injected {len(raw)}-byte public key ({len(key_lines)} lines).')
+for entry in entries:
+    print(f'[build] Proxy "{entry["name"]}": {len(entry["domains"])} domain(s), '
+          f'{len(entry["key"])}-byte key, '
+          f'{"pinned" if entry["pin"] is not None else "UNPINNED"}')
+print(f'[build] Injected proxy table ({len(entries)} proxy/proxies) into '
+      f'DenBrowserAttest.cpp')
 PYEOF
-elif [[ ! -f "$ATTEST_KEY" ]]; then
-    echo "[build] WARNING: build/proxy-public.der not found — attestation headers disabled."
-    echo "[build]          Run scripts/gen-attest-key.sh to generate a keypair."
-elif [[ ! -f "$ATTEST_SRC" ]]; then
-    echo "[build] ERROR: proxy-public.der exists but DenBrowserAttest.cpp not in source tree." >&2
-    echo "[build]        Patch 006 must be applied before key injection can run." >&2
-    echo "[build]        Check that apply-patches.sh succeeded for 006-attest-requests.patch." >&2
-    exit 1
+else
+    echo "[build] No site-config.json — request attestation and proxy TLS pinning disabled."
 fi
 
 # ── Step 2.6: Inject site configuration ──────────────────────────────────────
@@ -193,7 +373,6 @@ fi
 # blocks in nsCopySupport.cpp and nsDocShell.cpp that were added by patches 003
 # and 014.  If the file is absent or a list is empty, the array defaults to
 # { nullptr } and that feature is disabled for this build.
-SITE_CONFIG="$ROOT_DIR/config/site-config.json"
 NCOPY_SRC="$FIREFOX_SRC/dom/base/nsCopySupport.cpp"
 DOCSHELL_SRC="$FIREFOX_SRC/docshell/base/nsDocShell.cpp"
 CONTENT_PARENT_SRC="$FIREFOX_SRC/dom/ipc/ContentParent.cpp"

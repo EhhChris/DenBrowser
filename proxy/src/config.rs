@@ -18,6 +18,9 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
+    pub attestation: AttestationConfig,
+
+    #[serde(default)]
     pub rate_limiting: RateLimitConfig,
 
     #[serde(default)]
@@ -25,6 +28,27 @@ pub struct Config {
 
     #[serde(default)]
     pub proxy_bypass: ProxyBypassConfig,
+}
+
+/// `[attestation]` — the proxy's own attestation key material.
+///
+/// Unlike every other section here, this one is **required**: the private key is
+/// what decrypts per-request ECIES tokens, so a proxy without it cannot verify
+/// anything.  It is deliberately configuration rather than a CLI default —
+/// a wrong-but-present key path is far easier to spot in a reviewed config file
+/// than in a process's argv, and a deployment that forgets it should fail at
+/// startup instead of inheriting some path that happens to exist on the host.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttestationConfig {
+    /// Path to the EC P-256 attestation private key, SEC1 PEM — the private
+    /// half of the public key baked into the browser build for this proxy
+    /// (`scripts/gen-attest-key.sh --name <proxy>` writes both).  Relative
+    /// paths resolve against the proxy's working directory, as `client_ca`
+    /// does.  Required; startup aborts when it is unset, unreadable, or not a
+    /// parseable EC key.
+    #[serde(default)]
+    pub private_key: String,
 }
 
 /// `[rate_limiting]` — a universal per-client-IP request cap plus optional
@@ -191,6 +215,36 @@ mod tests {
             [rate_limiting]
             enabled = true
             typo_field = 3
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn attestation_defaults_empty() {
+        // Empty is the *parse* default; it is rejected at startup by
+        // Verifier::from_config, not here.
+        let c = Config::default();
+        assert!(c.attestation.private_key.is_empty());
+    }
+
+    #[test]
+    fn parses_attestation() {
+        let toml = r#"
+            [attestation]
+            private_key = "/etc/denbrowser/partner-a-private.pem"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.attestation.private_key,
+            "/etc/denbrowser/partner-a-private.pem"
+        );
+    }
+
+    #[test]
+    fn attestation_unknown_key_is_rejected() {
+        let toml = r#"
+            [attestation]
+            privateKey = "/etc/denbrowser/key.pem"
         "#;
         assert!(toml::from_str::<Config>(toml).is_err());
     }

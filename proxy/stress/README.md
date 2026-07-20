@@ -55,7 +55,8 @@ scripts/gen-user-cert.sh      # only if testing with [mtls] enabled
 docker compose -f test/target-server/compose.yml up -d
 # The proxy requires a config file (defaults to ./proxy.toml). If you don't have
 # one, start from proxy/proxy.example.toml (leave [mtls] disabled for plain
-# load testing).
+# load testing).  [attestation] private_key is REQUIRED and must point at
+# build/proxy-private.pem (the example config already does).
 # The proxy speaks TLS to its upstream, so target the target's TLS port (8443).
 # The target reuses build/proxy-tls.* (self-signed), so pass --insecure-upstream.
 (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run --release -- --insecure-upstream)

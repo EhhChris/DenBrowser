@@ -1,5 +1,15 @@
 # DenBrowser proxy — operational configuration.
 
+[attestation]
+# REQUIRED.  This proxy's EC P-256 attestation private key (SEC1 PEM) — the
+# private half of the public key baked into the browser build for this proxy.
+# Startup aborts if it is unset, unreadable, or unparseable.
+# Generate with:  scripts/gen-attest-key.sh --name <proxy>
+# One proxy process per partner application, each naming its own key here.
+private_key = "../build/proxy-private.pem"
+
+# ---------------------------------------------------------------------------
+
 [rate_limiting]
 # Master on/off switch.  When false, nothing below takes effect — keep a tuned
 # ruleset in the file and flip it off with this one line.

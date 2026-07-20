@@ -1,39 +1,52 @@
 #!/usr/bin/env bash
-# gen-proxy-tls.sh — Generate the DenBrowser proxy's TLS server cert (or refresh
-# the SPKI pin from an existing cert) and patch the pin into the browser
-# source so the next build refuses to talk to any other TLS endpoint claiming
-# to be the proxy.
+# gen-proxy-tls.sh — Generate an attestation proxy's TLS server cert (or take
+# the SPKI pin from an existing cert) so the browser build can pin that proxy
+# and refuse to talk to any other TLS endpoint claiming to be it.
 #
 # Purpose:
 #   Even with valid attestation, a local attacker on the same machine could
 #   passively sniff outbound headers via a TUN device, WireGuard interface,
-#   or libpcap.  When the browser pins the proxy's SPKI, that traffic is
-#   inside TLS to a server only the proxy can speak as — so the captured
+#   or libpcap.  When the browser pins a proxy's SPKI, that traffic is
+#   inside TLS to a server only that proxy can speak as — so the captured
 #   bytes are useless ciphertext.
 #
+# A deployment runs one proxy per partner application, each with its own cert,
+# so run this once per proxy with a distinct --name:
+#
+#   # Fresh self-signed cert for development:
+#   ./scripts/gen-proxy-tls.sh --name partner-a --host app.partner-a.example.com
+#
+#   # Existing production cert (internal CA, ACME, …):
+#   ./scripts/gen-proxy-tls.sh --name partner-a \
+#       --cert /path/to/server.crt --key /path/to/server.key
+#
 # Usage:
-#   # Generate a fresh self-signed cert (development):
-#   ./scripts/gen-proxy-tls.sh
+#   ./scripts/gen-proxy-tls.sh [--name NAME] [--host HOST]
+#                              [--cert FILE --key FILE] [--force]
 #
-#   # Use an existing production cert (e.g., from an internal CA or ACME):
-#   ./scripts/gen-proxy-tls.sh --cert /path/to/server.crt --key /path/to/server.key
-#
-#   # Override the hostname baked into the pin:
-#   ./scripts/gen-proxy-tls.sh --host proxy.internal.example.com
+#   --name NAME   Label for this proxy.  Names the output files and should
+#                 match the "name" of the proxy's entry in
+#                 config/site-config.json.  Default: "proxy".
+#   --host HOST   CN/SAN for a generated self-signed cert.  Default: localhost.
+#   --cert/--key  Import an existing cert+key instead of generating one.
+#   --force       Overwrite existing cert/key files for this name.
 #
 # Output:
-#   build/proxy-tls.crt        ← the proxy's cert (kept; Pingora reads it)
-#   build/proxy-tls.key        ← the proxy's TLS private key
+#   build/<name>-tls.crt   ← the proxy's cert (Pingora reads it)
+#   build/<name>-tls.key   ← the proxy's TLS private key
 #
-# Side-effect:
-#   Patches kProxyHost[] and kProxySpkiSha256[] in
-#   netwerk/base/DenBrowserAttest.cpp between the REPLACE TLS PIN markers.
+# This script does NOT modify the Firefox source tree.  The pin reaches the
+# binary through config/site-config.json: the proxy's entry names either the
+# cert file ("tls_cert") or the hash itself ("tls_spki_sha256"), and build.sh
+# Step 2.5 generates the compiled-in proxy table from that.  One writer for the
+# table means what is compiled in always matches what is committed.
 #
 # SECURITY NOTES:
-#   - build/proxy-tls.key is gitignored; never commit it.
-#   - Rotating the cert requires rebuilding DenBrowser so the pin matches.
+#   - build/ is gitignored; never commit *-tls.key.
+#   - Rotating a cert requires rebuilding DenBrowser so the pin matches.
 #     This is intentional — it ties the browser binary to a specific server
-#     identity, the way HPKP would for a website.
+#     identity, the way HPKP would for a website.  Rotating one partner's cert
+#     does not disturb the other proxies' pins.
 
 set -euo pipefail
 
@@ -41,22 +54,45 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build"
 
+NAME="proxy"
 PROXY_HOST="localhost"
 CERT_IN=""
 KEY_IN=""
+FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --name)  NAME="$2";       shift 2 ;;
         --host)  PROXY_HOST="$2"; shift 2 ;;
         --cert)  CERT_IN="$2";    shift 2 ;;
         --key)   KEY_IN="$2";     shift 2 ;;
+        --force) FORCE=1;         shift ;;
+        -h|--help)
+            echo "Usage: $0 [--name NAME] [--host HOST] [--cert FILE --key FILE] [--force]"
+            exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
+# The name lands in the output filenames and in the site-config entry that
+# refers to them; keep it to characters that are safe in both.
+if [[ ! "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "[gen-proxy-tls] ERROR: --name must be letters/digits/._- : $NAME" >&2
+    exit 1
+fi
+
 mkdir -p "$BUILD_DIR"
-CERT_OUT="$BUILD_DIR/proxy-tls.crt"
-KEY_OUT="$BUILD_DIR/proxy-tls.key"
+CERT_OUT="$BUILD_DIR/$NAME-tls.crt"
+KEY_OUT="$BUILD_DIR/$NAME-tls.key"
+
+if [[ ( -f "$CERT_OUT" || -f "$KEY_OUT" ) && $FORCE -eq 0 ]]; then
+    echo "[gen-proxy-tls] ERROR: $NAME-tls.{crt,key} already exist in build/." >&2
+    echo "[gen-proxy-tls]        Replacing a cert invalidates the pin in every" >&2
+    echo "[gen-proxy-tls]        build carrying the old one, so those builds stop" >&2
+    echo "[gen-proxy-tls]        connecting to this proxy until they are rebuilt." >&2
+    echo "[gen-proxy-tls]        Re-run with --force, or pick another --name." >&2
+    exit 1
+fi
 
 # ── 1. Either generate a fresh self-signed cert or import the supplied one ──
 if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
@@ -64,12 +100,12 @@ if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
         echo "[gen-proxy-tls] --cert and --key must be supplied together" >&2
         exit 1
     }
-    echo "[gen-proxy-tls] Importing existing cert: $CERT_IN"
+    echo "[gen-proxy-tls] Importing existing cert for \"$NAME\": $CERT_IN"
     cp "$CERT_IN" "$CERT_OUT"
     cp "$KEY_IN"  "$KEY_OUT"
     chmod 600    "$KEY_OUT"
 else
-    echo "[gen-proxy-tls] Generating self-signed cert for CN=$PROXY_HOST (10y)..."
+    echo "[gen-proxy-tls] Generating self-signed cert for \"$NAME\" (CN=$PROXY_HOST, 10y)..."
     # The "//CN=..." double-slash stops Git Bash on Windows from mangling the
     # subject DN into a Windows path. OpenSSL tolerates the empty leading
     # component, and Linux/macOS treat // identically to /.
@@ -94,76 +130,37 @@ SPKI_HASH_B64=$(openssl x509 -in "$CERT_OUT" -pubkey -noout \
 echo "[gen-proxy-tls] SPKI sha256 (hex)    : $SPKI_HASH_HEX"
 echo "[gen-proxy-tls] SPKI sha256 (base64) : $SPKI_HASH_B64"
 
-# ── 3. Build the C array body for kProxySpkiSha256[] ──────────────────────────
-SPKI_C_BYTES=$(echo "$SPKI_HASH_HEX" | fold -w2 \
-               | awk '{printf "0x%s, ", $1}' \
-               | sed 's/, $//' \
-               | fold -s -w 60 \
-               | sed 's/^/  /')
-
-# ── 4. Patch DenBrowserAttest.cpp if the source tree is available ────────────────
-if [[ -f "$ROOT_DIR/src/.esr_version" ]]; then
-    ESR_VER=$(cat "$ROOT_DIR/src/.esr_version" | sed 's/esr//')
-    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/DenBrowserAttest.cpp"
-else
-    ATTEST_CPP=""
-fi
-
-if [[ -n "$ATTEST_CPP" && -f "$ATTEST_CPP" ]]; then
-    echo "[gen-proxy-tls] Patching kProxyHost / kProxySpkiSha256 in DenBrowserAttest.cpp..."
-    python3 - "$ATTEST_CPP" "$PROXY_HOST" "$SPKI_C_BYTES" <<'PYEOF'
-import sys, re
-
-cpp_path, host, spki_c = sys.argv[1], sys.argv[2], sys.argv[3]
-
-with open(cpp_path, encoding="utf-8") as f:
-    src = f.read()
-
-new_block = (
-    "// ── REPLACE TLS PIN: gen-proxy-tls.sh updates these ─────────────────────\n"
-    f'static const char kProxyHost[] = "{host}";\n'
-    "static const uint8_t kProxySpkiSha256[32] = {\n"
-    f"{spki_c}\n"
-    "};\n"
-    "// ── END REPLACE TLS PIN ──────────────────────────────────────────────────"
-)
-
-pattern = re.compile(
-    r"// ── REPLACE TLS PIN:.*?// ── END REPLACE TLS PIN ─+",
-    re.DOTALL,
-)
-
-new_src, n = pattern.subn(new_block, src)
-if n != 1:
-    print("ERROR: REPLACE TLS PIN markers not found in", cpp_path, file=sys.stderr)
-    sys.exit(1)
-
-with open(cpp_path, "w", encoding="utf-8", newline="\n") as f:
-    f.write(new_src)
-print(f"  Updated {cpp_path}")
-PYEOF
-else
-    echo "[gen-proxy-tls] Source tree not found; paste manually into DenBrowserAttest.cpp:"
-    echo ""
-    echo "  static const char kProxyHost[] = \"$PROXY_HOST\";"
-    echo "  static const uint8_t kProxySpkiSha256[32] = {"
-    echo "$SPKI_C_BYTES"
-    echo "  };"
-    echo ""
-fi
-
 cat <<EOF
 
 [gen-proxy-tls] Done.
 
   Proxy TLS cert : $CERT_OUT
   Proxy TLS key  : $KEY_OUT  (NEVER commit)
-  Pinned host    : $PROXY_HOST
-  Pinned SPKI    : $SPKI_HASH_B64
+  Cert hostname  : $PROXY_HOST
+  SPKI pin       : $SPKI_HASH_B64
 
   Next steps:
-    1. Rebuild DenBrowser (the pin is now baked into the binary).
-    2. Restart the proxy — it will load the new cert/key automatically.
-    3. Any older build, or any TLS endpoint not presenting this exact
+    1. Reference this proxy in config/site-config.json.  Either point at the
+       cert file and let the build hash it:
+
+         { "name":       "$NAME",
+           "domains":    ["$PROXY_HOST"],
+           "attest_key": "$NAME-public.der",
+           "tls_cert":   "$NAME-tls.crt" }
+
+       …or, when the cert is not on the build host, paste the hash instead:
+
+         { "name":       "$NAME",
+           "domains":    ["$PROXY_HOST"],
+           "attest_key": "$NAME-public.der",
+           "tls_spki_sha256": "$SPKI_HASH_HEX" }
+
+       "domains" is every hostname this proxy fronts; the pin applies to
+       exactly those hosts and nothing else.
+
+    2. Rebuild DenBrowser — build.sh bakes the pin into the proxy table.
+    3. Restart the "$NAME" proxy with this cert/key
+       (--cert/--tls-key, or DENBROWSER_TLS_CERT/DENBROWSER_TLS_KEY).
+    4. Any older build, or any TLS endpoint not presenting this exact
        public key, will fail the handshake before any request is sent.
 EOF

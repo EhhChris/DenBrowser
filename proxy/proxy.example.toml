@@ -12,6 +12,26 @@
 # so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
 # single-quoted literal ('C:\Users\...') or forward slashes ("C:/Users/...").
 
+[attestation]
+# REQUIRED.  Path to this proxy's EC P-256 attestation private key (SEC1 PEM) —
+# the private half of the public key baked into the browser build for this
+# proxy.  It is what decrypts per-request ECIES tokens, so the proxy exits at
+# startup if this is unset, unreadable, or not a parseable EC key, rather than
+# coming up and rejecting every attested request.
+#
+# Generate with:  scripts/gen-attest-key.sh --name <proxy>
+# and reference the matching <proxy>-public.der from the browser build's
+# config/site-config.json "proxies" entry.
+#
+# Relative paths resolve against the proxy's working directory (the default
+# below assumes running from proxy/ against a dev key in build/).  A deployment
+# fronting several partner applications runs one proxy process per partner,
+# each with its OWN config file naming its OWN key — one partner must never be
+# able to decrypt another's tokens.
+private_key = "../build/proxy-private.pem"
+
+# ---------------------------------------------------------------------------
+
 [rate_limiting]
 # Master on/off switch.  When false, nothing below takes effect — keep a tuned
 # ruleset in the file and flip it off with this one line.
