@@ -2,28 +2,68 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# PATCH: 006-attest-requests  (v2 — nonce + body binding)
+# PATCH: 006-attest-requests  (v2 — nonce + body binding; multi-proxy)
 #
-# PURPOSE: Attach a per-request ECIES attestation token to every outbound
-#          HTTP(S) request so that the DenBrowser proxy (Pingora-based; see
-#          proxy/) can verify that traffic originated from a genuine DenBrowser
-#          browser build, *and* that the captured headers cannot be replayed
-#          to issue a different request from curl.
+# PURPOSE: Attach a per-request ECIES attestation token to outbound HTTP(S)
+#          requests bound for a DenBrowser proxy (Pingora-based; see proxy/)
+#          so the proxy can verify that traffic originated from a genuine
+#          DenBrowser browser build, *and* that the captured headers cannot be
+#          replayed to issue a different request from curl.
 #
-# KEY MODEL (private key lives on the proxy, never in the browser):
+# MULTI-PROXY DEPLOYMENT MODEL:
 #
-#   Proxy holds:    ECDSA P-256 private key  (long-lived, rotate on breach)
-#   Browser embeds: matching SPKI public key (new one per browser build)
+#   A deployment usually fronts more than one partner application, and each
+#   partner runs its own attestation proxy with its own keypair — no partner
+#   should be able to verify (or mint) another partner's tokens.  The build
+#   therefore embeds a *table* of proxies rather than one global key:
+#
+#     domains  →  attestation public key  (+ TLS SPKI pin, patch 012)
+#
+#   The table lives between the DEN: PROXY_TABLE sentinels in
+#   netwerk/base/DenBrowserAttest.cpp and is GENERATED at build time by
+#   build.sh (Step 2.5) from the "proxies" array in config/site-config.json:
+#
+#     "proxies": [
+#       { "name":       "partner-a",
+#         "domains":    ["app.partner-a.example.com"],
+#         "attest_key": "partner-a-public.der",
+#         "tls_cert":   "partner-a-tls.crt" },
+#       { "name":       "partner-b",
+#         "domains":    ["partner-b.example.com"],
+#         "attest_key": "partner-b-public.der",
+#         "tls_spki_sha256": "…" }
+#     ]
+#
+#   For each request, AddAttestHeaders() looks the URI's host up in that table
+#   (exact match, or subdomain of a listed domain — the same rule patch 014's
+#   site filter uses) and attests with the matching entry's key.
+#
+#   There is deliberately NO catch-all/wildcard entry.  A host no proxy claims
+#   is not proxied, so it is sent with no attestation headers at all: the
+#   server on the other end holds no private key to verify them, and shipping
+#   them anyway would leak build-identifying material to third parties.
+#   Anything that must be attested has to be listed against a proxy.
+#
+#   Per-partner key material is generated with:
+#     scripts/gen-attest-key.sh --name partner-a
+#     scripts/gen-proxy-tls.sh  --name partner-a --host app.partner-a.example.com
+#
+# KEY MODEL (private keys live on the proxies, never in the browser):
+#
+#   Each proxy holds:  ECDSA P-256 private key  (long-lived, rotate on breach)
+#   Browser embeds:    matching SPKI public key per proxy (new set per build)
 #
 #   For each new DenBrowser release:
-#     1. Run  scripts/gen-attest-key.sh  to generate a fresh keypair.
-#     2. Add the new public key bytes to kProxyPublicKeyDer[] and rebuild.
-#     3. Deploy the new private key to the proxy (proxy/build/proxy-private.pem).
-#     4. Remove the old public key from the proxy's allowlist — that build's
+#     1. Run  scripts/gen-attest-key.sh --name <proxy>  for each proxy.
+#     2. Point config/site-config.json's "proxies" entries at the new
+#        build/<proxy>-public.der files and rebuild (build.sh regenerates the
+#        table; nothing is hand-edited into the source).
+#     3. Deploy each new private key to its proxy (build/<proxy>-private.pem).
+#     4. Remove the old public key from that proxy's allowlist — that build's
 #        traffic is now rejected even if the binary is still in circulation.
 #
-#   The browser binary contains ONLY the public key, which is not secret.
-#   Extracting it from the binary gives an attacker nothing useful because
+#   The browser binary contains ONLY public keys, which are not secret.
+#   Extracting them from the binary gives an attacker nothing useful because
 #   you cannot forge an encrypted token without the proxy's private key.
 #
 # WHY THIS DOES NOT AFFECT PKI / OAUTH:
@@ -35,8 +75,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # CRYPTOGRAPHIC PROTOCOL (ECIES — Elliptic-Curve Integrated Encryption):
 #
 #   Per-request browser side:
+#     0. Resolve the request host to a proxy table entry; if none claims it,
+#        send the request unmodified and stop here.
 #     1. Generate a fresh ephemeral EC P-256 keypair (ephem_priv, ephem_pub).
-#     2. ECDH(ephem_priv, proxy_pub) → 32-byte raw shared secret Z.
+#     2. ECDH(ephem_priv, proxy_pub) → 32-byte raw shared secret Z, where
+#        proxy_pub is *that entry's* public key.
 #     3. ANSI X9.63 KDF: SHA-256(Z || 0x00000001) → take first 16 bytes
 #        as an AES-128 key  K_enc.
 #     4. Generate random 12-byte IV.
@@ -65,7 +108,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #     1. Read X-DenBrowser-Ts; reject (403) if |now – ts| > 30 s.
 #     2. Decode X-DenBrowser-Nonce; reject if length ≠ 16 bytes.
 #     3. Peek the per-nonce replay cache; reject (403) if already present.
-#     4. Decode token, ECDH + KDF, AES-128-GCM decrypt.
+#     4. Decode token, ECDH + KDF, AES-128-GCM decrypt.  A token minted for a
+#        different partner's proxy simply fails to decrypt here — each proxy
+#        only holds its own private key.
 #     5. Compare every plaintext field (prefix, nonce, ts, host, method, path)
 #        against the request the proxy actually received.  Reject on mismatch.
 #     6. If the body_hash field is a hash: buffer the request body, hash it,
@@ -93,6 +138,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #       the proxy refuses any nonce it has already accepted.
 #     - A TOCTOU race between two parallel replays of the same captured
 #       token loses in phase-2 commit (atomic check-and-insert).
+#     - A token captured from partner A's traffic is useless against partner
+#       B's proxy: host binding rejects it, and B cannot decrypt it anyway.
 #
 #   The only attack the protocol still allows is replaying the exact same
 #   request to the exact same path with the exact same body before the
@@ -112,72 +159,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   netwerk/base/moz.build
 #       — add DenBrowserAttest.cpp to UNIFIED_SOURCES.
 
-diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
-new file mode 100644
---- /dev/null
-+++ b/netwerk/base/DenBrowserAttest.h
-@@ -0,0 +1,55 @@
-+/* This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-+
-+#ifndef DenBrowserAttest_h__
-+#define DenBrowserAttest_h__
-+
-+#include "nscore.h"
-+
-+class nsIInputStream;
-+class nsIURI;
-+namespace mozilla::net {
-+class nsHttpRequestHead;
-+}
-+
-+namespace denbrowser {
-+
-+/**
-+ * AddAttestHeaders — inject X-DenBrowser-Ts, X-DenBrowser-Nonce, and X-DenBrowser-Token
-+ * into aHead for every outbound HTTP/HTTPS request.
-+ *
-+ * Called from nsHttpChannel::SetupChannelForTransaction().  The token is an
-+ * ECIES-encrypted payload that decrypts (using the matching private key held
-+ * by the attestation proxy) to a canonical plaintext that binds the request
-+ * to its method, host, path, and body hash.  A captured token cannot be
-+ * replayed against a different request because every field is in the
-+ * authenticated plaintext, and the per-request nonce is rejected by the
-+ * proxy's replay cache on the second use.
-+ *
-+ * Protocol:  ECIES with EC P-256, ANSI X9.63 KDF (SHA-256), AES-128-GCM.
-+ *
-+ * Canonical plaintext (v2):
-+ *   "denbrowser-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
-+ *
-+ * Key model:
-+ *   - The attestation proxy holds the EC P-256 private key.
-+ *   - Each DenBrowser build embeds only the matching SPKI public key.
-+ *   - A new keypair per browser release lets the proxy invalidate old builds
-+ *     by rotating its private key or removing the old public key from its
-+ *     allowlist.
-+ *
-+ * Behaviour when not configured:
-+ *   If the embedded public key is the all-zeros placeholder, this function
-+ *   is a silent no-op.  No request is ever blocked by this code.
-+ *
-+ * Thread-safety:
-+ *   The public key is imported from DER at most once per process and cached.
-+ *   Safe to call from any thread that can already call nsHttpChannel methods.
-+ */
-+nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
-+                          nsIInputStream* aUploadStream);
-+
-+}  // namespace denbrowser
-+
-+#endif  // DenBrowserAttest_h__
-
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
 new file mode 100644
+index 0000000..00ec512
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,520 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -201,8 +188,14 @@ new file mode 100644
 +//   - The plaintext binds the request semantics, so a captured token is only
 +//     valid for the exact (method, host, path, body) it was issued for.
 +//
-+// The proxy private key never appears in this file or the browser binary;
-+// only the proxy public key (kProxyPublicKeyDer) is embedded.
++// A deployment may front several partner applications, each behind its own
++// attestation proxy with its own keypair.  The proxy table below maps the
++// domains a partner's proxy serves to that proxy's public key, and a request
++// is attested with the key of the entry claiming its host.  A host claimed by
++// no entry is sent out untouched.
++//
++// The proxy private keys never appear in this file or the browser binary;
++// only the proxies' public keys are embedded.
 +
 +#include "DenBrowserAttest.h"
 +
@@ -227,6 +220,8 @@ new file mode 100644
 +#include "secasn1.h"
 +#include "secitem.h"
 +
++#include <iterator>  // std::size
++
 +namespace denbrowser {
 +
 +using mozilla::UniqueCERTSubjectPublicKeyInfo;
@@ -237,44 +232,69 @@ new file mode 100644
 +
 +static mozilla::LazyLogModule sLog("DenBrowserAttest");
 +
-+// ── Proxy public key ──────────────────────────────────────────────────────────
++// ── Proxy table ───────────────────────────────────────────────────────────────
 +//
-+// SubjectPublicKeyInfo DER-encoded EC P-256 public key from the DenBrowser
-+// attestation proxy (Pingora-based; see proxy/).
++// One entry per attestation proxy.  A deployment fronting several partner
++// applications runs one proxy per partner, each with its own keypair, so the
++// browser has to pick the right key for the host it is about to talk to
++// rather than assuming a single global proxy.
 +//
-+// PLACEHOLDER: all bytes 0x00.  Attestation is DISABLED until replaced.
++// Each entry pairs the domains a proxy serves with:
++//   - mAttestKey — SubjectPublicKeyInfo DER of that proxy's EC P-256
++//     attestation public key.  Its private half stays on the proxy and never
++//     belongs in this file.  A valid P-256 SPKI blob is 91 bytes, first byte
++//     0x30 (ASN.1 SEQUENCE).
++//   - mSpkiPin — sha256 of that proxy's TLS server-cert SubjectPublicKeyInfo,
++//     used by patch 012's VerifyProxyPin().  Null when the deployment has not
++//     pinned this proxy.
 +//
-+// To generate a keypair and update this array:
-+//   scripts/gen-attest-key.sh
++// The block between the DEN: PROXY_TABLE sentinels is GENERATED: build.sh
++// (Step 2.5) rewrites it from the "proxies" array in config/site-config.json.
++// Do not hand-edit it — edit the JSON and rebuild.  The default below is the
++// unconfigured, empty table, in which every function here is a silent no-op
++// and requests go out unmodified, so dev builds work before any proxy exists.
 +//
-+// The matching private key goes to the proxy — it never belongs in this file.
++//   config/site-config.json:
++//     "proxies": [
++//       { "name":       "partner-a",
++//         "domains":    ["app.partner-a.example.com"],
++//         "attest_key": "partner-a-public.der",
++//         "tls_cert":   "partner-a-tls.crt" }
++//     ]
 +//
-+// A valid EC P-256 SPKI DER blob is 91 bytes and starts with 0x30.
-+// The placeholder (all zeros) is detected at startup and skipped silently.
++//   scripts/gen-attest-key.sh --name partner-a
++//   scripts/gen-proxy-tls.sh  --name partner-a --host app.partner-a.example.com
++//
++// There is deliberately no catch-all/wildcard domain: a host nobody claims is
++// not proxied, so attesting it would leak attestation headers to third-party
++// servers that have no key to verify them.
++
++struct DenProxyEntry {
++  // Label from site-config.json, used in log messages.  A null name
++  // terminates the table.
++  const char* mName;
++  // Hostnames this proxy fronts, null-terminated.  Matched exactly or as a
++  // parent domain ("partner-a.com" also claims "app.partner-a.com").
++  const char* const* mDomains;
++  // Attestation public key (SPKI DER) and its length.
++  const uint8_t* mAttestKey;
++  uint32_t mAttestKeyLen;
++  // 32-byte sha256(SPKI) TLS pin, or null when this proxy is not pinned.
++  // Read only by patch 012; harmlessly unused when that patch is skipped.
++  const uint8_t* mSpkiPin;
++};
 +
 +// clang-format off
-+static const uint8_t kProxyPublicKeyDer[] = {
-+  // ── REPLACE: paste  xxd -i proxy-public.der  output here ────────────────
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-+  0x00,
-+  // ── END REPLACE ───────────────────────────────────────────────────────────
++// ── DEN: PROXY_TABLE ──
++static const DenProxyEntry kDenProxies[] = {
++  {nullptr, nullptr, nullptr, 0, nullptr},
 +};
++// ── DEN END: PROXY_TABLE ──
 +// clang-format on
 +
-+static constexpr uint32_t kProxyPublicKeyDerLen =
-+    static_cast<uint32_t>(sizeof(kProxyPublicKeyDer));
-+
-+// Valid P-256 SPKI DER starts with 0x30 (ASN.1 SEQUENCE).
-+// An all-zero buffer is the placeholder; treat as "not configured".
-+static bool KeyIsPlaceholder() { return kProxyPublicKeyDer[0] != 0x30; }
++// Table slots including the terminator.  The key cache below is sized from
++// this, so a generated table of any length needs no other change here.
++static constexpr size_t kDenProxySlots = std::size(kDenProxies);
 +
 +// ── P-256 curve params for ephemeral keygen ───────────────────────────────────
 +// DER encoding of OID prime256v1 (1.2.840.10045.3.1.7):
@@ -282,49 +302,107 @@ new file mode 100644
 +static const uint8_t kP256OidDer[] = {0x06, 0x08, 0x2a, 0x86, 0x48,
 +                                      0xce, 0x3d, 0x03, 0x01, 0x07};
 +
-+// ── Cached proxy public key ───────────────────────────────────────────────────
++// ── Host → proxy lookup ───────────────────────────────────────────────────────
++
++// Exact host match, or aHost is a subdomain of aPat.  Same rule the site
++// filter (patch 014) applies, so one deployment's domain lists behave
++// identically wherever they appear.
++static bool ProxyHostMatch(const nsACString& aHost, const char* aPat) {
++  nsDependentCString pat(aPat);
++  if (aHost.Equals(pat)) return true;
++  // Subdomain match: host must end with "." + pattern.
++  if (aHost.Length() > pat.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
++  }
++  return false;
++}
++
++// Index into kDenProxies of the proxy fronting aHost, or -1 when no configured
++// proxy claims it.  First match wins, so when one entry's domain is a parent of
++// another's, list the more specific entry first (build.sh warns about this).
++static int32_t FindProxyForHost(const nsACString& aHost) {
++  for (int32_t i = 0; kDenProxies[i].mName; ++i) {
++    for (const char* const* d = kDenProxies[i].mDomains; d && *d; ++d) {
++      if (ProxyHostMatch(aHost, *d)) return i;
++    }
++  }
++  return -1;
++}
++
++// ── Cached proxy public keys ──────────────────────────────────────────────────
 +
 +static mozilla::StaticMutex sKeyMutex;
-+static SECKEYPublicKey* sProxyPubKey = nullptr;  // process-lifetime; not freed
-+static bool sKeyLoaded = false;
++// Imported keys, parallel to kDenProxies.  Process-lifetime; never freed.
++static SECKEYPublicKey* sProxyPubKeys[kDenProxySlots];
++static bool sKeysLoaded = false;
 +
-+// Returns the proxy's public key, importing and caching it on first call.
-+// Returns nullptr if the key is the placeholder or import fails.
-+static SECKEYPublicKey* GetProxyPublicKey() {
++// Import every configured proxy's public key, once per process.  Called before
++// the host lookup so an unconfigured build says so on its first request, when
++// no lookup could ever match.  An entry whose DER fails to import is skipped
++// rather than fatal: one bad key in the table must not take down attestation
++// for the other partners' proxies.
++static void EnsureProxyKeysLoaded() {
 +  mozilla::StaticMutexAutoLock lock(sKeyMutex);
-+  if (sKeyLoaded) return sProxyPubKey;
-+  sKeyLoaded = true;
++  if (sKeysLoaded) return;
++  sKeysLoaded = true;
 +
-+  if (KeyIsPlaceholder()) {
++  if (!kDenProxies[0].mName) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Warning,
-+            ("DenBrowserAttest: public key is the all-zeros placeholder — "
-+             "request attestation is DISABLED.  Run "
-+             "scripts/gen-attest-key.sh, replace kProxyPublicKeyDer[] in "
-+             "netwerk/base/DenBrowserAttest.cpp, and rebuild."));
-+    return nullptr;
++            ("DenBrowserAttest: no proxies configured — request attestation "
++             "is DISABLED.  Add a \"proxies\" entry to "
++             "config/site-config.json (see scripts/gen-attest-key.sh) and "
++             "rebuild."));
++    return;
 +  }
 +
-+  SECItem spkiItem = {siBuffer, const_cast<uint8_t*>(kProxyPublicKeyDer),
-+                      kProxyPublicKeyDerLen};
++  for (size_t i = 0; kDenProxies[i].mName; ++i) {
++    const DenProxyEntry& entry = kDenProxies[i];
 +
-+  UniqueCERTSubjectPublicKeyInfo spki(
-+      SECKEY_DecodeDERSubjectPublicKeyInfo(&spkiItem));
-+  if (!spki) {
-+    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("DenBrowserAttest: SECKEY_DecodeDERSubjectPublicKeyInfo failed "
-+             "(bad DER bytes?)."));
++    // Valid P-256 SPKI DER starts with 0x30 (ASN.1 SEQUENCE).
++    if (!entry.mAttestKey || entry.mAttestKeyLen == 0 ||
++        entry.mAttestKey[0] != 0x30) {
++      MOZ_LOG(sLog, mozilla::LogLevel::Error,
++              ("DenBrowserAttest: proxy \"%s\" has no valid attestation key — "
++               "its traffic will NOT be attested.",
++               entry.mName));
++      continue;
++    }
++
++    SECItem spkiItem = {siBuffer, const_cast<uint8_t*>(entry.mAttestKey),
++                        entry.mAttestKeyLen};
++
++    UniqueCERTSubjectPublicKeyInfo spki(
++        SECKEY_DecodeDERSubjectPublicKeyInfo(&spkiItem));
++    if (!spki) {
++      MOZ_LOG(sLog, mozilla::LogLevel::Error,
++              ("DenBrowserAttest: SECKEY_DecodeDERSubjectPublicKeyInfo failed "
++               "for proxy \"%s\" (bad DER bytes?).",
++               entry.mName));
++      continue;
++    }
++
++    SECKEYPublicKey* key = SECKEY_ExtractPublicKey(spki.get());
++    if (!key) {
++      MOZ_LOG(sLog, mozilla::LogLevel::Error,
++              ("DenBrowserAttest: SECKEY_ExtractPublicKey failed for proxy "
++               "\"%s\".",
++               entry.mName));
++      continue;
++    }
++
++    sProxyPubKeys[i] = key;
++  }
++}
++
++// The public key of proxy aIndex, or nullptr when that entry has no usable one.
++static SECKEYPublicKey* GetProxyPublicKey(int32_t aIndex) {
++  EnsureProxyKeysLoaded();
++  if (aIndex < 0 || static_cast<size_t>(aIndex) >= kDenProxySlots) {
 +    return nullptr;
 +  }
-+
-+  SECKEYPublicKey* key = SECKEY_ExtractPublicKey(spki.get());
-+  if (!key) {
-+    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("DenBrowserAttest: SECKEY_ExtractPublicKey failed."));
-+    return nullptr;
-+  }
-+
-+  sProxyPubKey = key;
-+  return key;
++  mozilla::StaticMutexAutoLock lock(sKeyMutex);
++  return sProxyPubKeys[aIndex];
 +}
 +
 +// ── Body hashing ──────────────────────────────────────────────────────────────
@@ -417,28 +495,48 @@ new file mode 100644
 +                          nsIInputStream* aUploadStream) {
 +  MOZ_ASSERT(aURI);
 +
-+  SECKEYPublicKey* proxyPubKey = GetProxyPublicKey();
-+  if (!proxyPubKey) {
-+    return NS_OK;  // Placeholder or load failure — skip silently.
-+  }
++  // Import the configured keys (once per process) before anything else, so an
++  // unconfigured build logs that attestation is off even though the host
++  // lookup below can never match.
++  EnsureProxyKeysLoaded();
 +
-+  // ── 1. Timestamp ─────────────────────────────────────────────────────────
-+  int64_t ts = static_cast<int64_t>(PR_Now() / PR_USEC_PER_SEC);
-+  nsAutoCString tsStr;
-+  tsStr.AppendInt(ts);
-+
-+  // ── 2. Host ──────────────────────────────────────────────────────────────
++  // ── 1. Host ──────────────────────────────────────────────────────────────
 +  // Non-HTTP resources (about:, data:, blob:, …) have no host; skip them.
++  // GetAsciiHost is already lowercase punycode, matching the domain form
++  // build.sh writes into the proxy table.
 +  nsAutoCString host;
 +  if (NS_FAILED(aURI->GetAsciiHost(host)) || host.IsEmpty()) {
 +    return NS_OK;
 +  }
 +
-+  // ── 3. Method (already uppercase in nsHttpRequestHead) ───────────────────
++  // ── 2. Proxy selection ───────────────────────────────────────────────────
++  // Attest only to hosts a configured proxy fronts, with that proxy's own key.
++  // Anything else is left untouched: a third-party server holds no private key
++  // to verify these headers, so sending them there would only leak them.
++  int32_t proxyIndex = FindProxyForHost(host);
++  if (proxyIndex < 0) {
++    MOZ_LOG(sLog, mozilla::LogLevel::Debug,
++            ("DenBrowserAttest: no proxy configured for host=%s — sending "
++             "unattested.",
++             host.get()));
++    return NS_OK;
++  }
++
++  SECKEYPublicKey* proxyPubKey = GetProxyPublicKey(proxyIndex);
++  if (!proxyPubKey) {
++    return NS_OK;  // Unusable key for this proxy — already logged.
++  }
++
++  // ── 3. Timestamp ─────────────────────────────────────────────────────────
++  int64_t ts = static_cast<int64_t>(PR_Now() / PR_USEC_PER_SEC);
++  nsAutoCString tsStr;
++  tsStr.AppendInt(ts);
++
++  // ── 4. Method (already uppercase in nsHttpRequestHead) ───────────────────
 +  nsAutoCString method;
 +  aHead.Method(method);
 +
-+  // ── 4. Path + query (strip fragment; servers never see it) ───────────────
++  // ── 5. Path + query (strip fragment; servers never see it) ───────────────
 +  nsAutoCString path;
 +  if (NS_FAILED(aURI->GetPathQueryRef(path))) {
 +    return NS_OK;
@@ -447,7 +545,7 @@ new file mode 100644
 +  if (fragIdx >= 0) path.Truncate(fragIdx);
 +  if (path.IsEmpty()) path.AssignLiteral("/");
 +
-+  // ── 5. Random 16-byte nonce + base64 ─────────────────────────────────────
++  // ── 6. Random 16-byte nonce + base64 ─────────────────────────────────────
 +  uint8_t nonceBytes[16];
 +  if (PK11_GenerateRandom(nonceBytes, sizeof(nonceBytes)) != SECSuccess) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
@@ -459,7 +557,7 @@ new file mode 100644
 +      reinterpret_cast<const char*>(nonceBytes), sizeof(nonceBytes), nonceB64);
 +  if (NS_FAILED(nsrv)) return NS_OK;
 +
-+  // ── 6. Body binding (sha256 hex, or the "unbound" sentinel) ──────────────
++  // ── 7. Body binding (sha256 hex, or the "unbound" sentinel) ──────────────
 +  nsAutoCString bodyHex;
 +  if (ShouldSkipBodyHash(aUploadStream)) {
 +    // Large / unhashable upload: emit the authenticated "unbound" marker and
@@ -470,7 +568,7 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  // ── 7. Canonical plaintext ───────────────────────────────────────────────
++  // ── 8. Canonical plaintext ───────────────────────────────────────────────
 +  nsAutoCString plaintext;
 +  plaintext.AppendLiteral("denbrowser-attest:v2\n");
 +  plaintext.Append(nonceB64);
@@ -485,7 +583,7 @@ new file mode 100644
 +  plaintext.Append('\n');
 +  plaintext.Append(bodyHex);
 +
-+  // ── 8. Ephemeral EC P-256 keypair ────────────────────────────────────────
++  // ── 9. Ephemeral EC P-256 keypair ────────────────────────────────────────
 +  UniquePK11SlotInfo slot(PK11_GetInternalSlot());
 +  if (!slot) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
@@ -507,7 +605,7 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  // ── 9. ECDH + ANSI X9.63 KDF → 128-bit AES key ───────────────────────────
++  // ── 10. ECDH + ANSI X9.63 KDF → 128-bit AES key ───────────────────────────
 +  UniquePK11SymKey aesKey(PK11_PubDeriveWithKDF(
 +      ephemPriv.get(), proxyPubKey,
 +      PR_FALSE,  // isSender (value ignored for CKM_ECDH1_DERIVE)
@@ -525,7 +623,7 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  // ── 10. Random 12-byte GCM IV ────────────────────────────────────────────
++  // ── 11. Random 12-byte GCM IV ────────────────────────────────────────────
 +  uint8_t iv[12];
 +  if (PK11_GenerateRandom(iv, sizeof(iv)) != SECSuccess) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
@@ -533,7 +631,7 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  // ── 11. AES-128-GCM encrypt ──────────────────────────────────────────────
++  // ── 12. AES-128-GCM encrypt ──────────────────────────────────────────────
 +  CK_GCM_PARAMS gcmParams;
 +  gcmParams.pIv = iv;
 +  gcmParams.ulIvLen = sizeof(iv);
@@ -560,7 +658,7 @@ new file mode 100644
 +    return NS_OK;
 +  }
 +
-+  // ── 12. Assemble token: ephem_pub(65) || IV(12) || ct+tag ────────────────
++  // ── 13. Assemble token: ephem_pub(65) || IV(12) || ct+tag ────────────────
 +  const SECItem& pubPt = ephemPub->u.ec.publicValue;  // 65 bytes for P-256
 +  uint32_t tokenLen = pubPt.len + sizeof(iv) + ctLen;
 +  mozilla::UniquePtr<uint8_t[]> tokenBuf(new uint8_t[tokenLen]);
@@ -571,7 +669,7 @@ new file mode 100644
 +  p += sizeof(iv);
 +  memcpy(p, ctBuf.get(), ctLen);
 +
-+  // ── 13. Base64-encode and inject headers ─────────────────────────────────
++  // ── 14. Base64-encode and inject headers ─────────────────────────────────
 +  nsAutoCString tokenB64;
 +  nsrv = mozilla::Base64Encode(reinterpret_cast<const char*>(tokenBuf.get()),
 +                               tokenLen, tokenB64);
@@ -587,6 +685,77 @@ new file mode 100644
 +}
 +
 +}  // namespace denbrowser
+diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
+new file mode 100644
+index 0000000..727e5e0
+--- /dev/null
++++ b/netwerk/base/DenBrowserAttest.h
+@@ -0,0 +1,65 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#ifndef DenBrowserAttest_h__
++#define DenBrowserAttest_h__
++
++#include "nscore.h"
++
++class nsIInputStream;
++class nsIURI;
++namespace mozilla::net {
++class nsHttpRequestHead;
++}
++
++namespace denbrowser {
++
++/**
++ * AddAttestHeaders — inject X-DenBrowser-Ts, X-DenBrowser-Nonce, and X-DenBrowser-Token
++ * into aHead for an outbound HTTP/HTTPS request bound for a configured
++ * attestation proxy.
++ *
++ * Called from nsHttpChannel::SetupChannelForTransaction().  The token is an
++ * ECIES-encrypted payload that decrypts (using the matching private key held
++ * by the attestation proxy) to a canonical plaintext that binds the request
++ * to its method, host, path, and body hash.  A captured token cannot be
++ * replayed against a different request because every field is in the
++ * authenticated plaintext, and the per-request nonce is rejected by the
++ * proxy's replay cache on the second use.
++ *
++ * Protocol:  ECIES with EC P-256, ANSI X9.63 KDF (SHA-256), AES-128-GCM.
++ *
++ * Canonical plaintext (v2):
++ *   "denbrowser-attest:v2\n<nonce_b64>\n<ts>\n<host>\n<method>\n<path>\n<sha256_hex>"
++ *
++ * Proxy selection:
++ *   A deployment may front several partner applications, each behind its own
++ *   attestation proxy with its own keypair.  The build-time proxy table (see
++ *   the DEN: PROXY_TABLE block in DenBrowserAttest.cpp, generated by build.sh
++ *   from config/site-config.json) maps domains to proxies; the request is
++ *   attested with the key of the entry claiming aURI's host.  A host no entry
++ *   claims gets no headers at all — it is not proxied, so nothing on the other
++ *   end could verify them.
++ *
++ * Key model:
++ *   - Each attestation proxy holds its own EC P-256 private key.
++ *   - The DenBrowser build embeds only the matching SPKI public keys.
++ *   - A new keypair per browser release lets a proxy invalidate old builds
++ *     by rotating its private key or removing the old public key from its
++ *     allowlist.
++ *
++ * Behaviour when not configured:
++ *   With an empty proxy table this function is a silent no-op.  No request is
++ *   ever blocked by this code.
++ *
++ * Thread-safety:
++ *   Public keys are imported from DER at most once per process and cached.
++ *   Safe to call from any thread that can already call nsHttpChannel methods.
++ */
++nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
++                          nsIInputStream* aUploadStream);
++
++}  // namespace denbrowser
++
++#endif  // DenBrowserAttest_h__
 
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
 --- a/netwerk/protocol/http/nsHttpChannel.cpp

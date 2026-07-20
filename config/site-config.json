@@ -9,6 +9,15 @@
 
   "site_blacklist": [],
 
+  "proxies": [
+    {
+      "name":       "3k",
+      "domains":    ["localhost"],
+      "attest_key": "3k-public.der",
+      "tls_cert":   "3k-tls.crt"
+    }
+  ],
+
   "bookmarks": [
     { "title": "Wikipedia", "url": "https://www.wikipedia.org" },
     { "title": "DuckDuckGo", "url": "https://duckduckgo.com" },

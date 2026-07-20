@@ -1,33 +1,54 @@
 #!/usr/bin/env bash
-# gen-attest-key.sh — Generate the DenBrowser browser-attestation keypair.
+# gen-attest-key.sh — Generate a DenBrowser browser-attestation keypair.
 #
 # Key model:
 #   Private key  → stays on the proxy (copy to your gateway config)
 #   Public key   → embedded in the DenBrowser browser build (not secret)
 #
-# Usage:  ./scripts/gen-attest-key.sh
+# A deployment runs one attestation proxy per partner application, each with
+# its own keypair, so run this once per proxy with a distinct --name:
+#
+#   ./scripts/gen-attest-key.sh                    # name defaults to "proxy"
+#   ./scripts/gen-attest-key.sh --name partner-a
+#   ./scripts/gen-attest-key.sh --name partner-b
+#
+# Usage:  ./scripts/gen-attest-key.sh [--name NAME] [--force]
+#
+#   --name NAME   Label for this proxy.  Names the output files and should
+#                 match the "name" of the proxy's entry in
+#                 config/site-config.json.  Default: "proxy".
+#   --force       Overwrite an existing private key for this name.  Refused by
+#                 default: regenerating a deployed key revokes every build that
+#                 embeds its public half.
 #
 # Output:
-#   build/proxy-private.pem  — EC P-256 private key  (deploy to the proxy)
-#   build/proxy-public.pem   — matching public key    (not secret)
-#   build/proxy-public.der   — public key in DER form (bytes for the patch)
+#   build/<name>-private.pem  — EC P-256 private key  (deploy to that proxy)
+#   build/<name>-public.pem   — matching public key   (not secret)
+#   build/<name>-public.der   — public key in DER form (baked into the build)
 #
-# The public key bytes are also patched directly into kHapPublicKeyDer[]
-# in netwerk/base/DenBrowserAttest.cpp so the next Firefox build includes them.
+# This script does NOT modify the Firefox source tree.  The public key reaches
+# the binary through config/site-config.json: add (or update) a "proxies" entry
+# naming the .der, and build.sh Step 2.5 generates the compiled-in proxy table
+# from it.  That keeps one writer for the table and keeps what is compiled in
+# matching what is committed.
 #
 # Workflow for each new DenBrowser release:
-#   1. Run this script.
-#   2. Rebuild Firefox (public key is now baked in).
-#   3. Copy build/proxy-private.pem to the proxy and reload.
-#   4. The old build's tokens will no longer decrypt correctly once the proxy
-#      is updated — old builds are effectively revoked.
+#   1. Run this script for each proxy.
+#   2. Point that proxy's "attest_key" in config/site-config.json at the new
+#      build/<name>-public.der (unchanged if the name is the same).
+#   3. Rebuild DenBrowser (public keys are now baked in).
+#   4. Copy each build/<name>-private.pem to its proxy and reload.
+#   5. The old build's tokens will no longer decrypt correctly once the proxies
+#      are updated — old builds are effectively revoked.
 #
 # SECURITY NOTES:
-#   - Never commit proxy-private.pem.  It is gitignored from build/.
-#   - Treat the proxy private key like any other TLS private key.
-#   - The public key in kHapPublicKeyDer[] is not secret; embedding it in
-#     the binary gives attackers nothing useful (they cannot forge tokens
-#     without the proxy private key to complete ECDH on the other side).
+#   - Never commit *-private.pem.  build/ is gitignored.
+#   - Treat each proxy private key like any other TLS private key.
+#   - The public keys in the build are not secret; embedding them in the binary
+#     gives attackers nothing useful (they cannot forge tokens without the
+#     proxy private key to complete ECDH on the other side).
+#   - Keys are per proxy on purpose: one partner can never verify — or mint —
+#     another partner's tokens.
 
 set -euo pipefail
 
@@ -35,87 +56,84 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build"
 
-# Locate DenBrowserAttest.cpp inside the unpacked Firefox source tree.
-if [[ -f "$ROOT_DIR/src/.esr_version" ]]; then
-    ESR_VER=$(cat "$ROOT_DIR/src/.esr_version" | sed 's/esr//')
-    ATTEST_CPP="$ROOT_DIR/src/firefox-${ESR_VER}/netwerk/base/DenBrowserAttest.cpp"
-else
-    ATTEST_CPP=""
+NAME="proxy"
+FORCE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)  NAME="$2"; shift 2 ;;
+        --force) FORCE=1;   shift ;;
+        -h|--help)
+            echo "Usage: $0 [--name NAME] [--force]"
+            exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+
+# The name lands in a C string literal in the generated proxy table and in the
+# output filenames; keep it to characters that are safe in both.
+if [[ ! "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "[gen-attest-key] ERROR: --name must be letters/digits/._- : $NAME" >&2
+    exit 1
 fi
 
 mkdir -p "$BUILD_DIR"
 
+PRIV="$BUILD_DIR/$NAME-private.pem"
+PUB_PEM="$BUILD_DIR/$NAME-public.pem"
+PUB_DER="$BUILD_DIR/$NAME-public.der"
+
+if [[ -f "$PRIV" && $FORCE -eq 0 ]]; then
+    echo "[gen-attest-key] ERROR: $PRIV already exists." >&2
+    echo "[gen-attest-key]        Overwriting it revokes every build carrying the" >&2
+    echo "[gen-attest-key]        matching public key.  Re-run with --force if that" >&2
+    echo "[gen-attest-key]        is what you want, or pick another --name." >&2
+    exit 1
+fi
+
 # ── 1. Generate EC P-256 keypair ─────────────────────────────────────────────
-echo "[gen-attest-key] Generating EC P-256 keypair..."
-openssl ecparam -genkey -name prime256v1 -noout \
-        -out "$BUILD_DIR/proxy-private.pem"
+echo "[gen-attest-key] Generating EC P-256 keypair for \"$NAME\"..."
+openssl ecparam -genkey -name prime256v1 -noout -out "$PRIV"
+chmod 600 "$PRIV"
 
 # ── 2. Extract public key (PEM + DER) ────────────────────────────────────────
 echo "[gen-attest-key] Extracting public key..."
-openssl ec -in "$BUILD_DIR/proxy-private.pem" -pubout \
-        -out "$BUILD_DIR/proxy-public.pem"
-openssl ec -in "$BUILD_DIR/proxy-private.pem" -pubout \
-        -outform DER -out "$BUILD_DIR/proxy-public.der"
+openssl ec -in "$PRIV" -pubout -out "$PUB_PEM"
+openssl ec -in "$PRIV" -pubout -outform DER -out "$PUB_DER"
 
-KEY_SIZE=$(wc -c < "$BUILD_DIR/proxy-public.der" | tr -d ' ')
+KEY_SIZE=$(wc -c < "$PUB_DER" | tr -d ' ')
 echo "[gen-attest-key] Public key DER: $KEY_SIZE bytes"
 
-# ── 3. Build C hex array ──────────────────────────────────────────────────────
-KEY_BYTES=$(xxd -i "$BUILD_DIR/proxy-public.der" \
-            | grep -v '^unsigned\|^};' \
-            | sed 's/^  /  /')
+# ── 3. Summary ────────────────────────────────────────────────────────────────
+cat <<EOF
 
-# ── 4. Patch DenBrowserAttest.cpp (if the source tree is available) ─────────────
-if [[ -n "$ATTEST_CPP" && -f "$ATTEST_CPP" ]]; then
-    echo "[gen-attest-key] Patching kHapPublicKeyDer[] in DenBrowserAttest.cpp..."
-    python3 - "$ATTEST_CPP" "$KEY_BYTES" <<'PYEOF'
-import sys, re
+[gen-attest-key] Done.
 
-cpp_path = sys.argv[1]
-new_bytes = sys.argv[2]
+  Proxy private key : $PRIV  ← deploy to the "$NAME" proxy
+  Proxy public key  : $PUB_PEM   ← not secret
+  Public key DER    : $PUB_DER   ← baked into the build
 
-with open(cpp_path, "r", encoding="utf-8") as f:
-    src = f.read()
+  Next steps:
+    1. Add or update this proxy in config/site-config.json:
 
-pattern = re.compile(
-    r'(// ── REPLACE:.*?──\n).*?(  // ── END REPLACE)',
-    re.DOTALL
-)
+         "proxies": [
+           { "name":       "$NAME",
+             "domains":    ["app.example.com"],
+             "attest_key": "$NAME-public.der",
+             "tls_cert":   "$NAME-tls.crt" }
+         ]
 
-replacement = r'\g<1>' + new_bytes + r'\n\g<2>'
+       "domains" is every hostname this proxy fronts (subdomains included
+       automatically).  There is no wildcard: hosts no proxy claims are sent
+       without attestation headers.  Generate the TLS cert referenced above
+       with:  ./scripts/gen-proxy-tls.sh --name $NAME
 
-new_src, n = pattern.subn(replacement, src)
-if n != 1:
-    print(f"ERROR: Could not find REPLACE markers in {cpp_path}", file=sys.stderr)
-    sys.exit(1)
+    2. Rebuild DenBrowser — build.sh regenerates the compiled-in proxy table.
+    3. Copy $NAME-private.pem to the "$NAME" proxy and reload it
+       (proxy --key, or DENBROWSER_KEY).
+    4. Distribute the new DenBrowser build.
+    5. Old builds are now revoked for this proxy — the new private key means
+       their tokens cannot be decrypted.
 
-with open(cpp_path, "w", encoding="utf-8", newline="\n") as f:
-    f.write(new_src)
-
-print(f"  Updated {cpp_path}")
-PYEOF
-else
-    echo "[gen-attest-key] Source tree not found; printing bytes for manual paste:"
-    echo ""
-    echo "  Replace kHapPublicKeyDer[] in netwerk/base/DenBrowserAttest.cpp with:"
-    echo ""
-    echo "$KEY_BYTES"
-    echo ""
-fi
-
-# ── 5. Summary ────────────────────────────────────────────────────────────────
-echo ""
-echo "[gen-attest-key] Done."
-echo ""
-echo "  Proxy private key : $BUILD_DIR/proxy-private.pem  ← deploy to the proxy"
-echo "  Proxy public key  : $BUILD_DIR/proxy-public.pem   ← not secret"
-echo "  Public key DER    : $BUILD_DIR/proxy-public.der   ← baked into build"
-echo ""
-echo "  Next steps:"
-echo "    1. Rebuild Firefox (public key is now in DenBrowserAttest.cpp)."
-echo "    2. Copy proxy-private.pem to the proxy and reload."
-echo "    3. Distribute the new DenBrowser build."
-echo "    4. Old builds are now revoked — the new private key means"
-echo "       their tokens cannot be decrypted."
-echo ""
-echo "  NEVER commit proxy-private.pem to version control."
+  NEVER commit $NAME-private.pem to version control.
+EOF

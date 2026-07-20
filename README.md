@@ -77,7 +77,8 @@ DenBrowser/
 │   ├── policies.json           # Enterprise policy enforcement (loaded at startup)
 │   ├── mozilla.cfg             # Hardened lockPref overrides (autoconfig-locked)
 │   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
-│   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites / bookmarks
+│   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites /
+│                               #   attestation proxies / bookmarks
 ├── patches/
 │   ├── README.md               # Patch development guide
 │   └── NNN-*.patch             # See "Patches" table below
@@ -94,8 +95,8 @@ DenBrowser/
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
     ├── apply-patches.sh        # Apply patches with dry-run validation
-    ├── gen-attest-key.sh       # Generate ECDSA P-256 attestation keypair
-    ├── gen-proxy-tls.sh        # Generate / register the pinned proxy TLS cert
+    ├── gen-attest-key.sh       # Generate a proxy's ECDSA P-256 attestation keypair
+    ├── gen-proxy-tls.sh        # Generate a proxy's TLS cert + report its SPKI pin
     ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
@@ -168,6 +169,9 @@ compile-time switches and the baked-in bookmarks:
   navigable; everything else is blocked with a DenBrowser error page
   (patch 014).
 - `site_blacklist` — used only when whitelist is empty.
+- `proxies` — the attestation proxies this build talks to, one entry per
+  partner application (patches 006 + 012).  See
+  [Attestation proxies](#attestation-proxies-site-configjson) below.
 - `bookmarks` — curated shortcuts shown as tiles on the custom new-tab and home
   page (patch 018; the home button and startup page are pointed at
   `about:denbrowserhome` via a `browser.startup.homepage` lock).  Each entry is
@@ -187,6 +191,72 @@ compile-time switches and the baked-in bookmarks:
     { "title": "Docs", "url": "https://docs.example.com" }
   ]
   ```
+
+### Attestation proxies (`site-config.json`)
+
+A deployment normally fronts several partner applications, each behind its
+**own** attestation proxy with its own attestation keypair and TLS cert — no
+partner should be able to verify (or mint) another partner's tokens.  The
+`proxies` array is the build-time map from *domains* to *the proxy that fronts
+them*, and it drives both compile-time proxy features at once:
+
+- the attestation public key used to encrypt a request's token (patch 006), and
+- the TLS SPKI pin enforced when connecting to those domains (patch 012).
+
+```json
+"proxies": [
+  {
+    "name":       "partner-a",
+    "domains":    ["app.partner-a.example.com", "cdn.partner-a.example.com"],
+    "attest_key": "partner-a-public.der",
+    "tls_cert":   "partner-a-tls.crt"
+  },
+  {
+    "name":       "partner-b",
+    "domains":    ["partner-b.example.com"],
+    "attest_key": "partner-b-public.der",
+    "tls_cert": "partner-b-tls.crt"
+  }
+]
+```
+
+- `name` — label for this proxy; appears in browser log messages and names the
+  key material.  Letters/digits/`._-`, unique across entries.
+- `domains` — every hostname this proxy fronts.  Matching is exact **or a
+  subdomain** of a listed domain (`partner-a.com` also claims
+  `app.partner-a.com`), the same rule `site_whitelist` uses.
+- `attest_key` — the proxy's attestation public key in DER
+  (`scripts/gen-attest-key.sh --name <name>`).  A bare filename is read from
+  `build/`; a path is taken relative to the repo root.
+- `tls_cert` / `tls_spki_sha256` — the TLS pin, given either as a cert file the
+  build hashes for you (`scripts/gen-proxy-tls.sh --name <name>`) or as the
+  32-byte sha256 itself in hex or base64, for production hosts whose cert never
+  lands on the build machine.  Set at most one.  An entry with neither is still
+  attested but **not pinned** (the build warns).
+
+Setting up one partner end-to-end:
+
+```bash
+./scripts/gen-attest-key.sh --name partner-a
+./scripts/gen-proxy-tls.sh  --name partner-a --host app.partner-a.example.com
+# add the printed entry to config/site-config.json, then:
+./build.sh
+
+# run that partner's proxy with its own material:
+cd proxy && cargo run --release -- \
+  --listen   0.0.0.0:8443 \
+  --upstream app-backend.partner-a.internal:443 \
+  --key      ../build/partner-a-private.pem \
+  --cert     ../build/partner-a-tls.crt \
+  --tls-key  ../build/partner-a-tls.key \
+  --config   partner-a.toml
+```
+
+Each proxy instance is a separate process with its own listener, key, cert, and
+`proxy.toml`; the proxy binary itself is unchanged by the multi-proxy model.
+Rotating one partner's key or cert only touches that partner's entry, but it
+does still require a DenBrowser rebuild — the pin and the public key are
+compiled in by design.
 
 ### Proxy runtime configuration (`proxy/proxy.toml`)
 
@@ -298,13 +368,13 @@ for navigation.
 | 003 | `restrict-clipboard` | Block clipboard read/write and drag-and-drop everywhere; optional in-process clipboard for `clipboard_sites` so copy/paste works within the controlled site set without ever touching the OS clipboard. |
 | 004 | `restrict-downloads` | Cancel every file-save path: `internalSave`, `nsExternalHelperAppService::CreateListener`, `ShellService.canSetDesktopBackground`, and the Mac / Windows `SetDesktopBackground` C++ entry points. |
 | 005 | `disable-printing` | Reject `nsPrintJob::CommonPrint` for both print and print-preview — covers `window.print`, print-to-PDF, and any internal caller. |
-| 006 | `attest-requests` | Inject per-request ECIES attestation headers (v2: binds nonce + ts + host + method + path + body hash) into every outbound HTTP/HTTPS request for the Pingora proxy to verify. |
+| 006 | `attest-requests` | Inject per-request ECIES attestation headers (v2: binds nonce + ts + host + method + path + body hash) into outbound HTTP/HTTPS requests for the Pingora proxy to verify.  Carries a build-time table of N proxies (domains → attestation key + TLS pin, generated from `site-config.json`'s `proxies`) and attests with the key of the proxy claiming the request's host; hosts no proxy claims are left untouched. |
 | 007 | `ramdisk-profile` | **Intentionally not implemented** (STUB).  The header documents why: PBM + locked disk-cache prefs + `SanitizeOnShutdown` already keep content off disk, and the residual swap/hibernation risk needs FDE on the host — see [Deployment requirements](#deployment-requirements). |
 | 008 | `disable-devtools` | Hardcode `isDisabledByPolicy()` to `true` in both `DevToolsShim` and `DevToolsStartup`, so devtools stay off even if the policy/pref state is manipulated. |
 | 009 | `denbrowser-branding` | DenBrowser branding directory (icons, brand strings, Windows installer assets, Visual Elements manifest). |
 | 010 | `disable-diagnostics` | Replace `TelemetryReportingPolicy.dataSubmissionEnabled` getter with `return false`; short-circuit `TelemetryController.setupTelemetry` to a no-op. |
 | 011 | `disable-extensions` | Filter addon install locations to `SCOPE_APPLICATION` only; throw on any `AddonInstall.install()` call regardless of state. |
-| 012 | `pin-proxy-tls` | Pin the attestation proxy's TLS SPKI (sha256) into the build; abort the handshake in `AuthCertificateHook` before any application data flows if the leaf cert doesn't match. |
+| 012 | `pin-proxy-tls` | Pin each attestation proxy's TLS SPKI (sha256) into the build — the pin column of patch 006's proxy table, so every partner proxy is pinned to its own cert; abort the handshake in `AuthCertificateHook` before any application data flows if the leaf cert doesn't match. |
 | 013 | `disable-sync` | Hardcode `WeaveService.enabled` and `FXA_ENABLED` to `false`; remove the Sync preferences pane and Synced-Tabs sidebar entries from the UI. |
 | 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad`; localize the "blocked page" message. |
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |

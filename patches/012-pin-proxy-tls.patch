@@ -4,17 +4,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 012-pin-proxy-tls
 #
-# PURPOSE: Pin the attestation proxy's TLS SubjectPublicKeyInfo (SPKI) into
-#          the DenBrowser build.  When the browser opens a TLS connection to
-#          the configured proxy host, the leaf cert's SPKI sha256 must
-#          match a build-time constant — otherwise the handshake is aborted
-#          before any X-DenBrowser-* attestation header is sent.
+# PURPOSE: Pin each attestation proxy's TLS SubjectPublicKeyInfo (SPKI) into
+#          the DenBrowser build.  When the browser opens a TLS connection to a
+#          host one of the configured proxies fronts, the leaf cert's SPKI
+#          sha256 must match that proxy's build-time pin — otherwise the
+#          handshake is aborted before any X-DenBrowser-* attestation header
+#          is sent.
 #
 # THREAT MODEL ADDRESSED:
 #
 #   A co-resident process on the user's machine (WireGuard TUN device, raw
 #   pcap capture, etc.) trying to read attestation headers off the wire.
-#   With this patch in place, the browser-to-proxy hop is TLS-only and pinned
+#   With this patch in place, every browser-to-proxy hop is TLS-only and pinned
 #   to a specific server cert, so a passive sniffer sees only ciphertext,
 #   and an active impersonator cannot present a different cert (no rogue CA
 #   install, no MitM stack, etc.) because the pin is independent of the
@@ -28,23 +29,34 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # BUILD-TIME CONFIGURATION:
 #
-#   The pin is initially the placeholder pair:
-#       kProxyHost       = ""
-#       kProxySpkiSha256 = { 0, 0, ..., 0 }
+#   The pins are NOT separate constants: they are the mSpkiPin column of the
+#   proxy table patch 006 declares (the DEN: PROXY_TABLE block in
+#   netwerk/base/DenBrowserAttest.cpp), so each partner proxy is pinned to its
+#   own TLS cert alongside its own attestation key.  build.sh (Step 2.5)
+#   generates the whole table from config/site-config.json; nothing here is
+#   hand-edited.
 #
-#   While these placeholders are in place VerifyProxyPin() is a no-op, so
-#   dev builds work normally before the operator has decided on a TLS cert.
-#
-#   To activate the pin:
-#       ./scripts/gen-proxy-tls.sh                 # self-signed dev cert
+#   Per proxy entry, the pin comes from either:
+#       "tls_cert":        "partner-a-tls.crt"   # cert file in build/
 #     or
-#       ./scripts/gen-proxy-tls.sh \
-#           --host proxy.internal.example.com \    # real prod hostname
+#       "tls_spki_sha256": "9f86d081…"           # 32-byte hash, hex or base64
+#
+#   To produce a cert (and its pin) for a proxy:
+#       ./scripts/gen-proxy-tls.sh --name partner-a          # self-signed dev
+#     or
+#       ./scripts/gen-proxy-tls.sh --name partner-a \
+#           --host proxy.internal.example.com \              # real prod host
 #           --cert /path/to/server.crt \
 #           --key  /path/to/server.key
 #
-#   The script extracts sha256(SPKI) from the cert and patches both
-#   constants between the REPLACE TLS PIN markers in DenBrowserAttest.cpp.
+#   The script writes build/<name>-tls.{crt,key} and prints the SPKI hash;
+#   the build reads the cert (or the pasted hash) when it generates the table.
+#
+#   An entry with neither field is unpinned: its traffic is still attested,
+#   but that hop is not bound to a specific server cert (build.sh warns).
+#   With an empty proxy table — an unconfigured dev build — VerifyProxyPin()
+#   passes every host, so nothing breaks before the operator has decided on
+#   proxies and certs.
 #
 # INTEGRATION POINT:
 #
@@ -56,54 +68,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # ROTATION:
 #
-#   Rotating the proxy's TLS cert requires rebuilding DenBrowser with the new
+#   Rotating a proxy's TLS cert requires rebuilding DenBrowser with the new
 #   pin.  This is intentional — the pin binds the browser binary to a
 #   specific server identity, the way HPKP would for a website.  Operators
-#   should plan rotations alongside DenBrowser release cycles.
+#   should plan rotations alongside DenBrowser release cycles.  Rotating one
+#   partner's cert only touches that partner's entry; the other proxies'
+#   pins are unaffected.
 
-diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
---- a/netwerk/base/DenBrowserAttest.h
-+++ b/netwerk/base/DenBrowserAttest.h
-@@ -6,6 +6,8 @@
- #define DenBrowserAttest_h__
- 
- #include "nscore.h"
-+#include "mozilla/Span.h"
-+#include "nsStringFwd.h"
- 
- class nsIInputStream;
- class nsIURI;
-@@ -50,6 +52,26 @@
- nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
-                           nsIInputStream* aUploadStream);
- 
-+/**
-+ * VerifyProxyPin — return false to abort a TLS handshake when the peer
-+ * claims to be our attestation proxy but presents the wrong public key.
-+ *
-+ * Called from SSLServerCertVerification.cpp::AuthCertificateHook before any
-+ * application data flows.  Behaviour:
-+ *
-+ *   - If the build is unconfigured (kProxyHost empty or kProxySpkiSha256
-+ *     all-zero), returns true unconditionally.  Dev builds work normally.
-+ *   - If `aHost` is not the configured proxy host, returns true (this
-+ *     function only constrains the proxy hop, not other TLS connections).
-+ *   - Otherwise, decodes `aLeafCertDer`, computes sha256(SubjectPublicKeyInfo),
-+ *     and returns true iff it matches kProxySpkiSha256.
-+ *
-+ * On any decode/hash failure with a configured pin, returns false
-+ * (fail-closed: a broken cert isn't allowed to bypass the pin).
-+ */
-+bool VerifyProxyPin(const nsACString& aHost,
-+                    mozilla::Span<const uint8_t> aLeafCertDer);
-+
- }  // namespace denbrowser
- 
- #endif  // DenBrowserAttest_h__
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
+index 00ec512..55bdc13 100644
 --- a/netwerk/base/DenBrowserAttest.cpp
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -26,6 +26,8 @@
+@@ -32,6 +32,8 @@
  
  #include "DenBrowserAttest.h"
  
@@ -112,57 +88,31 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
  #include "keyhi.h"
  #include "mozilla/Base64.h"
  #include "mozilla/Logging.h"
-@@ -46,6 +48,8 @@
+@@ -53,6 +55,7 @@
  #include "secasn1.h"
  #include "secitem.h"
  
 +#include <cstring>
-+
+ #include <iterator>  // std::size
+ 
  namespace denbrowser {
- 
- using mozilla::UniqueCERTSubjectPublicKeyInfo;
-@@ -94,6 +98,25 @@
- // Valid P-256 SPKI DER starts with 0x30 (ASN.1 SEQUENCE).
- // An all-zero buffer is the placeholder; treat as "not configured".
- static bool KeyIsPlaceholder() { return kProxyPublicKeyDer[0] != 0x30; }
-+
-+// ── TLS-channel pin for the proxy ────────────────────────────────────────────
-+//
-+// The browser will refuse to complete a TLS handshake to `kProxyHost` unless
-+// the leaf cert's SubjectPublicKeyInfo sha256 matches `kProxySpkiSha256`.
-+// This shuts off the local-sniffer threat: a co-resident attacker on this
-+// machine sees only TLS ciphertext between the browser and the proxy, and
-+// can't impersonate the proxy with a different cert (no rogue CA install,
-+// no MitM stack, etc.).
-+//
-+// Defaults below are the unconfigured placeholders.  Running
-+// scripts/gen-proxy-tls.sh patches in the real values and the pin becomes
-+// active on the next build.  An empty host or all-zero hash means
-+// "no pin configured" — VerifyProxyPin returns true and behaves as a no-op.
-+
-+// ── REPLACE TLS PIN: gen-proxy-tls.sh updates these ─────────────────────
-+static const char kProxyHost[] = "";
-+static const uint8_t kProxySpkiSha256[32] = { 0 };
-+// ── END REPLACE TLS PIN ──────────────────────────────────────────────────
- 
- // ── P-256 curve params for ephemeral keygen ───────────────────────────────────
- // DER encoding of OID prime256v1 (1.2.840.10045.3.1.7):
-@@ -361,6 +384,68 @@
-   mozilla::Unused << aHead.SetHeader("X-DenBrowser-Token"_ns, tokenB64, false);
- 
+@@ -517,4 +520,86 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
    return NS_OK;
-+}
-+
-+// ── Proxy SPKI pin verification ──────────────────────────────────────────────
-+
-+static bool PinIsConfigured() {
-+  if (kProxyHost[0] == '\0') return false;
-+  for (uint8_t b : kProxySpkiSha256) {
-+    if (b != 0) return true;
-+  }
-+  return false;
  }
  
++// ── Proxy SPKI pin verification ──────────────────────────────────────────────
++//
++// The browser refuses to complete a TLS handshake to a proxy's domain unless
++// the leaf cert's SubjectPublicKeyInfo sha256 matches the pin recorded for
++// that proxy in the build-time table above.  This shuts off the local-sniffer
++// threat: a co-resident attacker on this machine sees only TLS ciphertext
++// between the browser and a proxy, and can't impersonate one with a different
++// cert (no rogue CA install, no MitM stack, etc.).
++//
++// Each partner proxy carries its own pin, so rotating one partner's TLS cert
++// does not disturb the others — but it does still require a DenBrowser rebuild
++// (see the patch header).
++
 +// Returns NS_OK and writes 32 bytes of sha256(SubjectPublicKeyInfo) into
 +// aOut, given the DER bytes of an X.509 certificate.
 +static nsresult Sha256OfLeafSpki(mozilla::Span<const uint8_t> aCertDer,
@@ -172,8 +122,13 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
 +  SECItem certItem = {siBuffer,
 +                      const_cast<uint8_t*>(aCertDer.Elements()),
 +                      static_cast<unsigned int>(aCertDer.Length())};
-+  mozilla::UniqueCERTCertificate cert(
-+      CERT_DecodeDERCertificate(&certItem, PR_FALSE, nullptr));
++  // CERT_NewTempCertificate, not CERT_DecodeDERCertificate: the latter is not
++  // exported from nss3.dll (absent from security/nss/lib/nss/nss.def), so
++  // referencing it fails to link into xul.  This is the same call PSM itself
++  // uses to parse a peer cert (see NSSSocketControl.cpp).  copyDER=true so the
++  // cert owns its bytes and does not alias aCertDer.
++  mozilla::UniqueCERTCertificate cert(CERT_NewTempCertificate(
++      CERT_GetDefaultCertDB(), &certItem, nullptr, false, true));
 +  if (!cert) return NS_ERROR_FAILURE;
 +
 +  // Re-encode the parsed SubjectPublicKeyInfo to be sure we hash the full
@@ -192,30 +147,87 @@ diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.c
 +
 +bool VerifyProxyPin(const nsACString& aHost,
 +                    mozilla::Span<const uint8_t> aLeafCertDer) {
-+  // Unconfigured build → pin is inert, every host passes.
-+  if (!PinIsConfigured()) return true;
++  // Not one of our proxies' domains (or an unconfigured build) → the pin is
++  // inert and this host is none of our business.
++  int32_t proxyIndex = FindProxyForHost(aHost);
++  if (proxyIndex < 0) return true;
 +
-+  // Pin applies only to the proxy hop; everything else is unaffected.
-+  if (!aHost.EqualsASCII(kProxyHost)) return true;
++  const DenProxyEntry& entry = kDenProxies[proxyIndex];
++  if (!entry.mSpkiPin) {
++    // Proxy configured without a pin: attestation still applies, but this hop
++    // is not bound to a specific server cert.
++    MOZ_LOG(sLog, mozilla::LogLevel::Warning,
++            ("DenBrowserAttest: proxy \"%s\" has no TLS pin configured — "
++             "host=%s is not pin-checked.",
++             entry.mName, nsPromiseFlatCString(aHost).get()));
++    return true;
++  }
 +
 +  uint8_t hash[32];
 +  if (NS_FAILED(Sha256OfLeafSpki(aLeafCertDer, hash))) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("DenBrowserAttest: SPKI hashing failed for host=%s — pin REJECT.",
-+             nsPromiseFlatCString(aHost).get()));
++            ("DenBrowserAttest: SPKI hashing failed for host=%s (proxy "
++             "\"%s\") — pin REJECT.",
++             nsPromiseFlatCString(aHost).get(), entry.mName));
 +    return false;  // fail-closed
 +  }
 +
-+  if (std::memcmp(hash, kProxySpkiSha256, sizeof(hash)) != 0) {
++  if (std::memcmp(hash, entry.mSpkiPin, sizeof(hash)) != 0) {
 +    MOZ_LOG(sLog, mozilla::LogLevel::Error,
-+            ("DenBrowserAttest: SPKI pin MISMATCH for host=%s — aborting TLS.",
-+             nsPromiseFlatCString(aHost).get()));
++            ("DenBrowserAttest: SPKI pin MISMATCH for host=%s (proxy \"%s\") "
++             "— aborting TLS.",
++             nsPromiseFlatCString(aHost).get(), entry.mName));
 +    return false;
 +  }
 +  return true;
 +}
 +
  }  // namespace denbrowser
+diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
+index 727e5e0..3439d01 100644
+--- a/netwerk/base/DenBrowserAttest.h
++++ b/netwerk/base/DenBrowserAttest.h
+@@ -6,6 +6,8 @@
+ #define DenBrowserAttest_h__
+ 
+ #include "nscore.h"
++#include "mozilla/Span.h"
++#include "nsStringFwd.h"
+ 
+ class nsIInputStream;
+ class nsIURI;
+@@ -60,6 +62,30 @@ namespace denbrowser {
+ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
+                           nsIInputStream* aUploadStream);
+ 
++/**
++ * VerifyProxyPin — return false to abort a TLS handshake when the peer
++ * claims to be one of our attestation proxies but presents the wrong public
++ * key.
++ *
++ * Called from SSLServerCertVerification.cpp::AuthCertificateHook before any
++ * application data flows.  The pins live in the same build-time proxy table
++ * AddAttestHeaders() selects keys from, so each partner proxy is pinned to its
++ * own TLS cert.  Behaviour:
++ *
++ *   - If `aHost` is claimed by no proxy entry, returns true — this function
++ *     only constrains proxy hops, not other TLS connections.  An unconfigured
++ *     build (empty table) therefore passes everything, and dev builds work
++ *     normally.
++ *   - If the matching entry has no pin configured, returns true.
++ *   - Otherwise, decodes `aLeafCertDer`, computes sha256(SubjectPublicKeyInfo),
++ *     and returns true iff it matches that entry's pin.
++ *
++ * On any decode/hash failure with a configured pin, returns false
++ * (fail-closed: a broken cert isn't allowed to bypass the pin).
++ */
++bool VerifyProxyPin(const nsACString& aHost,
++                    mozilla::Span<const uint8_t> aLeafCertDer);
++
+ }  // namespace denbrowser
+ 
+ #endif  // DenBrowserAttest_h__
+
 diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manager/ssl/SSLServerCertVerification.cpp
 --- a/security/manager/ssl/SSLServerCertVerification.cpp
 +++ b/security/manager/ssl/SSLServerCertVerification.cpp
