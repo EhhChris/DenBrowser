@@ -1,5 +1,7 @@
 > **Note:** This project and its scaffolding were built with AI assistance (Claude, Anthropic).
 > Review all generated code and patches carefully before use in production.
+> The author of the repository has reviewed every change in detail, but does not have extensive history working with browsers, pingora, or rust professionally.
+> If you find bugs or problems in implementation during peer review please do no hesitate to raise an issue.
 
 # DenBrowser
 
