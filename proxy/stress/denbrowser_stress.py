@@ -152,6 +152,7 @@ class Config:
     verify: object                 # requests `verify` arg: CA path, or False
     timeout: float
     pub_key: object
+    client_cert: object = None     # requests `cert` arg: (crt, key) tuple, or None
 
 
 # ── Token / header construction (mirrors DenBrowserAttest.cpp AddAttestHeaders)
@@ -336,6 +337,7 @@ class ReplayGen:
                 spec.method, self.cfg.url + spec.path, data=spec.body,
                 headers={**spec.headers, "Host": self.cfg.host},
                 timeout=self.cfg.timeout, verify=self.cfg.verify,
+                cert=self.cfg.client_cert,
             )
         except requests.RequestException:
             return None
@@ -550,7 +552,7 @@ def run_stage(cfg: Config, gen: Generator, session_factory, *, concurrency: int,
             try:
                 r = sess.request(spec.method, cfg.url + spec.path, data=spec.body,
                                  headers=headers, timeout=cfg.timeout,
-                                 verify=cfg.verify)
+                                 verify=cfg.verify, cert=cfg.client_cert)
                 dt = time.monotonic() - t0
                 out.append(Sample(dt, r.status_code, None, spec.category,
                                   spec.expected, r.headers.get("Retry-After")))
@@ -715,6 +717,13 @@ def parse_args(argv):
                    help="CA/cert bundle to verify the proxy TLS cert")
     p.add_argument("--insecure", action="store_true",
                    help="skip TLS verification (dev self-signed proxy)")
+    p.add_argument("--client-cert", default=os.environ.get("DENBROWSER_CLIENT_CERT",
+                   "build/user-cert.crt"),
+                   help="client cert for the proxy's [mtls] layer "
+                        "(scripts/gen-user-cert.sh); presented only if it exists")
+    p.add_argument("--client-key", default=os.environ.get("DENBROWSER_CLIENT_KEY",
+                   "build/user-cert.key"),
+                   help="private key for --client-cert")
 
     p.add_argument("-m", "--mode", default="mixed", choices=ALL_MODES,
                    help="traffic mode (default: mixed). Single-category modes "
@@ -779,6 +788,23 @@ def resolve_verify(args):
     return False
 
 
+def resolve_client_cert(args):
+    """Client cert for the proxy's [mtls] layer, as a (crt, key) tuple.
+
+    Presented only when both files exist; a proxy without mTLS never requests a
+    client cert, so this is safe to leave on by default.  A cert without its key
+    (or vice versa) is a misconfiguration worth flagging."""
+    have_cert = args.client_cert and os.path.exists(args.client_cert)
+    have_key = args.client_key and os.path.exists(args.client_key)
+    if have_cert and have_key:
+        return (args.client_cert, args.client_key)
+    if have_cert != have_key:
+        sys.stderr.write(
+            f"NOTE: client cert {args.client_cert!r} / key {args.client_key!r} "
+            "incomplete; not presenting a client certificate.\n")
+    return None
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if args.seed is not None:
@@ -798,15 +824,17 @@ def main(argv=None):
         verify=resolve_verify(args),
         timeout=args.timeout,
         pub_key=pub_key,
+        client_cert=resolve_client_cert(args),
     )
     thresholds = Thresholds(args.max_error_rate, args.max_p99_ms, args.valid_fail_rate)
     weights = weights_for_mode(args.mode, None)
 
     print(f"DenBrowser proxy stress test")
-    print(f"  target     : {cfg.url}   (Host: {cfg.host})")
-    print(f"  public key : {args.public_key}")
-    print(f"  TLS verify : {cfg.verify!r}")
-    print(f"  mode       : {args.mode}")
+    print(f"  target      : {cfg.url}   (Host: {cfg.host})")
+    print(f"  public key  : {args.public_key}")
+    print(f"  TLS verify  : {cfg.verify!r}")
+    print(f"  client cert : {cfg.client_cert[0] if cfg.client_cert else '(none)'}")
+    print(f"  mode        : {args.mode}")
     print()
     print_category_expectations(args.mode, weights)
 

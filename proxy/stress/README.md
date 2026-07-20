@@ -49,6 +49,7 @@ pip install cryptography requests
 # One-time key + cert material (writes to build/, gitignored):
 scripts/gen-attest-key.sh
 scripts/gen-proxy-tls.sh
+scripts/gen-user-cert.sh      # only if testing with [mtls] enabled
 
 # Start an upstream and the proxy (example — see test/target-server/):
 docker compose -f test/target-server/compose.yml up -d
@@ -56,6 +57,11 @@ docker compose -f test/target-server/compose.yml up -d
 # The target reuses build/proxy-tls.* (self-signed), so pass --insecure-upstream.
 (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run --release -- --insecure-upstream)
 ```
+
+If the proxy is run with `[mtls]` enabled (client_ca = `build/user-ca.crt`), the
+stress client must present a user certificate. `scripts/gen-user-cert.sh` writes
+`build/user-cert.{crt,key}`, which the tester picks up automatically (see
+`--client-cert` below).
 
 ## Usage
 
@@ -110,6 +116,11 @@ python3 proxy/stress/denbrowser_stress.py -m reject -c 100 -d 10 --insecure
 - `--cert PATH` to verify the proxy's TLS cert, or `--insecure` for the
   self-signed dev cert. If `build/proxy-tls.crt` exists it is used
   automatically.
+- `--client-cert PATH` / `--client-key PATH` — client certificate for the
+  proxy's `[mtls]` layer (default `build/user-cert.{crt,key}` from
+  `scripts/gen-user-cert.sh`). Presented only when both files exist, so it is a
+  no-op against a proxy without mTLS. Override with the `DENBROWSER_CLIENT_CERT`
+  / `DENBROWSER_CLIENT_KEY` env vars.
 
 ### Detection thresholds
 

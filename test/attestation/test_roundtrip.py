@@ -16,6 +16,15 @@ Usage (from repo root):
     # The target's cert is self-signed, so run with --insecure-upstream.
     (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run -- --insecure-upstream)
     python3 test/attestation/test_roundtrip.py
+
+mTLS:
+    If the proxy is run with [mtls] enabled, it requires a client certificate.
+    Generate one and point the proxy's client_ca at the CA:
+        scripts/gen-user-cert.sh
+        # proxy config: [mtls] enabled = true, client_ca = "build/user-ca.crt"
+    This test auto-presents build/user-cert.{crt,key} when they exist (override
+    with DENBROWSER_CLIENT_CERT / DENBROWSER_CLIENT_KEY).  With no mTLS on the
+    proxy, presenting the cert is harmless — the server never asks for it.
 """
 
 import base64
@@ -47,6 +56,16 @@ if TLS_CERT_PATH and os.path.exists(TLS_CERT_PATH):
 else:
     warnings.simplefilter("ignore", InsecureRequestWarning)
     VERIFY = False
+
+# Client certificate for the proxy's [mtls] layer (scripts/gen-user-cert.sh).
+# Presented only if both files exist; a proxy without mTLS simply never requests
+# it, so this is safe to leave on by default.
+CLIENT_CERT_PATH = os.environ.get("DENBROWSER_CLIENT_CERT", "build/user-cert.crt")
+CLIENT_KEY_PATH = os.environ.get("DENBROWSER_CLIENT_KEY", "build/user-cert.key")
+if os.path.exists(CLIENT_CERT_PATH) and os.path.exists(CLIENT_KEY_PATH):
+    CLIENT_CERT = (CLIENT_CERT_PATH, CLIENT_KEY_PATH)
+else:
+    CLIENT_CERT = None
 
 
 def _load_public_key(path):
@@ -97,7 +116,8 @@ def _run(pub_key):
         full = {**headers, "Host": host}
         try:
             r = requests.request(method, f"{PROXY_URL}{path}", data=body,
-                                 headers=full, timeout=5, verify=VERIFY)
+                                 headers=full, timeout=5, verify=VERIFY,
+                                 cert=CLIENT_CERT)
             if r.status_code == expect:
                 print(f"  PASS  {label}  (HTTP {r.status_code})")
                 passed += 1
@@ -230,8 +250,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     pub_key = _load_public_key(PUBLIC_KEY_PATH)
-    print(f"Public key : {PUBLIC_KEY_PATH}")
-    print(f"Proxy URL  : {PROXY_URL}")
-    print(f"TLS verify : {VERIFY!r}\n")
+    print(f"Public key  : {PUBLIC_KEY_PATH}")
+    print(f"Proxy URL   : {PROXY_URL}")
+    print(f"TLS verify  : {VERIFY!r}")
+    print(f"Client cert : {CLIENT_CERT[0] if CLIENT_CERT else '(none)'}\n")
 
     sys.exit(0 if _run(pub_key) else 1)

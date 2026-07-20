@@ -96,6 +96,7 @@ DenBrowser/
     ├── apply-patches.sh        # Apply patches with dry-run validation
     ├── gen-attest-key.sh       # Generate ECDSA P-256 attestation keypair
     ├── gen-proxy-tls.sh        # Generate / register the pinned proxy TLS cert
+    ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
