@@ -12,7 +12,11 @@ use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use sha2::{Digest, Sha256};
 
 mod attest;
+mod config;
+mod ratelimit;
 use attest::{AttestInputs, BodyBinding, Verifier};
+use config::Config;
+use ratelimit::RateLimiter;
 
 /// Maximum bytes of a *bound* (hash-verified) request body.
 ///
@@ -62,6 +66,12 @@ struct Args {
     /// intended upstream and not a MITM.
     #[arg(long, env = "DENBROWSER_INSECURE_UPSTREAM", default_value_t = false)]
     insecure_upstream: bool,
+
+    /// Path to the operational TOML config file (rate limiting, and future
+    /// runtime options).  Optional — with no config file every gated feature
+    /// stays off and the proxy behaves as it did before configs existed.
+    #[arg(long, env = "DENBROWSER_CONFIG")]
+    config: Option<String>,
 }
 
 struct DenBrowserProxy {
@@ -69,10 +79,17 @@ struct DenBrowserProxy {
     upstream_host: String,
     upstream_port: u16,
     insecure_upstream: bool,
+    /// `None` when rate limiting is disabled (no config or `enabled = false`).
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl DenBrowserProxy {
-    fn new(verifier: Verifier, upstream: &str, insecure_upstream: bool) -> anyhow::Result<Self> {
+    fn new(
+        verifier: Verifier,
+        upstream: &str,
+        insecure_upstream: bool,
+        rate_limiter: Option<RateLimiter>,
+    ) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
             .ok_or_else(|| anyhow::anyhow!("upstream must be host:port, got {upstream:?}"))?;
@@ -82,6 +99,7 @@ impl DenBrowserProxy {
             upstream_host: host.to_owned(),
             upstream_port: port,
             insecure_upstream,
+            rate_limiter,
         })
     }
 }
@@ -139,6 +157,34 @@ impl ProxyHttp for DenBrowserProxy {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<bool> {
+        // Rate limiting runs *before* attestation so a flood from one IP is shed
+        // cheaply here — it never reaches the crypto path or the upstream.  The
+        // counter is keyed on the origin IP and the rule glob is matched against
+        // `host + path`, so per-URL-pattern limits work even on requests that
+        // would later fail attestation.
+        if let Some(limiter) = &self.rate_limiter {
+            // Owned copy so the immutable borrow of `session` ends before the
+            // (mutable) `respond_error` below.
+            let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
+            // Enforce only when we have an IP to key on (always true for a
+            // TCP/TLS client); otherwise fail open rather than throttle blindly.
+            if let Some(ip) = client_ip {
+                let target = {
+                    let req = session.req_header();
+                    let host = header_str(&req.headers, "host")
+                        .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
+                        .unwrap_or_default();
+                    let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+                    format!("{host}{path}")
+                };
+                if !limiter.admit(&ip, &target) {
+                    warn!("rate limited — {ip} {target}");
+                    let _ = session.respond_error(429).await;
+                    return Ok(true);
+                }
+            }
+        }
+
         let req = session.req_header();
 
         let ts = header_str(&req.headers, "x-denbrowser-ts");
@@ -270,8 +316,25 @@ fn main() {
              for local testing only, never production"
         );
     }
-    let proxy = DenBrowserProxy::new(verifier, &args.upstream, args.insecure_upstream)
-        .unwrap_or_else(|e| panic!("{e}"));
+
+    let config = match &args.config {
+        Some(path) => Config::load(path).unwrap_or_else(|e| panic!("{e}")),
+        None => Config::default(),
+    };
+    let rate_limiter = RateLimiter::from_config(&config.rate_limiting)
+        .unwrap_or_else(|e| panic!("invalid rate_limiting config: {e}"));
+    match &rate_limiter {
+        Some(_) => info!("rate limiting enabled"),
+        None => info!("rate limiting disabled"),
+    }
+
+    let proxy = DenBrowserProxy::new(
+        verifier,
+        &args.upstream,
+        args.insecure_upstream,
+        rate_limiter,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let mut server = Server::new(None).expect("Pingora server init failed");
     server.bootstrap();

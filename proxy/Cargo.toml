@@ -1,6 +1,6 @@
 [package]
 name = "denbrowser-proxy"
-version = "0.3.1"
+version = "0.4.1"
 edition = "2024"
 
 [[bin]]
@@ -9,11 +9,17 @@ path = "src/main.rs"
 
 [dependencies]
 # `openssl` feature enables TLS termination at the listen socket.
-pingora-core  = { version = "0.8", features = ["openssl"] }
-pingora-proxy = { version = "0.8", features = ["openssl"] }
-pingora-http  = "0.8"
+pingora-core   = { version = "0.8", features = ["openssl"] }
+pingora-proxy  = { version = "0.8", features = ["openssl"] }
+pingora-http   = "0.8"
+pingora-limits = "0.8"
 
 async-trait = "0.1"
+
+# Operational config file (rate limiting, and future runtime options).
+serde   = { version = "1", features = ["derive"] }
+toml    = "0.8"
+globset = "0.4"
 
 p256    = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"

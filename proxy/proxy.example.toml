@@ -1,0 +1,37 @@
+# DenBrowser proxy — operational configuration (example).
+#
+# Pass this file to the proxy with `--config proxy.toml` (or the
+# DENBROWSER_CONFIG env var).  It is optional: with no config file, every
+# feature below stays OFF and the proxy behaves as it did before configs
+# existed.  This is the file to grow as more runtime options are added.
+
+[rate_limiting]
+# Master on/off switch.  When false, nothing below takes effect — keep a tuned
+# ruleset in the file and flip it off with this one line.
+enabled = true
+
+# Universal cap, applied per client IP across *every* request:
+#   at most `max_requests` per `window_secs` seconds from any single origin IP.
+# Set either to 0 to disable the universal cap (the per-pattern `rules` below can
+# still apply on their own).
+window_secs  = 1
+max_requests = 100
+
+# Per-URL-pattern rules.  Each rule keeps its OWN counter keyed by origin IP, so
+# a burst against one pattern is throttled independently of the others and of the
+# universal cap above.  `pattern` is a glob matched against "{host}{path}"; `*`
+# matches any run of characters (including `/`), so `.../secrets/*` covers
+# everything nested under that prefix.  Rules are evaluated top-to-bottom and the
+# first match wins.
+
+# Tight limit on a sensitive area: 5 requests / minute / IP.
+[[rate_limiting.rules]]
+pattern      = "example.com/secrets/*"
+window_secs  = 60
+max_requests = 5
+
+# Looser limit on a high-traffic area: 50 requests / second / IP.
+[[rate_limiting.rules]]
+pattern      = "example.com/news/*"
+window_secs  = 1
+max_requests = 50
