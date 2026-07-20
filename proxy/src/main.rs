@@ -72,11 +72,12 @@ struct Args {
     #[arg(long, env = "DENBROWSER_INSECURE_UPSTREAM", default_value_t = false)]
     insecure_upstream: bool,
 
-    /// Path to the operational TOML config file (rate limiting, and future
-    /// runtime options).  Optional — with no config file every gated feature
-    /// stays off and the proxy behaves as it did before configs existed.
-    #[arg(long, env = "DENBROWSER_CONFIG")]
-    config: Option<String>,
+    /// Path to the operational TOML config file (rate limiting, mTLS, proxy
+    /// bypass, and future runtime options).  Required: the proxy loads this file
+    /// on startup and exits if it cannot be read or parsed.  Defaults to
+    /// `proxy.toml` in the working directory.
+    #[arg(long, env = "DENBROWSER_CONFIG", default_value = "proxy.toml")]
+    config: String,
 }
 
 struct DenBrowserProxy {
@@ -357,10 +358,10 @@ fn main() {
         );
     }
 
-    let config = match &args.config {
-        Some(path) => Config::load(path).unwrap_or_else(|e| panic!("{e}")),
-        None => Config::default(),
-    };
+    // The config file is mandatory — fail loudly rather than fall back to
+    // silent defaults, so a missing or unreadable config never starts a proxy
+    // with unintended (e.g. mTLS-disabled) settings.
+    let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
     let rate_limiter = RateLimiter::from_config(&config.rate_limiting)
         .unwrap_or_else(|e| panic!("invalid rate_limiting config: {e}"));
     match &rate_limiter {

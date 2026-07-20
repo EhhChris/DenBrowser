@@ -1,9 +1,16 @@
 # DenBrowser proxy — operational configuration (example).
 #
-# Pass this file to the proxy with `--config proxy.toml` (or the
-# DENBROWSER_CONFIG env var).  It is optional: with no config file, every
-# feature below stays OFF and the proxy behaves as it did before configs
-# existed.  This is the file to grow as more runtime options are added.
+# Copy this file to `proxy.toml` and edit it.  The proxy loads `proxy.toml` from
+# its working directory by default (override with `--config <path>` or the
+# DENBROWSER_CONFIG env var) and is REQUIRED: the proxy exits on startup if the
+# config file is missing or unparseable.  Every feature below is off by default,
+# so a copy of this file with no edits runs the proxy exactly as it behaved
+# before configs existed.  This is the file to grow as more runtime options are
+# added.
+#
+# Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
+# so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
+# single-quoted literal ('C:\Users\...') or forward slashes ("C:/Users/...").
 
 [rate_limiting]
 # Master on/off switch.  When false, nothing below takes effect — keep a tuned

@@ -12,6 +12,9 @@ Usage (from repo root):
     scripts/gen-attest-key.sh
     scripts/gen-proxy-tls.sh
     docker compose -f test/target-server/compose.yml up -d
+    # The proxy requires a config file (defaults to ./proxy.toml); copy the
+    # example once. Leave [mtls] disabled for plain attestation testing.
+    cp proxy/proxy.example.toml proxy/proxy.toml
     # Proxy dials its upstream over TLS; use the target's TLS port (8443).
     # The target's cert is self-signed, so run with --insecure-upstream.
     (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run -- --insecure-upstream)

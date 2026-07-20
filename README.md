@@ -190,13 +190,15 @@ compile-time switches and the baked-in bookmarks:
 
 ### Proxy runtime configuration (`proxy/proxy.toml`)
 
-The attestation proxy takes an optional TOML config file (`--config <path>`, or
-the `DENBROWSER_CONFIG` env var) for *operational* settings tuned per deployment
-without rebuilding.  It is separate from the compile-time attestation/TLS key
-flags, and separate from `config/site-config.json` (which feeds the browser
-build).  With no config file, every feature below stays off and the proxy
-behaves exactly as before.  See `proxy/proxy.example.toml` for a full annotated
-example.  This file is the place to grow as more runtime options are added.
+The attestation proxy loads a **required** TOML config file for *operational*
+settings tuned per deployment without rebuilding.  It defaults to `proxy.toml`
+in the working directory (override with `--config <path>` or the
+`DENBROWSER_CONFIG` env var); the proxy **exits on startup** if the file is
+missing or unparseable, so it never comes up with unintended (e.g.
+mTLS-disabled) settings.  Copy the annotated `proxy/proxy.example.toml` to
+`proxy/proxy.toml` and edit it.  This config is separate from the compile-time
+attestation/TLS key flags, and from `config/site-config.json` (which feeds the
+browser build), and is the place to grow as more runtime options are added.
 
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any

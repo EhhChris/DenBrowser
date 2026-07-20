@@ -10,6 +10,11 @@
 # Rust build artifacts
 proxy/target/
 
+# Per-deployment proxy runtime config (copy proxy.example.toml -> proxy.toml).
+# Kept out of git so machine-specific paths / settings aren't committed; the
+# tracked template is proxy/proxy.example.toml.
+proxy/proxy.toml
+
 # Attestation key material — NEVER commit these
 build/
 test/**/*private*.pem
