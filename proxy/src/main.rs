@@ -5,6 +5,7 @@ use clap::Parser;
 use log::{info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
+use pingora_core::tls::ssl::{SslFiletype, SslVerifyMode};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::RequestHeader;
@@ -13,9 +14,11 @@ use sha2::{Digest, Sha256};
 
 mod attest;
 mod config;
+mod passthrough;
 mod ratelimit;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
+use passthrough::{BypassCred, IpPolicy};
 use ratelimit::RateLimiter;
 
 /// Maximum bytes of a *bound* (hash-verified) request body.
@@ -81,6 +84,10 @@ struct DenBrowserProxy {
     insecure_upstream: bool,
     /// `None` when rate limiting is disabled (no config or `enabled = false`).
     rate_limiter: Option<RateLimiter>,
+    /// Source-IP half of the attestation-bypass policy; `None` when bypass is
+    /// disabled.  The certificate half is enforced in the TLS layer and read
+    /// back here from the connection digest.
+    bypass_ip_policy: Option<IpPolicy>,
 }
 
 impl DenBrowserProxy {
@@ -89,6 +96,7 @@ impl DenBrowserProxy {
         upstream: &str,
         insecure_upstream: bool,
         rate_limiter: Option<RateLimiter>,
+        bypass_ip_policy: Option<IpPolicy>,
     ) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
@@ -100,6 +108,7 @@ impl DenBrowserProxy {
             upstream_port: port,
             insecure_upstream,
             rate_limiter,
+            bypass_ip_policy,
         })
     }
 }
@@ -157,32 +166,48 @@ impl ProxyHttp for DenBrowserProxy {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<bool> {
+        // Origin IP, keyed on by both rate limiting and bypass.  Owned copy so
+        // the immutable borrow of `session` ends before any `respond_error`.
+        let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
+
         // Rate limiting runs *before* attestation so a flood from one IP is shed
         // cheaply here — it never reaches the crypto path or the upstream.  The
         // counter is keyed on the origin IP and the rule glob is matched against
         // `host + path`, so per-URL-pattern limits work even on requests that
         // would later fail attestation.
-        if let Some(limiter) = &self.rate_limiter {
-            // Owned copy so the immutable borrow of `session` ends before the
-            // (mutable) `respond_error` below.
-            let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
-            // Enforce only when we have an IP to key on (always true for a
-            // TCP/TLS client); otherwise fail open rather than throttle blindly.
-            if let Some(ip) = client_ip {
-                let target = {
-                    let req = session.req_header();
-                    let host = header_str(&req.headers, "host")
-                        .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
-                        .unwrap_or_default();
-                    let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-                    format!("{host}{path}")
-                };
-                if !limiter.admit(&ip, &target) {
-                    warn!("rate limited — {ip} {target}");
-                    let _ = session.respond_error(429).await;
-                    return Ok(true);
-                }
+        // Enforce only when we have an IP to key on (always true for a TCP/TLS
+        // client); otherwise fail open rather than throttle blindly.
+        if let Some(limiter) = &self.rate_limiter
+            && let Some(ip) = client_ip
+        {
+            let target = {
+                let req = session.req_header();
+                let host = header_str(&req.headers, "host")
+                    .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
+                    .unwrap_or_default();
+                let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+                format!("{host}{path}")
+            };
+            if !limiter.admit(&ip, &target) {
+                warn!("rate limited — {ip} {target}");
+                let _ = session.respond_error(429).await;
+                return Ok(true);
             }
+        }
+
+        // Attestation bypass: a request is forwarded straight upstream (skipping
+        // all attestation) only if BOTH halves of the policy pass — its source
+        // IP is allowed AND it presented a client cert that the TLS layer already
+        // verified against the configured CA and subject allowlist (recorded in
+        // the connection digest as a `BypassCred`).  Any miss falls through to
+        // normal attestation below, so bypass never blocks a legitimate client.
+        if let Some(policy) = &self.bypass_ip_policy
+            && let Some(ip) = client_ip
+            && policy.allows(&ip)
+            && let Some(cred) = bypass_cred(session)
+        {
+            info!("attestation bypass — ip={ip} cert_subject={}", cred.subject);
+            return Ok(false);
         }
 
         let req = session.req_header();
@@ -302,6 +327,19 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
 }
 
+/// Read the bypass credential the TLS layer attached to this connection's digest
+/// (see `passthrough::CertVerifier`).  `None` means the peer presented no client
+/// certificate, or one that failed CA/subject verification — i.e. not a bypass
+/// candidate.
+fn bypass_cred(session: &Session) -> Option<&BypassCred> {
+    session
+        .digest()?
+        .ssl_digest
+        .as_ref()?
+        .extension
+        .get::<BypassCred>()
+}
+
 fn main() {
     env_logger::init();
     let args = Args::parse();
@@ -328,11 +366,27 @@ fn main() {
         None => info!("rate limiting disabled"),
     }
 
+    // Attestation bypass, if configured, yields the source-IP policy (for the
+    // handler) and the TLS accept callbacks that verify presented client certs.
+    let bypass = passthrough::from_config(&config.proxy_bypass)
+        .unwrap_or_else(|e| panic!("invalid proxy_bypass config: {e}"));
+    let (bypass_ip_policy, bypass_tls) = match bypass {
+        Some((policy, tls_callbacks)) => {
+            info!("attestation bypass enabled");
+            (Some(policy), Some(tls_callbacks))
+        }
+        None => {
+            info!("attestation bypass disabled");
+            (None, None)
+        }
+    };
+
     let proxy = DenBrowserProxy::new(
         verifier,
         &args.upstream,
         args.insecure_upstream,
         rate_limiter,
+        bypass_ip_policy,
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
@@ -345,9 +399,30 @@ fn main() {
     // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
-    let tls = TlsSettings::intermediate(&args.cert, &args.tls_key)
-        .unwrap_or_else(|e| panic!("TLS cert/key load failed ({}, {}): {e}",
-                                   args.cert, args.tls_key));
+    let tls = match bypass_tls {
+        // Bypass on: build the acceptor with our TLS callbacks (which verify
+        // presented client certs post-handshake) and configure the same server
+        // cert/key.  We *request* a client cert with a soft verify callback that
+        // never fails the handshake — clients with no cert or an untrusted cert
+        // still connect and are simply attested as normal.
+        Some(tls_callbacks) => {
+            let mut tls = TlsSettings::with_callbacks(tls_callbacks)
+                .unwrap_or_else(|e| panic!("TLS callback setup failed: {e}"));
+            tls.set_certificate_chain_file(&args.cert)
+                .unwrap_or_else(|e| panic!("TLS cert load failed ({}): {e}", args.cert));
+            tls.set_private_key_file(&args.tls_key, SslFiletype::PEM)
+                .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", args.tls_key));
+            tls.set_verify_callback(SslVerifyMode::PEER, |_verified, _ctx| true);
+            tls
+        }
+        // Bypass off: the original listener, unchanged — no client cert requested.
+        None => TlsSettings::intermediate(&args.cert, &args.tls_key).unwrap_or_else(|e| {
+            panic!(
+                "TLS cert/key load failed ({}, {}): {e}",
+                args.cert, args.tls_key
+            )
+        }),
+    };
     svc.add_tls_with_settings(&args.listen, None, tls);
 
     info!("listening TLS on {} → {}", args.listen, args.upstream);

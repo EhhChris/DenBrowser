@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "denbrowser-proxy"
-version = "0.3.1"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -544,6 +544,7 @@ dependencies = [
  "env_logger",
  "globset",
  "http",
+ "ipnet",
  "log",
  "p256",
  "pingora-core",
@@ -1079,6 +1080,12 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "is_terminal_polyfill"

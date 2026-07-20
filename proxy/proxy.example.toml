@@ -35,3 +35,34 @@ max_requests = 5
 pattern      = "example.com/news/*"
 window_secs  = 1
 max_requests = 50
+
+# ---------------------------------------------------------------------------
+
+[proxy_bypass]
+# Attestation bypass: let specific, strongly authenticated callers skip
+# attestation and be forwarded straight upstream.  Intended for trusted
+# infrastructure (health checks, internal automation) that can't run the
+# DenBrowser attestation client.
+#
+# DEFAULT-DENY: with enabled = false, no request is ever bypassed and the TLS
+# listener does not even request a client certificate.  When enabled, a request
+# is bypassed ONLY if it satisfies ALL of the conditions below; any miss (wrong
+# IP, no cert, untrusted cert, or unlisted subject) falls through to normal
+# attestation, so a misconfiguration here can never block a legitimate client.
+enabled = false
+
+# Source IP ranges (CIDR) permitted to bypass. A request from any other address
+# is attested normally. Required (non-empty) when enabled.
+allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
+
+# PEM bundle of CA certificate(s). A bypass candidate must present a client
+# certificate (mTLS) that chains to one of these. The listener requests a client
+# cert with a *soft* verify — clients that present none, or an untrusted one, are
+# never disconnected, they just don't qualify for bypass. Required when enabled.
+client_ca = "/etc/denbrowser/bypass-ca.pem"
+
+# Subject allowlist. After a client cert validates against client_ca, its Common
+# Name or one of its SubjectAltName DNS entries must exactly match an entry here.
+# Lets one CA issue many certs while only these identities may bypass. Required
+# (non-empty) when enabled.
+allowed_subjects = ["health-checker", "ops.internal"]

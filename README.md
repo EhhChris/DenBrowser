@@ -88,7 +88,8 @@ DenBrowser/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
 │       ├── attest.rs           # ECIES verification + replay cache
 │       ├── config.rs           # Operational TOML config loader
-│       └── ratelimit.rs        # Per-origin-IP request rate limiting
+│       ├── ratelimit.rs        # Per-origin-IP request rate limiting
+│       └── passthrough.rs      # Attestation bypass (mTLS + IP allowlist)
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
     ├── apply-patches.sh        # Apply patches with dry-run validation
@@ -225,6 +226,37 @@ touched, so floods are shed cheaply.
 
   Note: when clients share an egress IP (NAT), the per-IP counters are shared —
   size caps for the deployment's real per-IP concurrency.
+
+**Attestation bypass** (`[proxy_bypass]`) is an opt-in escape hatch that lets
+trusted infrastructure (health checks, internal automation) that can't run the
+DenBrowser attestation client reach the upstream.  It is **default-deny** and
+requires *two* independent proofs before a request skips attestation:
+
+- `enabled` — master switch.  When off, no request is bypassed and the listener
+  does not even request a client certificate (behaviour is identical to a build
+  without the feature).
+- `allowed_ip_ranges` — CIDR ranges; the client's source IP must be inside one.
+- `client_ca` — a PEM CA bundle; the caller must present a client certificate
+  (mTLS) that chains to it.  The listener requests the cert with a **soft**
+  verify, so clients with no cert or an untrusted cert are never disconnected —
+  they simply don't qualify and are attested normally.
+- `allowed_subjects` — after the cert validates against `client_ca`, its CN or a
+  SAN DNS entry must be on this allowlist (so one CA can issue many certs while
+  only named identities may bypass).
+
+  A request is forwarded straight upstream (skipping attestation) only when the
+  source IP **and** the client-cert checks all pass; any failure falls through to
+  normal attestation, so a misconfigured bypass can never block a legitimate
+  attested client.  A bad config (empty ranges/allowlist, unreadable CA, invalid
+  CIDR) aborts startup.
+
+  ```toml
+  [proxy_bypass]
+  enabled = true
+  allowed_ip_ranges = ["10.0.0.0/8"]
+  client_ca = "/etc/denbrowser/bypass-ca.pem"
+  allowed_subjects = ["health-checker"]
+  ```
 
 ---
 
