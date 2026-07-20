@@ -10,6 +10,8 @@ use p256::ecdh::diffie_hellman;
 use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
+use crate::config::AttestationConfig;
+
 const MAX_TS_DRIFT_SECS: i64 = 30;
 const NONCE_TTL: Duration = Duration::from_secs(90);
 const NONCE_LEN: usize = 16;
@@ -93,6 +95,33 @@ impl std::fmt::Display for AttestError {
 }
 
 impl Verifier {
+    /// Load the attestation private key named by `[attestation] private_key`.
+    ///
+    /// Every failure here aborts startup: a proxy that cannot decrypt tokens
+    /// would reject every attested request, so coming up at all would be worse
+    /// than not starting.  Mirrors [`crate::mtls::Mtls::from_config`], except
+    /// that this key is mandatory rather than gated on an `enabled` switch.
+    pub fn from_config(cfg: &AttestationConfig) -> anyhow::Result<Self> {
+        if cfg.private_key.is_empty() {
+            anyhow::bail!(
+                "attestation.private_key is not set — point it at this proxy's \
+                 EC P-256 private key (scripts/gen-attest-key.sh --name <proxy>)"
+            );
+        }
+        let pem = std::fs::read_to_string(&cfg.private_key).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot read attestation private_key {}: {e}",
+                cfg.private_key
+            )
+        })?;
+        Self::from_pem(&pem).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot parse attestation private_key {}: {e}",
+                cfg.private_key
+            )
+        })
+    }
+
     pub fn from_pem(pem: &str) -> anyhow::Result<Self> {
         let key = SecretKey::from_sec1_pem(pem)?;
         Ok(Self {
@@ -251,6 +280,39 @@ mod tests {
     use super::*;
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use rand_core::{OsRng, RngCore};
+
+    #[test]
+    fn from_config_requires_private_key() {
+        let err = Verifier::from_config(&AttestationConfig::default())
+            .err()
+            .expect("empty private_key must be rejected");
+        assert!(err.to_string().contains("private_key is not set"));
+    }
+
+    #[test]
+    fn from_config_rejects_missing_key_file() {
+        let cfg = AttestationConfig {
+            private_key: "/nonexistent/partner-a-private.pem".into(),
+        };
+        let err = Verifier::from_config(&cfg)
+            .err()
+            .expect("missing key file must be rejected");
+        assert!(err.to_string().contains("cannot read attestation private_key"));
+    }
+
+    #[test]
+    fn from_config_rejects_unparseable_key_file() {
+        let path = std::env::temp_dir().join("denbrowser-not-a-key.pem");
+        std::fs::write(&path, b"-----BEGIN EC PRIVATE KEY-----\nnope\n").unwrap();
+        let cfg = AttestationConfig {
+            private_key: path.to_string_lossy().into_owned(),
+        };
+        let err = Verifier::from_config(&cfg)
+            .err()
+            .expect("unparseable key file must be rejected");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.to_string().contains("cannot parse attestation private_key"));
+    }
 
     fn sha256_hex(data: &[u8]) -> String {
         let mut h = Sha256::new();

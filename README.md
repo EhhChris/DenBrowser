@@ -84,7 +84,7 @@ DenBrowser/
 │   └── NNN-*.patch             # See "Patches" table below
 ├── proxy/
 │   ├── Cargo.toml
-│   ├── proxy.example.toml      # Example operational config (rate limiting, …)
+│   ├── proxy.example.toml      # Example operational config (attestation key, rate limiting, …)
 │   └── src/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
 │       ├── attest.rs           # ECIES verification + replay cache
@@ -246,10 +246,9 @@ Setting up one partner end-to-end:
 cd proxy && cargo run --release -- \
   --listen   0.0.0.0:8443 \
   --upstream app-backend.partner-a.internal:443 \
-  --key      ../build/partner-a-private.pem \
   --cert     ../build/partner-a-tls.crt \
   --tls-key  ../build/partner-a-tls.key \
-  --config   partner-a.toml
+  --config   partner-a.toml   # its [attestation] private_key names the key
 ```
 
 Each proxy instance is a separate process with its own listener, key, cert, and
@@ -269,6 +268,23 @@ mTLS-disabled) settings.  Copy the annotated `proxy/proxy.example.toml` to
 `proxy/proxy.toml` and edit it.  This config is separate from the compile-time
 attestation/TLS key flags, and from `config/site-config.json` (which feeds the
 browser build), and is the place to grow as more runtime options are added.
+
+**Attestation key** (`[attestation]`) is the one **required** section — it names
+this proxy's EC P-256 attestation private key, the private half of the public key
+baked into the browser build for it:
+
+```toml
+[attestation]
+private_key = "/etc/denbrowser/partner-a-private.pem"
+```
+
+Startup **aborts** if it is unset, unreadable, or not a parseable EC key, rather
+than bringing up a proxy that would reject every attested request.  Relative
+paths resolve against the proxy's working directory, as `client_ca` does.  There
+is no CLI flag and no default path: each partner's proxy process names its own
+key in its own config file, so one partner can never decrypt another's tokens,
+and a deployment that forgets the key fails loudly instead of silently picking
+up whatever happens to sit at a default location.
 
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any

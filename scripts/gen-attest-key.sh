@@ -129,8 +129,14 @@ cat <<EOF
        with:  ./scripts/gen-proxy-tls.sh --name $NAME
 
     2. Rebuild DenBrowser — build.sh regenerates the compiled-in proxy table.
-    3. Copy $NAME-private.pem to the "$NAME" proxy and reload it
-       (proxy --key, or DENBROWSER_KEY).
+    3. Copy $NAME-private.pem to the "$NAME" proxy, point that proxy's config
+       file at it, and reload:
+
+         # proxy.toml for the "$NAME" proxy
+         [attestation]
+         private_key = "/etc/denbrowser/$NAME-private.pem"
+
+       The proxy exits at startup if that key is missing or unparseable.
     4. Distribute the new DenBrowser build.
     5. Old builds are now revoked for this proxy — the new private key means
        their tokens cannot be decrypted.

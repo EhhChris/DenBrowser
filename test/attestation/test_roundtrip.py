@@ -14,7 +14,9 @@ Usage (from repo root):
     docker compose -f test/target-server/compose.yml up -d
     # The proxy requires a config file (defaults to ./proxy.toml). If you don't
     # have one, start from proxy/proxy.example.toml. Leave [mtls] disabled for
-    # plain attestation testing.
+    # plain attestation testing.  [attestation] private_key is REQUIRED and must
+    # point at build/proxy-private.pem (the example config already does); the
+    # proxy exits at startup without it.
     # Proxy dials its upstream over TLS; use the target's TLS port (8443).
     # The target's cert is self-signed, so run with --insecure-upstream.
     (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run -- --insecure-upstream)
