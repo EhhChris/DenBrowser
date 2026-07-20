@@ -89,7 +89,8 @@ DenBrowser/
 │       ├── attest.rs           # ECIES verification + replay cache
 │       ├── config.rs           # Operational TOML config loader
 │       ├── ratelimit.rs        # Per-origin-IP request rate limiting
-│       └── passthrough.rs      # Attestation bypass (mTLS + IP allowlist)
+│       ├── mtls.rs             # Baseline mutual-TLS client authentication
+│       └── passthrough.rs      # Attestation bypass (IP + cert-subject allowlist)
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
     ├── apply-patches.sh        # Apply patches with dry-run validation
@@ -227,34 +228,54 @@ touched, so floods are shed cheaply.
   Note: when clients share an egress IP (NAT), the per-IP counters are shared —
   size caps for the deployment's real per-IP concurrency.
 
+**Baseline mTLS** (`[mtls]`) requires every client to authenticate with a
+certificate at the TLS handshake — a third orthogonal layer alongside the
+existing two, replacing neither:
+
+- **mTLS** authenticates the *user/device* to the proxy (client → proxy).
+- **TLS SPKI pinning** (patch 012) authenticates the *proxy* to the browser
+  (proxy → client); the browser pins the proxy's cert, defeating MITM even by a
+  validly-CA-issued cert. mTLS is the opposite direction and does not replace it.
+- **Attestation** (ECIES headers) proves the request came from a genuine
+  DenBrowser build and binds it against replay/tampering — properties a client
+  cert doesn't provide. mTLS proves *who* holds a key but not *what software*
+  produced the request, so the two are complementary.
+
+  When `[mtls] enabled = true`, the listener is configured with
+  `SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT` against `client_ca`, so a
+  client with no certificate or one that doesn't chain to the CA is **rejected at
+  the handshake** and never reaches the request path.  Disabled by default (no
+  client certificate requested; behaviour identical to before).  A bad config
+  (missing/unreadable/empty CA bundle) aborts startup.
+
+  ```toml
+  [mtls]
+  enabled = true
+  client_ca = "/etc/denbrowser/user-ca.pem"
+  ```
+
 **Attestation bypass** (`[proxy_bypass]`) is an opt-in escape hatch that lets
 trusted infrastructure (health checks, internal automation) that can't run the
-DenBrowser attestation client reach the upstream.  It is **default-deny** and
-requires *two* independent proofs before a request skips attestation:
+DenBrowser attestation client reach the upstream.  It **builds on baseline mTLS**
+(and requires `[mtls]` enabled): the client certificate is already verified at
+the handshake, so bypass adds only two conditions on top of that verified
+identity, and is **default-deny**:
 
-- `enabled` — master switch.  When off, no request is bypassed and the listener
-  does not even request a client certificate (behaviour is identical to a build
-  without the feature).
+- `enabled` — master switch. When off, every request is attested.
 - `allowed_ip_ranges` — CIDR ranges; the client's source IP must be inside one.
-- `client_ca` — a PEM CA bundle; the caller must present a client certificate
-  (mTLS) that chains to it.  The listener requests the cert with a **soft**
-  verify, so clients with no cert or an untrusted cert are never disconnected —
-  they simply don't qualify and are attested normally.
-- `allowed_subjects` — after the cert validates against `client_ca`, its CN or a
-  SAN DNS entry must be on this allowlist (so one CA can issue many certs while
-  only named identities may bypass).
+- `allowed_subjects` — the mTLS-verified cert's CN or a SAN DNS entry must be on
+  this allowlist (so one CA can issue many user certs while only named identities
+  may bypass).
 
   A request is forwarded straight upstream (skipping attestation) only when the
-  source IP **and** the client-cert checks all pass; any failure falls through to
-  normal attestation, so a misconfigured bypass can never block a legitimate
-  attested client.  A bad config (empty ranges/allowlist, unreadable CA, invalid
-  CIDR) aborts startup.
+  source IP **and** the cert-subject checks both pass; any miss falls through to
+  normal attestation.  A bad config (bypass enabled without mTLS, empty
+  ranges/allowlist, invalid CIDR) aborts startup.
 
   ```toml
   [proxy_bypass]
   enabled = true
   allowed_ip_ranges = ["10.0.0.0/8"]
-  client_ca = "/etc/denbrowser/bypass-ca.pem"
   allowed_subjects = ["health-checker"]
   ```
 

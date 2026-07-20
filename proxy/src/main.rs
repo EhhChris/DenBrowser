@@ -14,11 +14,13 @@ use sha2::{Digest, Sha256};
 
 mod attest;
 mod config;
+mod mtls;
 mod passthrough;
 mod ratelimit;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
-use passthrough::{BypassCred, IpPolicy};
+use mtls::ClientCert;
+use passthrough::BypassPolicy;
 use ratelimit::RateLimiter;
 
 /// Maximum bytes of a *bound* (hash-verified) request body.
@@ -84,10 +86,10 @@ struct DenBrowserProxy {
     insecure_upstream: bool,
     /// `None` when rate limiting is disabled (no config or `enabled = false`).
     rate_limiter: Option<RateLimiter>,
-    /// Source-IP half of the attestation-bypass policy; `None` when bypass is
-    /// disabled.  The certificate half is enforced in the TLS layer and read
-    /// back here from the connection digest.
-    bypass_ip_policy: Option<IpPolicy>,
+    /// Attestation-bypass policy (source-IP ranges + subject allowlist); `None`
+    /// when bypass is disabled.  The client certificate it matches against is
+    /// verified by baseline mTLS at the TLS layer and read here from the digest.
+    bypass: Option<BypassPolicy>,
 }
 
 impl DenBrowserProxy {
@@ -96,7 +98,7 @@ impl DenBrowserProxy {
         upstream: &str,
         insecure_upstream: bool,
         rate_limiter: Option<RateLimiter>,
-        bypass_ip_policy: Option<IpPolicy>,
+        bypass: Option<BypassPolicy>,
     ) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
@@ -108,7 +110,7 @@ impl DenBrowserProxy {
             upstream_port: port,
             insecure_upstream,
             rate_limiter,
-            bypass_ip_policy,
+            bypass,
         })
     }
 }
@@ -196,17 +198,17 @@ impl ProxyHttp for DenBrowserProxy {
         }
 
         // Attestation bypass: a request is forwarded straight upstream (skipping
-        // all attestation) only if BOTH halves of the policy pass — its source
-        // IP is allowed AND it presented a client cert that the TLS layer already
-        // verified against the configured CA and subject allowlist (recorded in
-        // the connection digest as a `BypassCred`).  Any miss falls through to
-        // normal attestation below, so bypass never blocks a legitimate client.
-        if let Some(policy) = &self.bypass_ip_policy
+        // all attestation) only if BOTH halves of the policy pass — its source IP
+        // is in range AND the mTLS-verified client certificate's subject is on the
+        // allowlist (the cert itself was already verified against the mTLS CA at
+        // the handshake and recorded in the digest as a `ClientCert`).  Any miss
+        // falls through to normal attestation, so bypass never weakens the path.
+        if let Some(policy) = &self.bypass
             && let Some(ip) = client_ip
-            && policy.allows(&ip)
-            && let Some(cred) = bypass_cred(session)
+            && let Some(cert) = client_cert(session)
+            && let Some(subject) = policy.authorizes(&ip, cert)
         {
-            info!("attestation bypass — ip={ip} cert_subject={}", cred.subject);
+            info!("attestation bypass — ip={ip} cert_subject={subject}");
             return Ok(false);
         }
 
@@ -327,17 +329,17 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
 }
 
-/// Read the bypass credential the TLS layer attached to this connection's digest
-/// (see `passthrough::CertVerifier`).  `None` means the peer presented no client
-/// certificate, or one that failed CA/subject verification — i.e. not a bypass
-/// candidate.
-fn bypass_cred(session: &Session) -> Option<&BypassCred> {
+/// Read the mTLS client identity the TLS layer recorded on this connection's
+/// digest (see `mtls::Recorder`).  `None` means mTLS is disabled or the peer
+/// presented no certificate — with baseline mTLS enforced at the handshake, a
+/// present value is an already-verified identity.
+fn client_cert(session: &Session) -> Option<&ClientCert> {
     session
         .digest()?
         .ssl_digest
         .as_ref()?
         .extension
-        .get::<BypassCred>()
+        .get::<ClientCert>()
 }
 
 fn main() {
@@ -366,27 +368,30 @@ fn main() {
         None => info!("rate limiting disabled"),
     }
 
-    // Attestation bypass, if configured, yields the source-IP policy (for the
-    // handler) and the TLS accept callbacks that verify presented client certs.
-    let bypass = passthrough::from_config(&config.proxy_bypass)
+    // Baseline mTLS: when enabled, every client must present a certificate
+    // chaining to the configured CA (enforced at the TLS handshake below).
+    let mtls = mtls::Mtls::from_config(&config.mtls)
+        .unwrap_or_else(|e| panic!("invalid mtls config: {e}"));
+    match &mtls {
+        Some(_) => info!("mTLS enabled — client certificates required"),
+        None => info!("mTLS disabled"),
+    }
+
+    // Attestation bypass builds on baseline mTLS and matches the mTLS-verified
+    // identity against a subject allowlist plus a source-IP range.
+    let bypass = passthrough::from_config(&config.proxy_bypass, mtls.is_some())
         .unwrap_or_else(|e| panic!("invalid proxy_bypass config: {e}"));
-    let (bypass_ip_policy, bypass_tls) = match bypass {
-        Some((policy, tls_callbacks)) => {
-            info!("attestation bypass enabled");
-            (Some(policy), Some(tls_callbacks))
-        }
-        None => {
-            info!("attestation bypass disabled");
-            (None, None)
-        }
-    };
+    match &bypass {
+        Some(_) => info!("attestation bypass enabled"),
+        None => info!("attestation bypass disabled"),
+    }
 
     let proxy = DenBrowserProxy::new(
         verifier,
         &args.upstream,
         args.insecure_upstream,
         rate_limiter,
-        bypass_ip_policy,
+        bypass,
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
@@ -399,23 +404,24 @@ fn main() {
     // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
-    let tls = match bypass_tls {
-        // Bypass on: build the acceptor with our TLS callbacks (which verify
-        // presented client certs post-handshake) and configure the same server
-        // cert/key.  We *request* a client cert with a soft verify callback that
-        // never fails the handshake — clients with no cert or an untrusted cert
-        // still connect and are simply attested as normal.
-        Some(tls_callbacks) => {
-            let mut tls = TlsSettings::with_callbacks(tls_callbacks)
+    let tls = match &mtls {
+        // mTLS on: build the acceptor with the identity-recording callback and
+        // hard-require a client cert — request one AND fail the handshake if it
+        // is absent or does not chain to the configured CA.  A client without a
+        // valid certificate never reaches the request path.
+        Some(m) => {
+            let mut tls = TlsSettings::with_callbacks(m.tls_callbacks())
                 .unwrap_or_else(|e| panic!("TLS callback setup failed: {e}"));
             tls.set_certificate_chain_file(&args.cert)
                 .unwrap_or_else(|e| panic!("TLS cert load failed ({}): {e}", args.cert));
             tls.set_private_key_file(&args.tls_key, SslFiletype::PEM)
                 .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", args.tls_key));
-            tls.set_verify_callback(SslVerifyMode::PEER, |_verified, _ctx| true);
+            tls.set_ca_file(m.ca_path())
+                .unwrap_or_else(|e| panic!("mTLS CA load failed ({}): {e}", m.ca_path()));
+            tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
             tls
         }
-        // Bypass off: the original listener, unchanged — no client cert requested.
+        // mTLS off: the original listener, unchanged — no client cert requested.
         None => TlsSettings::intermediate(&args.cert, &args.tls_key).unwrap_or_else(|e| {
             panic!(
                 "TLS cert/key load failed ({}, {}): {e}",

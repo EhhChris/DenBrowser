@@ -21,6 +21,9 @@ pub struct Config {
     pub rate_limiting: RateLimitConfig,
 
     #[serde(default)]
+    pub mtls: MtlsConfig,
+
+    #[serde(default)]
     pub proxy_bypass: ProxyBypassConfig,
 }
 
@@ -67,24 +70,47 @@ pub struct RuleConfig {
     pub max_requests: isize,
 }
 
+/// `[mtls]` — baseline mutual-TLS client authentication for the listener.
+///
+/// When enabled, **every** connection (attestation clients and bypass clients
+/// alike) must present a client certificate that chains to `client_ca`, verified
+/// during the TLS handshake; a client with no certificate or an untrusted one is
+/// rejected at the handshake and never reaches the request path.  This sits *in
+/// front of* attestation as an independent layer: it authenticates the user/
+/// device, while attestation still proves the request came from a genuine
+/// DenBrowser build and TLS pinning still authenticates the proxy to the browser.
+///
+/// Disabled by default, so a proxy with no config (or `enabled = false`) requests
+/// no client certificate and behaves exactly as before.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MtlsConfig {
+    /// Master on/off switch for baseline mTLS.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to a PEM bundle of CA certificate(s) that presented client
+    /// certificates must chain to.  Required when `enabled`.
+    #[serde(default)]
+    pub client_ca: String,
+}
+
 /// `[proxy_bypass]` — an *escape hatch* that lets specific, strongly
 /// authenticated callers skip attestation entirely and be forwarded straight
 /// upstream.  It exists for trusted infrastructure (health checks, internal
 /// automation) that cannot run the DenBrowser attestation client.
 ///
-/// Bypass is **default-deny**: `enabled = false` (the default) means every
-/// request goes through normal attestation.  When enabled, a request is
-/// bypassed only if it satisfies *all* configured conditions — its source IP is
-/// in `allowed_ip_ranges` *and* it presented a client certificate that both
-/// chains to `client_ca` and whose subject is in `allowed_subjects`.  Any check
-/// that fails (or a missing/invalid cert) simply falls through to attestation,
-/// so a misconfigured bypass never blocks a legitimate attested client.
+/// Bypass **builds on baseline [`MtlsConfig`]** and requires it to be enabled:
+/// the client certificate is already verified against the mTLS CA at the
+/// handshake, so bypass adds only two further conditions.  It is **default-deny**
+/// — `enabled = false` (the default) means every request is attested.  When
+/// enabled, a request is bypassed only if *both* hold: its source IP is in
+/// `allowed_ip_ranges` *and* the mTLS-verified certificate's subject is in
+/// `allowed_subjects`.  Any miss falls through to normal attestation.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyBypassConfig {
-    /// Master on/off switch.  When false, no request is ever bypassed and the
-    /// TLS listener behaves exactly as it does without this feature (no client
-    /// certificate is requested).
+    /// Master on/off switch.  When false, no request is ever bypassed.
     #[serde(default)]
     pub enabled: bool,
 
@@ -94,16 +120,10 @@ pub struct ProxyBypassConfig {
     #[serde(default)]
     pub allowed_ip_ranges: Vec<String>,
 
-    /// Path to a PEM bundle of CA certificate(s).  A bypass candidate must
-    /// present a client certificate that chains to one of these.  Required when
-    /// `enabled`.
-    #[serde(default)]
-    pub client_ca: String,
-
-    /// Subject allowlist.  After a client cert validates against `client_ca`,
-    /// its Common Name or one of its SubjectAltName DNS entries must exactly
-    /// match an entry here.  This lets a single CA issue many certs while only
-    /// specific identities may bypass.  Required (non-empty) when `enabled`.
+    /// Subject allowlist matched against the mTLS-verified client certificate's
+    /// Common Name or one of its SubjectAltName DNS entries.  This lets a single
+    /// CA issue many user certs while only specific identities may bypass.
+    /// Required (non-empty) when `enabled`.
     #[serde(default)]
     pub allowed_subjects: Vec<String>,
 }
@@ -176,11 +196,29 @@ mod tests {
     }
 
     #[test]
+    fn mtls_defaults_off() {
+        let c = Config::default();
+        assert!(!c.mtls.enabled);
+        assert!(c.mtls.client_ca.is_empty());
+    }
+
+    #[test]
+    fn parses_mtls() {
+        let toml = r#"
+            [mtls]
+            enabled = true
+            client_ca = "/etc/denbrowser/user-ca.pem"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.mtls.enabled);
+        assert_eq!(c.mtls.client_ca, "/etc/denbrowser/user-ca.pem");
+    }
+
+    #[test]
     fn proxy_bypass_defaults_off() {
         let c = Config::default();
         assert!(!c.proxy_bypass.enabled);
         assert!(c.proxy_bypass.allowed_ip_ranges.is_empty());
-        assert!(c.proxy_bypass.client_ca.is_empty());
         assert!(c.proxy_bypass.allowed_subjects.is_empty());
     }
 
@@ -190,13 +228,11 @@ mod tests {
             [proxy_bypass]
             enabled = true
             allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
-            client_ca = "/etc/denbrowser/bypass-ca.pem"
             allowed_subjects = ["health-checker", "ops.internal"]
         "#;
         let c: Config = toml::from_str(toml).unwrap();
         assert!(c.proxy_bypass.enabled);
         assert_eq!(c.proxy_bypass.allowed_ip_ranges.len(), 2);
-        assert_eq!(c.proxy_bypass.client_ca, "/etc/denbrowser/bypass-ca.pem");
         assert_eq!(c.proxy_bypass.allowed_subjects, ["health-checker", "ops.internal"]);
     }
 
