@@ -167,8 +167,9 @@ compile-time switches and the baked-in bookmarks:
 
 - `clipboard_sites` — hosts that may use the in-browser internal clipboard
   (patch 003).  Empty list = no in-browser copy/paste anywhere.
-- `site_whitelist` — if non-empty, only these hosts (and subdomains) are
-  navigable; everything else is blocked with a DenBrowser error page
+- `site_whitelist` — if non-empty, only these hosts (and subdomains) may be
+  loaded over HTTP(S); everything else is blocked, with top-level navigation
+  showing a DenBrowser error page
   (patch 014).
 - `site_blacklist` — used only when whitelist is empty.
 - `proxies` — the attestation proxies this build talks to, one entry per
@@ -394,7 +395,7 @@ for navigation.
 | 011 | `disable-extensions` | Filter addon install locations to `SCOPE_APPLICATION` only; throw on any `AddonInstall.install()` call regardless of state. |
 | 012 | `pin-proxy-tls` | Pin each attestation proxy's TLS SPKI (sha256) into the build — the pin column of patch 006's proxy table, so every partner proxy is pinned to its own cert; abort the handshake in `AuthCertificateHook` before any application data flows if the leaf cert doesn't match. |
 | 013 | `disable-sync` | Hardcode `WeaveService.enabled` and `FXA_ENABLED` to `false`; remove the Sync preferences pane and Synced-Tabs sidebar entries from the UI. |
-| 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad`; localize the "blocked page" message. |
+| 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad` for the navigation error page and `nsHttpChannel::AsyncOpen` for all HTTP(S) requests; localize the "blocked page" message. |
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
 | 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |

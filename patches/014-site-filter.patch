@@ -4,7 +4,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 014-site-filter
 #
-# PURPOSE: Compile-time site whitelist and blacklist for HTTP/HTTPS navigation.
+# PURPOSE: Compile-time site whitelist and blacklist for all HTTP/HTTPS loads.
 #
 # THREAT MODEL ADDRESSED:
 #
@@ -26,8 +26,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #       It does NOT match notexample.com.
 #
 #   - WHITELIST MODE (site_whitelist non-empty):
-#       Only listed hosts (and their subdomains) may be navigated to.
-#       All other http/https navigations return NS_ERROR_BLOCKED_BY_POLICY.
+#       Only listed hosts (and their subdomains) may be loaded.
+#       All other http/https requests return NS_ERROR_BLOCKED_BY_POLICY.
 #
 #   - BLACKLIST MODE (site_whitelist empty, site_blacklist non-empty):
 #       Listed hosts are blocked; all other http/https navigations proceed.
@@ -39,11 +39,16 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   Add entries to config/site-config.json and rebuild.  build.sh injects
 #   the arrays between the sentinel markers before compiling.
 #
-# HOOK POINT:
+# HOOK POINTS:
 #
 #   nsDocShell::InternalLoad (docshell/base/nsDocShell.cpp)
-#   Called for every top-level navigation.  Checked after the javascript-URI
-#   security check and before any load processing begins.
+#   Preserves the immediate, user-visible error page for top-level navigation.
+#
+#   nsHttpChannel::AsyncOpen (netwerk/protocol/http/nsHttpChannel.cpp)
+#   Authoritative enforcement for every HTTP/HTTPS channel before upload
+#   normalization, cache lookup, service-worker interception, or network I/O.
+#   This covers fetch/XHR, subresources, beacons, WebSocket handshakes,
+#   redirects, and other callers that never pass through docshell.
 #
 # USER-VISIBLE BLOCK MESSAGE:
 #
@@ -61,66 +66,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   your administrator for access."
 
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
-index 5bcbbfb..2974706 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
-@@ -9277,6 +9277,55 @@ uint32_t nsDocShell::GetLoadTypeForFormSubmission(
-              : LOAD_LINK;
- }
+@@ -5,6 +5,8 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  
-+// ── DenBrowser site filter ────────────────────────────────────────────────────
-+// Compile-time whitelist/blacklist. build.sh injects entries from
-+// site-config.json between the sentinel markers at build time.
-+//
-+// Whitelist takes priority: if any whitelist entries are present, only matching
-+// hosts are allowed for http/https.  Blacklist is used only when whitelist is
-+// empty.  Both empty = no filtering.
-+// ── DEN: SITE_WHITELIST ──
-+static const char* const kDenSiteWhitelist[] = { nullptr };
-+// ── DEN END: SITE_WHITELIST ──
-+// ── DEN: SITE_BLACKLIST ──
-+static const char* const kDenSiteBlacklist[] = { nullptr };
-+// ── DEN END: SITE_BLACKLIST ──
+ #include "nsDocShell.h"
 +
-+static bool DenSiteHostMatch(const nsACString& aHost, const char* aPat) {
-+  nsDependentCString pat(aPat);
-+  if (aHost.Equals(pat)) return true;
-+  // Subdomain match: host must end with "." + pattern.
-+  if (aHost.Length() > pat.Length() + 1) {
-+    return aHost.CharAt(aHost.Length() - pat.Length() - 1) == '.' &&
-+           Substring(aHost, aHost.Length() - pat.Length()).Equals(pat);
-+  }
-+  return false;
-+}
-+
-+static bool DenSiteNavAllowed(nsIURI* aURI) {
-+  if (!aURI) return true;
-+  nsAutoCString scheme;
-+  aURI->GetScheme(scheme);
-+  // Only filter http/https — browser-internal URIs always pass.
-+  if (!scheme.EqualsLiteral("http") && !scheme.EqualsLiteral("https")) {
-+    return true;
-+  }
-+  nsAutoCString host;
-+  aURI->GetHost(host);
-+  // Whitelist: if any entries exist, only matching hosts are allowed.
-+  if (kDenSiteWhitelist[0]) {
-+    for (int i = 0; kDenSiteWhitelist[i]; ++i) {
-+      if (DenSiteHostMatch(host, kDenSiteWhitelist[i])) return true;
-+    }
-+    return false;
-+  }
-+  // Blacklist: block matching hosts.
-+  for (int i = 0; kDenSiteBlacklist[i]; ++i) {
-+    if (DenSiteHostMatch(host, kDenSiteBlacklist[i])) return false;
-+  }
-+  return true;
-+}
-+
- // InternalLoad performs several of the steps from
- // https://html.spec.whatwg.org/#navigate.
- nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
-@@ -9330,6 +9379,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
++#include "DenBrowserSiteFilter.h"
+ 
+ #include <algorithm>
+ #include "mozilla/dom/HTMLFormElement.h"
+@@ -9330,6 +9332,21 @@
  
    MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
  
@@ -130,7 +87,7 @@ index 5bcbbfb..2974706 100644
 +  // because InternalLoad returns BEFORE opening a channel — without an explicit
 +  // call, no channel reaches OnStop and the error page never renders; the tab
 +  // just sits on the previous content.
-+  if (!DenSiteNavAllowed(aLoadState->URI())) {
++  if (!denbrowser::SiteAllowed(aLoadState->URI())) {
 +    MOZ_LOG(gDocShellLeakLog, LogLevel::Warning,
 +            ("DOCSHELL %p blocked navigation to %s by DenBrowser site filter\n",
 +             this, aLoadState->URI()->GetSpecOrDefault().get()));
@@ -142,11 +99,118 @@ index 5bcbbfb..2974706 100644
    // If we don't have a target, we're loading into ourselves, and our load
    // delegate may want to intercept that load.
    SameDocumentNavigationState sameDocumentNavigationState;
+diff --git a/netwerk/base/DenBrowserSiteFilter.h b/netwerk/base/DenBrowserSiteFilter.h
+new file mode 100644
+--- /dev/null
++++ b/netwerk/base/DenBrowserSiteFilter.h
+@@ -0,0 +1,64 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#ifndef DenBrowserSiteFilter_h__
++#define DenBrowserSiteFilter_h__
++
++#include <cstddef>
++
++#include "nsIURI.h"
++#include "nsString.h"
++
++namespace denbrowser {
++
++// Compile-time whitelist/blacklist. build.sh injects entries from
++// site-config.json between the sentinel markers at build time.
++//
++// Whitelist takes priority. With no whitelist, blacklist entries are denied.
++// Both empty means no filtering.
++// ── DEN: SITE_WHITELIST ──
++static const char* const kDenSiteWhitelist[] = {nullptr};
++// ── DEN END: SITE_WHITELIST ──
++// ── DEN: SITE_BLACKLIST ──
++static const char* const kDenSiteBlacklist[] = {nullptr};
++// ── DEN END: SITE_BLACKLIST ──
++
++inline bool SiteHostMatches(const nsACString& aHost, const char* aPattern) {
++  nsDependentCString pattern(aPattern);
++  if (aHost.Equals(pattern)) return true;
++  if (aHost.Length() > pattern.Length() + 1) {
++    return aHost.CharAt(aHost.Length() - pattern.Length() - 1) == '.' &&
++           Substring(aHost, aHost.Length() - pattern.Length()).Equals(pattern);
++  }
++  return false;
++}
++
++inline bool SiteAllowed(nsIURI* aURI) {
++  if (!aURI) return false;
++
++  nsAutoCString scheme;
++  if (NS_FAILED(aURI->GetScheme(scheme))) return false;
++  if (!scheme.EqualsLiteral("http") && !scheme.EqualsLiteral("https")) {
++    return true;
++  }
++
++  nsAutoCString host;
++  if (NS_FAILED(aURI->GetAsciiHost(host)) || host.IsEmpty()) return false;
++
++  if (kDenSiteWhitelist[0]) {
++    for (size_t i = 0; kDenSiteWhitelist[i]; ++i) {
++      if (SiteHostMatches(host, kDenSiteWhitelist[i])) return true;
++    }
++    return false;
++  }
++
++  for (size_t i = 0; kDenSiteBlacklist[i]; ++i) {
++    if (SiteHostMatches(host, kDenSiteBlacklist[i])) return false;
++  }
++  return true;
++}
++
++}  // namespace denbrowser
++
++#endif  // DenBrowserSiteFilter_h__
+diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
+--- a/netwerk/base/moz.build
++++ b/netwerk/base/moz.build
+@@ -131,6 +131,7 @@
+ 
+ EXPORTS += [
+     "DenBrowserAttest.h",
++    "DenBrowserSiteFilter.h",
+     "netCore.h",
+     "nsASocketHandler.h",
+     "nsAsyncRedirectVerifyHelper.h",
+diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
+--- a/netwerk/protocol/http/nsHttpChannel.cpp
++++ b/netwerk/protocol/http/nsHttpChannel.cpp
+@@ -8,6 +8,7 @@
+ #include "HttpLog.h"
+ 
+ #include "DenBrowserAttest.h"
++#include "DenBrowserSiteFilter.h"
+ #include <inttypes.h>
+ 
+ #include "mozilla/ScopeExit.h"
+@@ -6705,6 +6706,16 @@
+     return NS_FAILED(mStatus) ? mStatus : NS_ERROR_FAILURE;
+   }
+ 
++  // DenBrowser: enforce the compile-time site policy for every HTTP channel,
++  // including subresources, fetch/XHR, WebSocket handshakes, and redirects.
++  // This runs before upload normalization and before any cache or network work.
++  if (!denbrowser::SiteAllowed(mURI)) {
++    LOG(("nsHttpChannel::AsyncOpen blocked %s by DenBrowser site filter\n",
++         mURI->GetSpecOrDefault().get()));
++    ReleaseListeners();
++    return NS_ERROR_BLOCKED_BY_POLICY;
++  }
++
+   if (MaybeWaitForUploadStreamNormalization(listener, nullptr)) {
+     return NS_OK;
+   }
 diff --git a/browser/locales/en-US/chrome/overrides/appstrings.properties b/browser/locales/en-US/chrome/overrides/appstrings.properties
-index c7d3c0e..6ce7dde 100644
 --- a/browser/locales/en-US/chrome/overrides/appstrings.properties
 +++ b/browser/locales/en-US/chrome/overrides/appstrings.properties
-@@ -44,7 +44,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+@@ -44,7 +44,7 @@
  ## LOCALIZATION NOTE (sslv3Used) - Do not translate "%S".
  sslv3Used=Firefox cannot guarantee the safety of your data on %S because it uses SSLv3, a broken security protocol.
  inadequateSecurityError=The website tried to negotiate an inadequate level of security.
@@ -156,10 +220,9 @@ index c7d3c0e..6ce7dde 100644
  invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
  networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
 diff --git a/dom/locales/en-US/chrome/appstrings.properties b/dom/locales/en-US/chrome/appstrings.properties
-index 3248c7d..464b3dd 100644
 --- a/dom/locales/en-US/chrome/appstrings.properties
 +++ b/dom/locales/en-US/chrome/appstrings.properties
-@@ -37,7 +37,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+@@ -37,7 +37,7 @@
  sslv3Used=The safety of your data on %S could not be guaranteed because it uses SSLv3, a broken security protocol.
  weakCryptoUsed=The owner of %S has configured their website improperly. To protect your information from being stolen, the connection to this website has not been established.
  inadequateSecurityError=The website tried to negotiate an inadequate level of security.
