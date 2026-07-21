@@ -60,7 +60,8 @@ FUNCTIONS = '''\
 // argv stripping covers:
 //   - --profile / -P / --ProfileManager / --CreateProfile / --migration
 //     (custom profile that bypasses the autoconfig lockdown + ramdisk hook)
-//   - --marionette / --remote-debugging-port / --start-debugger-server /
+//   - --marionette / --remote-debugging-port / --remote-allow-system-access /
+//     --start-debugger-server /
 //     --jsdebugger / --wait-for-jsdebugger / --jsconsole / --attach-console /
 //     --console  (remote-control and debugging surfaces)
 //   - --screenshot (CLI capture-to-disk mode that bypasses patch 001)
@@ -68,8 +69,10 @@ FUNCTIONS = '''\
 //     (modes that change save / sandbox / pref-load semantics)
 //   - --setDefaultBrowser / --preferences / --recording / --recordreplay
 //
-// A following argv value without a leading '-' is treated as the flag's
-// argument and is removed together with the flag.
+// Inline values (--flag=value and, on Windows, /flag:value) are recognized.
+// Only flags declared as value-taking consume a following argv entry; this
+// avoids turning a valueless lockdown flag followed by a URL into an accidental
+// request to remove both entries.
 //
 // Env stripping covers:
 //   - MOZ_LOG / MOZ_LOG_FILE / NSPR_LOG_MODULES / NSPR_LOG_FILE / R_LOG_*
@@ -83,29 +86,61 @@ FUNCTIONS = '''\
 //
 // This patch operates at the C++ level and cannot be circumvented by profile
 // configuration, mozilla.cfg edits, or enterprise policy changes.
-static void DenStripArg(const char* aFlag) {
-  for (int i = 1; i < gArgc;) {
-    const char* p = gArgv[i];
-    if (p[0] == '-') {
-      p += (p[1] == '-') ? 2 : 1;
-    }
+enum class DenArgValue { None, Required, Optional };
+
+// Return true when aRaw is aFlag in any command-line spelling Firefox accepts.
+// The early XRE CheckArg helper only understands separate values, while the
+// later nsICommandLine parser also accepts --flag=value and Windows /flag:value.
+static bool DenArgMatches(const char* aRaw, const char* aFlag,
+                          bool* aHasInlineValue) {
+  const char* p = aRaw;
+  if (p[0] == '-') {
+    p += (p[1] == '-') ? 2 : 1;
+  }
 #ifdef XP_WIN
-    else if (p[0] == '/') {
-      p += 1;
-    }
+  else if (p[0] == '/') {
+    ++p;
+  }
 #endif
-    else {
+  else {
+    return false;
+  }
+
+  const char* separator = strchr(p, '=');
+#ifdef XP_WIN
+  const char* colon = strchr(p, ':');
+  if (colon && (!separator || colon < separator)) {
+    separator = colon;
+  }
+#endif
+  size_t nameLength = separator ? static_cast<size_t>(separator - p)
+                                : strlen(p);
+  *aHasInlineValue = separator != nullptr;
+  return strlen(aFlag) == nameLength &&
+         nsCRT::strncasecmp(p, aFlag, nameLength) == 0;
+}
+
+static bool DenLooksLikeArg(const char* aRaw) {
+  if (!aRaw) return false;
+  if (aRaw[0] == '-') return true;
+#ifdef XP_WIN
+  if (aRaw[0] == '/') return true;
+#endif
+  return false;
+}
+
+static void DenStripArg(const char* aFlag,
+                        DenArgValue aValue = DenArgValue::None) {
+  for (int i = 1; i < gArgc;) {
+    bool hasInlineValue = false;
+    if (!DenArgMatches(gArgv[i], aFlag, &hasInlineValue)) {
       ++i;
       continue;
     }
-    if (nsCRT::strcasecmp(p, aFlag) != 0) {
-      ++i;
-      continue;
-    }
-    // Flag matched. If the next entry is not itself a flag, treat it as
-    // this flag's value and remove both; otherwise remove the flag only.
+
     int toRemove = 1;
-    if (i + 1 < gArgc && gArgv[i + 1][0] != '-') {
+    if (!hasInlineValue && aValue != DenArgValue::None && i + 1 < gArgc &&
+        !DenLooksLikeArg(gArgv[i + 1])) {
       toRemove = 2;
     }
     gArgc -= toRemove;
@@ -132,16 +167,17 @@ static void DenStripEnv(const char* aName) {
 
 static void DenBrowserStripBlockedArgs() {
   // Profile manipulation (bypasses autoconfig lockdown + ramdisk profile).
-  DenStripArg("profile");               // --profile <path>
-  DenStripArg("p");                     // -P <name>
+  DenStripArg("profile", DenArgValue::Required);  // --profile <path>
+  DenStripArg("p", DenArgValue::Required);        // -P <name>
   DenStripArg("profilemanager");        // --ProfileManager UI
-  DenStripArg("createprofile");         // --CreateProfile name [dir]
+  DenStripArg("createprofile", DenArgValue::Required);
   DenStripArg("migration");             // --migration profile-import wizard
 
   // Remote control and debugging surfaces.
   DenStripArg("marionette");            // WebDriver / GeckoDriver
-  DenStripArg("remote-debugging-port"); // Chrome DevTools Protocol agent
-  DenStripArg("start-debugger-server"); // DevTools remote server
+  DenStripArg("remote-debugging-port", DenArgValue::Optional);
+  DenStripArg("remote-allow-system-access");
+  DenStripArg("start-debugger-server", DenArgValue::Optional);
   DenStripArg("jsdebugger");            // JS debugger attach
   DenStripArg("wait-for-jsdebugger");
   DenStripArg("jsconsole");             // legacy JS console
@@ -149,7 +185,7 @@ static void DenBrowserStripBlockedArgs() {
   DenStripArg("console");
 
   // Modes that change save / sandbox / pref-load semantics.
-  DenStripArg("screenshot");            // CLI screenshot-to-disk mode
+  DenStripArg("screenshot", DenArgValue::Optional);
   DenStripArg("headless");
   DenStripArg("new-instance");          // skip single-instance check
   DenStripArg("no-remote");             // ditto
