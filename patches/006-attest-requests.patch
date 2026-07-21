@@ -155,7 +155,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   netwerk/protocol/http/nsHttpChannel.cpp
 #       — include DenBrowserAttest.h, call denbrowser::AddAttestHeaders() at
 #         end of SetupChannelForTransaction() before return NS_OK,
-#         passing mUploadStream so the body can be hashed.
+#         passing mUploadStream and Firefox's normalized request length so the
+#         body can be hashed without treating Available() as a total length.
 #   netwerk/base/moz.build
 #       — add DenBrowserAttest.cpp to UNIFIED_SOURCES.
 
@@ -164,7 +165,7 @@ new file mode 100644
 index 0000000..00ec512
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,521 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -408,9 +409,9 @@ index 0000000..00ec512
 +// ── Body hashing ──────────────────────────────────────────────────────────────
 +// Returns lowercase hex SHA-256 of the request body.  Clones the upload stream
 +// so the original is left untouched and the actual upload sends the same bytes
-+// the proxy will hash on its side.  On clone failure or null stream, hashes
-+// the empty string; the proxy will then reject any request with a non-empty
-+// body (fail-closed by mismatch).
++// the proxy will hash on its side.  A null stream correctly hashes as empty;
++// clone, read, or hash failures are returned to the caller rather than silently
++// producing a digest for a partial body.
 +
 +static nsresult HashBody(nsIInputStream* aUploadStream, nsACString& aHexHash) {
 +  nsCOMPtr<nsICryptoHash> hasher =
@@ -421,19 +422,18 @@ index 0000000..00ec512
 +
 +  if (aUploadStream) {
 +    nsCOMPtr<nsIInputStream> clone;
-+    if (NS_SUCCEEDED(NS_CloneInputStream(aUploadStream, getter_AddRefs(clone)))) {
-+      char buf[4096];
-+      while (true) {
-+        uint32_t read = 0;
-+        rv = clone->Read(buf, sizeof(buf), &read);
-+        if (NS_FAILED(rv) || read == 0) break;
-+        rv = hasher->Update(reinterpret_cast<uint8_t*>(buf), read);
-+        if (NS_FAILED(rv)) break;
-+      }
-+    } else {
-+      MOZ_LOG(sLog, mozilla::LogLevel::Warning,
-+              ("DenBrowserAttest: upload stream is not cloneable; body hash "
-+               "will be sha256(\"\") and the proxy will reject."));
++    rv = NS_CloneInputStream(aUploadStream, getter_AddRefs(clone));
++    NS_ENSURE_SUCCESS(rv, rv);
++
++    char buf[4096];
++    while (true) {
++      uint32_t read = 0;
++      rv = clone->Read(buf, sizeof(buf), &read);
++      NS_ENSURE_SUCCESS(rv, rv);
++      if (read == 0) break;
++
++      rv = hasher->Update(reinterpret_cast<uint8_t*>(buf), read);
++      NS_ENSURE_SUCCESS(rv, rv);
 +    }
 +  }
 +
@@ -468,22 +468,22 @@ index 0000000..00ec512
 +// upload.  We skip when the body is too large to hash cheaply up front, or when
 +// the stream cannot be cloned (we cannot hash it without consuming the bytes the
 +// actual upload still needs to send).
-+static bool ShouldSkipBodyHash(nsIInputStream* aUploadStream) {
++static bool ShouldSkipBodyHash(nsIInputStream* aUploadStream,
++                               uint64_t aUploadLength) {
 +  if (!aUploadStream) {
 +    return false;  // No body: sha256("") is correct and trivial to bind.
++  }
++
++  // mReqContentLength is populated when Firefox normalizes the upload stream,
++  // and describes the whole upload.  Available() only reports bytes that can
++  // be read without blocking and is not a stream-length API.
++  if (aUploadLength > kMaxBoundBodyBytes) {
++    return true;
 +  }
 +
 +  // Not cloneable → hashing would consume the upload bytes.  Stream unbound.
 +  nsCOMPtr<nsICloneableInputStream> cloneable = do_QueryInterface(aUploadStream);
 +  if (!cloneable || !cloneable->GetCloneable()) {
-+    return true;
-+  }
-+
-+  // Large enough that a full pre-upload hashing pass (and proxy buffering) is
-+  // not worth it: send it unbound and let the proxy stream it.
-+  uint64_t avail = 0;
-+  if (NS_SUCCEEDED(aUploadStream->Available(&avail)) &&
-+      avail > kMaxBoundBodyBytes) {
 +    return true;
 +  }
 +  return false;
@@ -492,7 +492,8 @@ index 0000000..00ec512
 +// ── Public API ────────────────────────────────────────────────────────────────
 +
 +nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
-+                          nsIInputStream* aUploadStream) {
++                          nsIInputStream* aUploadStream,
++                          uint64_t aUploadLength) {
 +  MOZ_ASSERT(aURI);
 +
 +  // Import the configured keys (once per process) before anything else, so an
@@ -559,13 +560,14 @@ index 0000000..00ec512
 +
 +  // ── 7. Body binding (sha256 hex, or the "unbound" sentinel) ──────────────
 +  nsAutoCString bodyHex;
-+  if (ShouldSkipBodyHash(aUploadStream)) {
++  if (ShouldSkipBodyHash(aUploadStream, aUploadLength)) {
 +    // Large / unhashable upload: emit the authenticated "unbound" marker and
 +    // let the proxy stream the body without buffering.  (See the proxy's
 +    // request_body_filter and attest.rs BodyBinding::Unbound.)
 +    bodyHex.AssignLiteral("unbound");
-+  } else if (NS_FAILED(HashBody(aUploadStream, bodyHex))) {
-+    return NS_OK;
++  } else {
++    nsresult rv = HashBody(aUploadStream, bodyHex);
++    NS_ENSURE_SUCCESS(rv, rv);
 +  }
 +
 +  // ── 8. Canonical plaintext ───────────────────────────────────────────────
@@ -690,7 +692,7 @@ new file mode 100644
 index 0000000..727e5e0
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,70 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -746,12 +748,17 @@ index 0000000..727e5e0
 + *   With an empty proxy table this function is a silent no-op.  No request is
 + *   ever blocked by this code.
 + *
++ * aUploadLength is mReqContentLength after Firefox has normalized the upload
++ * stream.  It is the full length used by the HTTP transaction; Available() is
++ * deliberately not used because it only reports immediately readable bytes.
++ *
 + * Thread-safety:
 + *   Public keys are imported from DER at most once per process and cached.
 + *   Safe to call from any thread that can already call nsHttpChannel methods.
 + */
 +nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
-+                          nsIInputStream* aUploadStream);
++                          nsIInputStream* aUploadStream,
++                          uint64_t aUploadLength);
 +
 +}  // namespace denbrowser
 +
@@ -768,7 +775,7 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
-@@ -1758,6 +1759,13 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
+@@ -1758,6 +1759,15 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
    if (mWebTransportSessionEventListener) {
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }
@@ -778,7 +785,9 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
 +  // request's method/host/path/body hash so a captured triple cannot be
 +  // replayed for a different request, and the proxy maintains a per-nonce
 +  // replay cache to also reject re-use of the exact same triple.
-+  denbrowser::AddAttestHeaders(mRequestHead, mURI, mUploadStream);
++  rv = denbrowser::AddAttestHeaders(mRequestHead, mURI, mUploadStream,
++                                    mReqContentLength);
++  NS_ENSURE_SUCCESS(rv, rv);
 +
    return NS_OK;
  }
