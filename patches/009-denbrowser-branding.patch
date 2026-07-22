@@ -55,163 +55,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   disk.icns        — DMG volume icon; add when creating macOS installer
 #   document.icns    — file association icon for .html files
 
---- a/browser/moz.configure
-+++ b/browser/moz.configure
-@@ -13,7 +13,14 @@
- imply_option("MOZ_PROFILE_MIGRATOR", True)
 
-
--imply_option("MOZ_APP_VENDOR", "Mozilla")
-+# DenBrowser: vendor + basename override the upstream defaults ("Mozilla",
-+# "Firefox") so the Windows profile dir is %APPDATA%\DenBrowser\DenBrowser\
-+# Profiles\ instead of %APPDATA%\Mozilla\Firefox\Profiles\.  Required here
-+# (not in the branding configure.sh) because MOZ_APP_VENDOR uses
-+# project_flag(possible_origins=("implied",)) — imply_option is the only
-+# accepted origin.
-+imply_option("MOZ_APP_VENDOR", "DenBrowser")
-+imply_option("MOZ_APP_BASENAME", "DenBrowser")
- imply_option("MOZ_APP_ID", "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}")
- # Include the DevTools client, not just the server (which is the default)
- imply_option("MOZ_DEVTOOLS", "all")
---- /dev/null
-+++ b/browser/branding/denbrowser/configure.sh
-@@ -0,0 +1,6 @@
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
-+
-+MOZ_APP_DISPLAYNAME="DenBrowser"
-+MOZ_MACBUNDLE_ID=denbrowser
---- /dev/null
-+++ b/browser/branding/denbrowser/moz.build
-@@ -0,0 +1,13 @@
-+# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
-+# vim: set filetype=python:
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
-+
-+DIRS += ["content", "locales"]
-+
-+DIST_SUBDIR = "browser"
-+export("DIST_SUBDIR")
-+
-+include("../branding-common.mozbuild")
-+FirefoxBranding()
---- /dev/null
-+++ b/browser/branding/denbrowser/content/moz.build
-@@ -0,0 +1,7 @@
-+# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
-+# vim: set filetype=python:
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
-+
-+JAR_MANIFESTS += ["jar.mn"]
---- /dev/null
-+++ b/browser/branding/denbrowser/content/jar.mn
-@@ -0,0 +1,16 @@
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
-+
-+browser.jar:
-+% content branding %content/branding/ contentaccessible=yes
-+  content/branding/about-logo.png                (../default128.png)
-+  content/branding/about-logo@2x.png             (../default256.png)
-+  content/branding/about-logo-private.png        (../default128.png)
-+  content/branding/about-logo-private@2x.png     (../default256.png)
-+  content/branding/icon16.png                    (../default16.png)
-+  content/branding/icon32.png                    (../default32.png)
-+  content/branding/icon48.png                    (../default48.png)
-+  content/branding/icon64.png                    (../default64.png)
-+  content/branding/icon128.png                   (../default128.png)
-+  content/branding/aboutDialog.css
---- /dev/null
-+++ b/browser/branding/denbrowser/content/aboutDialog.css
-@@ -0,0 +1,19 @@
-+/* This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-+
-+#aboutDialogContainer {
-+  background-color: #1a1a2e;
-+  color: #e0e0e0;
-+  color-scheme: dark;
-+}
-+
-+#rightBox {
-+  margin-inline: 30px;
-+  padding-top: 64px;
-+}
-+
-+#bottomBox {
-+  background-color: rgba(0, 0, 0, 0.5);
-+  padding: 15px 10px 15px;
-+}
---- /dev/null
-+++ b/browser/branding/denbrowser/locales/moz.build
-@@ -0,0 +1,7 @@
-+# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
-+# vim: set filetype=python:
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
-+
-+JAR_MANIFESTS += ["jar.mn"]
---- /dev/null
-+++ b/browser/branding/denbrowser/locales/jar.mn
-@@ -0,0 +1,12 @@
-+#filter substitution
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
-+
-+[localization] @AB_CD@.jar:
-+  branding                                          (en-US/**/*.ftl)
-+
-+@AB_CD@.jar:
-+% locale branding @AB_CD@ %locale/branding/
-+# DenBrowser branding only exists in en-US
-+  locale/branding/brand.properties (en-US/brand.properties)
---- /dev/null
-+++ b/browser/branding/denbrowser/locales/en-US/brand.ftl
-@@ -0,0 +1,14 @@
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
-+
-+## DenBrowser Brand
-+
-+-brand-shorter-name = DenBrowser
-+-brand-short-name = DenBrowser
-+-brand-shortcut-name = DenBrowser
-+-brand-full-name = DenBrowser
-+# This brand name is used when the name must remain constant across versions.
-+-brand-product-name = DenBrowser
-+-vendor-short-name = DenBrowser
-+trademarkInfo = { " " }
---- /dev/null
-+++ b/browser/branding/denbrowser/locales/en-US/brand.properties
-@@ -0,0 +1,7 @@
-+# This Source Code Form is subject to the terms of the Mozilla Public
-+# License, v. 2.0. If a copy of the MPL was not distributed with this
-+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
-+
-+brandShorterName=DenBrowser
-+brandShortName=DenBrowser
-+brandFullName=DenBrowser
---- /dev/null
-+++ b/browser/branding/denbrowser/pref/firefox-branding.js
-@@ -0,0 +1,8 @@
-+/* This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-+
-+// DenBrowser branding prefs — no external URLs, no auto-update.
-+pref("startup.homepage_override_url", "");
-+pref("startup.homepage_welcome_url", "");
-+pref("startup.homepage_welcome_url.additional", "");
+diff --git a/browser/branding/denbrowser/branding.nsi b/browser/branding/denbrowser/branding.nsi
+new file mode 100644
+index 000000000000..acefd9587f09
 --- /dev/null
 +++ b/browser/branding/denbrowser/branding.nsi
 @@ -0,0 +1,63 @@
@@ -278,6 +125,81 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +!define COMMON_TEXT_COLOR 0xFFFFFF
 +!define COMMON_BACKGROUND_COLOR 0x0a0a0a
 +!define INSTALL_INSTALLING_TEXT_COLOR 0xFFFFFF
+diff --git a/browser/branding/denbrowser/configure.sh b/browser/branding/denbrowser/configure.sh
+new file mode 100644
+index 000000000000..dc015387a432
+--- /dev/null
++++ b/browser/branding/denbrowser/configure.sh
+@@ -0,0 +1,6 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++MOZ_APP_DISPLAYNAME="DenBrowser"
++MOZ_MACBUNDLE_ID=denbrowser
+diff --git a/browser/branding/denbrowser/content/aboutDialog.css b/browser/branding/denbrowser/content/aboutDialog.css
+new file mode 100644
+index 000000000000..724b9a551dd6
+--- /dev/null
++++ b/browser/branding/denbrowser/content/aboutDialog.css
+@@ -0,0 +1,19 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#aboutDialogContainer {
++  background-color: #1a1a2e;
++  color: #e0e0e0;
++  color-scheme: dark;
++}
++
++#rightBox {
++  margin-inline: 30px;
++  padding-top: 64px;
++}
++
++#bottomBox {
++  background-color: rgba(0, 0, 0, 0.5);
++  padding: 15px 10px 15px;
++}
+diff --git a/browser/branding/denbrowser/content/jar.mn b/browser/branding/denbrowser/content/jar.mn
+new file mode 100644
+index 000000000000..27173f7c15ad
+--- /dev/null
++++ b/browser/branding/denbrowser/content/jar.mn
+@@ -0,0 +1,16 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at https://mozilla.org/MPL/2.0/.
++
++browser.jar:
++% content branding %content/branding/ contentaccessible=yes
++  content/branding/about-logo.png                (../default128.png)
++  content/branding/about-logo@2x.png             (../default256.png)
++  content/branding/about-logo-private.png        (../default128.png)
++  content/branding/about-logo-private@2x.png     (../default256.png)
++  content/branding/icon16.png                    (../default16.png)
++  content/branding/icon32.png                    (../default32.png)
++  content/branding/icon48.png                    (../default48.png)
++  content/branding/icon64.png                    (../default64.png)
++  content/branding/icon128.png                   (../default128.png)
++  content/branding/aboutDialog.css
+diff --git a/browser/branding/denbrowser/content/moz.build b/browser/branding/denbrowser/content/moz.build
+new file mode 100644
+index 000000000000..d988c0ff9b16
+--- /dev/null
++++ b/browser/branding/denbrowser/content/moz.build
+@@ -0,0 +1,7 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++JAR_MANIFESTS += ["jar.mn"]
+diff --git a/browser/branding/denbrowser/firefox.VisualElementsManifest.xml b/browser/branding/denbrowser/firefox.VisualElementsManifest.xml
+new file mode 100644
+index 000000000000..4e90d699de78
 --- /dev/null
 +++ b/browser/branding/denbrowser/firefox.VisualElementsManifest.xml
 @@ -0,0 +1,12 @@
@@ -293,6 +215,106 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +      ForegroundText='light'
 +      BackgroundColor='#0a0a0a'/>
 +</Application>
+diff --git a/browser/branding/denbrowser/locales/en-US/brand.ftl b/browser/branding/denbrowser/locales/en-US/brand.ftl
+new file mode 100644
+index 000000000000..bbfde3da7143
+--- /dev/null
++++ b/browser/branding/denbrowser/locales/en-US/brand.ftl
+@@ -0,0 +1,14 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at https://mozilla.org/MPL/2.0/.
++
++## DenBrowser Brand
++
++-brand-shorter-name = DenBrowser
++-brand-short-name = DenBrowser
++-brand-shortcut-name = DenBrowser
++-brand-full-name = DenBrowser
++# This brand name is used when the name must remain constant across versions.
++-brand-product-name = DenBrowser
++-vendor-short-name = DenBrowser
++trademarkInfo = { " " }
+diff --git a/browser/branding/denbrowser/locales/en-US/brand.properties b/browser/branding/denbrowser/locales/en-US/brand.properties
+new file mode 100644
+index 000000000000..543d18785648
+--- /dev/null
++++ b/browser/branding/denbrowser/locales/en-US/brand.properties
+@@ -0,0 +1,7 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at https://mozilla.org/MPL/2.0/.
++
++brandShorterName=DenBrowser
++brandShortName=DenBrowser
++brandFullName=DenBrowser
+diff --git a/browser/branding/denbrowser/locales/jar.mn b/browser/branding/denbrowser/locales/jar.mn
+new file mode 100644
+index 000000000000..349de08c83a3
+--- /dev/null
++++ b/browser/branding/denbrowser/locales/jar.mn
+@@ -0,0 +1,12 @@
++#filter substitution
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++[localization] @AB_CD@.jar:
++  branding                                          (en-US/**/*.ftl)
++
++@AB_CD@.jar:
++% locale branding @AB_CD@ %locale/branding/
++# DenBrowser branding only exists in en-US
++  locale/branding/brand.properties (en-US/brand.properties)
+diff --git a/browser/branding/denbrowser/locales/moz.build b/browser/branding/denbrowser/locales/moz.build
+new file mode 100644
+index 000000000000..d988c0ff9b16
+--- /dev/null
++++ b/browser/branding/denbrowser/locales/moz.build
+@@ -0,0 +1,7 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++JAR_MANIFESTS += ["jar.mn"]
+diff --git a/browser/branding/denbrowser/moz.build b/browser/branding/denbrowser/moz.build
+new file mode 100644
+index 000000000000..dd081ac44496
+--- /dev/null
++++ b/browser/branding/denbrowser/moz.build
+@@ -0,0 +1,13 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++DIRS += ["content", "locales"]
++
++DIST_SUBDIR = "browser"
++export("DIST_SUBDIR")
++
++include("../branding-common.mozbuild")
++FirefoxBranding()
+diff --git a/browser/branding/denbrowser/pref/firefox-branding.js b/browser/branding/denbrowser/pref/firefox-branding.js
+new file mode 100644
+index 000000000000..db0f39b39331
+--- /dev/null
++++ b/browser/branding/denbrowser/pref/firefox-branding.js
+@@ -0,0 +1,8 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++// DenBrowser branding prefs — no external URLs, no auto-update.
++pref("startup.homepage_override_url", "");
++pref("startup.homepage_welcome_url", "");
++pref("startup.homepage_welcome_url.additional", "");
+diff --git a/browser/branding/denbrowser/private_browsing.VisualElementsManifest.xml b/browser/branding/denbrowser/private_browsing.VisualElementsManifest.xml
+new file mode 100644
+index 000000000000..d5a54696eb3f
 --- /dev/null
 +++ b/browser/branding/denbrowser/private_browsing.VisualElementsManifest.xml
 @@ -0,0 +1,12 @@
@@ -308,3 +330,23 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +      ForegroundText='light'
 +      BackgroundColor='#0a0a0a'/>
 +</Application>
+diff --git a/browser/moz.configure b/browser/moz.configure
+index 3ea3d88b9360..a6f4c36d7aa5 100644
+--- a/browser/moz.configure
++++ b/browser/moz.configure
+@@ -11,7 +11,14 @@ imply_option("MOZ_NORMANDY", True)
+ imply_option("MOZ_PROFILE_MIGRATOR", True)
+ 
+ 
+-imply_option("MOZ_APP_VENDOR", "Mozilla")
++# DenBrowser: vendor + basename override the upstream defaults ("Mozilla",
++# "Firefox") so the Windows profile dir is %APPDATA%\DenBrowser\DenBrowser\
++# Profiles\ instead of %APPDATA%\Mozilla\Firefox\Profiles\.  Required here
++# (not in the branding configure.sh) because MOZ_APP_VENDOR uses
++# project_flag(possible_origins=("implied",)) — imply_option is the only
++# accepted origin.
++imply_option("MOZ_APP_VENDOR", "DenBrowser")
++imply_option("MOZ_APP_BASENAME", "DenBrowser")
+ imply_option("MOZ_APP_ID", "{ec8030f7-c20a-464f-9b0e-13a3a9e97384}")
+ # Include the DevTools client, not just the server (which is the default)
+ imply_option("MOZ_DEVTOOLS", "all")

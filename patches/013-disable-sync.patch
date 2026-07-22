@@ -2,121 +2,61 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-# PATCH: 013-disable-sync
-#
-# PURPOSE: Permanently disable Firefox Sync and Firefox Accounts (FxA) at the
-# source level so no pref change, policy override, or runtime manipulation can
-# re-enable them.
-#
-# THREAT MODEL ADDRESSED:
-#
-#   Firefox Sync, if active, exfiltrates browsing history, open tabs, passwords,
-#   form data, and extension state to Mozilla's sync servers.  For a hardened,
-#   VPN-gated browser whose traffic is confined to the attestation proxy, any
-#   out-of-band sync channel is a data-leak vector.  Even with no account
-#   configured at deployment time, a user or attacker with local access could
-#   sign in and begin exfiltrating data.
-#
-# LAYERS OF COVERAGE:
-#
-# 1. WeaveService.enabled (services/sync/Weave.sys.mjs)
-#    The startup auto-connect timer checks this getter before importing any
-#    Sync code.  Hardcoding it to false prevents the entire Sync module graph
-#    from loading, regardless of whether an FxA account is present in the
-#    profile.
-#
-# 2. FXA_ENABLED constant (services/fxaccounts/FxAccounts.sys.mjs)
-#    FxAccounts reads FXA_ENABLED at two points: to auto-sign-out any account
-#    found in profile storage on startup, and to reject any call to
-#    setSignedInUser().  Replacing the pref-backed lazy getter with a hard
-#    false means no pref write or runtime change can make either path return
-#    true.
-#
-# 3. Settings page Sync pane (browser/components/preferences/preferences.js)
-#    The pref-gated block that un-hides the Sync category and registers
-#    gSyncPane is removed unconditionally, so the Sync settings page is never
-#    reachable regardless of pref state.
-#
-# 4. Sidebar Synced Tabs entry (browser/components/sidebar/browser-sidebar.js)
-#    The viewTabsSidebar sidebar registration is removed, so the Synced Tabs
-#    panel never appears in the sidebar launcher or switcher menu.
-#
-# 5. Sidebar switcher menu item (browser/base/content/main-popupset.inc.xhtml)
-#    The sidebar-switcher-tabs menuitem (classic sidebar menu) is removed.
-#
-# RELATIONSHIP TO POLICIES:
-#
-#   policies.json already sets DisableFirefoxAccounts which locks the
-#   identity.fxaccounts.enabled pref to false.  These source patches add
-#   defence-in-depth: the policy depends on policies.json loading correctly at
-#   runtime; the source-level changes are unconditional.
 
-diff --git a/services/sync/Weave.sys.mjs b/services/sync/Weave.sys.mjs
-index 1c4bb44..e4fbc05 100644
---- a/services/sync/Weave.sys.mjs
-+++ b/services/sync/Weave.sys.mjs
-@@ -140,10 +140,8 @@ WeaveService.prototype = {
-    * For that, you'll want to check Weave.Status.checkSetup().
-    */
-   get enabled() {
--    return (
--      !!lazy.syncUsername &&
--      Services.prefs.getBoolPref("identity.fxaccounts.enabled")
--    );
-+    // DenBrowser: Firefox Sync permanently disabled.
-+    return false;
-   },
- };
- 
-diff --git a/services/fxaccounts/FxAccounts.sys.mjs b/services/fxaccounts/FxAccounts.sys.mjs
-index b307ad2..acd4966 100644
---- a/services/fxaccounts/FxAccounts.sys.mjs
-+++ b/services/fxaccounts/FxAccounts.sys.mjs
-@@ -59,12 +59,8 @@ ChromeUtils.defineLazyGetter(lazy, "ensureMPUnlocked", () => {
-     .Utils.ensureMPUnlocked;
- });
- 
--XPCOMUtils.defineLazyPreferenceGetter(
--  lazy,
--  "FXA_ENABLED",
--  "identity.fxaccounts.enabled",
--  true
--);
-+// DenBrowser: FxA permanently disabled; no pref can re-enable it.
-+lazy.FXA_ENABLED = false;
- 
- XPCOMUtils.defineLazyPreferenceGetter(
-   lazy,
+
+diff --git a/browser/base/content/main-popupset.inc.xhtml b/browser/base/content/main-popupset.inc.xhtml
+index 2338bac0003a..0bb6b8a2d49f 100644
+--- a/browser/base/content/main-popupset.inc.xhtml
++++ b/browser/base/content/main-popupset.inc.xhtml
+@@ -322,9 +322,6 @@
+     <menuitem id="sidebar-switcher-history"
+               data-l10n-id="sidebar-menu-history"
+               key="key_gotoHistory"/>
+-    <menuitem id="sidebar-switcher-tabs"
+-              data-l10n-id="sidebar-menu-synced-tabs"
+-              class="sync-ui-item"/>
+     <menuseparator/>
+     <!-- Extension toolbarbuttons go here. -->
+     <menuseparator id="sidebar-extensions-separator"/>
 diff --git a/browser/components/preferences/preferences.js b/browser/components/preferences/preferences.js
-index b5af9af..e4cef1a 100644
+index c76a0647e14b..ee4c0393e235 100644
 --- a/browser/components/preferences/preferences.js
 +++ b/browser/components/preferences/preferences.js
-@@ -219,13 +219,7 @@ function init_all() {
-       NimbusFeatures.moreFromMozilla.getVariable("template");
-     register_module("paneMoreFromMozilla", gMoreFromMozillaPane);
+@@ -540,21 +540,7 @@ function init_all() {
+       );
    }
+ 
 -  // The Sync category needs to be the last of the "real" categories
--  // registered and inititalized since many tests wait for the
+-  // registered and initialized since many tests wait for the
 -  // "sync-pane-loaded" observer notification before starting the test.
--  if (Services.prefs.getBoolPref("identity.fxaccounts.enabled")) {
--    document.getElementById("category-sync").hidden = false;
+-  let accountsEnabled = Services.prefs.getBoolPref(
+-    "identity.fxaccounts.enabled"
+-  );
+-  let categorySync = document.getElementById("category-sync");
+-  if (redesignEnabled) {
+-    categorySync.setAttribute("data-l10n-id", "pane-account-sync-title2");
+-    categorySync.iconSrc = "chrome://browser/skin/fxa/avatar-empty.svg";
+-    categorySync.hidden = false;
+-  } else if (accountsEnabled) {
+-    categorySync.hidden = false;
 -    register_module("paneSync", gSyncPane);
 -  }
 +  // DenBrowser: Sync UI permanently removed.
    register_module("paneSearchResults", gSearchResultsPane);
-   gSearchResultsPane.init();
-   gMainPane.preInit();
+   for (let [id, config] of Object.entries(CONFIG_PANES)) {
+     if (!redesignEnabled && config.replaces) {
 diff --git a/browser/components/sidebar/browser-sidebar.js b/browser/components/sidebar/browser-sidebar.js
-index 597da42..0961795 100644
+index 36f7e1ceba70..461f9f89afe6 100644
 --- a/browser/components/sidebar/browser-sidebar.js
 +++ b/browser/components/sidebar/browser-sidebar.js
-@@ -115,24 +115,6 @@ var SidebarController = {
+@@ -141,25 +141,6 @@ var SidebarController = {
            recordSidebarVersion: true,
          }),
        ],
 -      [
 -        "viewTabsSidebar",
 -        this.makeSidebar({
+-          name: "syncedtabs",
 -          elementId: "sidebar-switcher-tabs",
 -          url: this.sidebarRevampEnabled
 -            ? "chrome://browser/content/sidebar/sidebar-syncedtabs.html"
@@ -135,17 +75,39 @@ index 597da42..0961795 100644
        [
          "viewBookmarksSidebar",
          this.makeSidebar({
-diff --git a/browser/base/content/main-popupset.inc.xhtml b/browser/base/content/main-popupset.inc.xhtml
-index 4c93f22..6245a45 100644
---- a/browser/base/content/main-popupset.inc.xhtml
-+++ b/browser/base/content/main-popupset.inc.xhtml
-@@ -288,9 +288,6 @@
-     <menuitem id="sidebar-switcher-history"
-               data-l10n-id="sidebar-menu-history"
-               key="key_gotoHistory"/>
--    <menuitem id="sidebar-switcher-tabs"
--              data-l10n-id="sidebar-menu-synced-tabs"
--              class="sync-ui-item"/>
-     <menuseparator/>
-     <!-- Extension toolbarbuttons go here. -->
-     <menuseparator id="sidebar-extensions-separator"/>
+diff --git a/services/fxaccounts/FxAccounts.sys.mjs b/services/fxaccounts/FxAccounts.sys.mjs
+index 6d40632082bc..af5fc6117cbf 100644
+--- a/services/fxaccounts/FxAccounts.sys.mjs
++++ b/services/fxaccounts/FxAccounts.sys.mjs
+@@ -59,12 +59,8 @@ ChromeUtils.defineLazyGetter(lazy, "ensureMPUnlocked", () => {
+     .Utils.ensureMPUnlocked;
+ });
+ 
+-XPCOMUtils.defineLazyPreferenceGetter(
+-  lazy,
+-  "FXA_ENABLED",
+-  "identity.fxaccounts.enabled",
+-  true
+-);
++// DenBrowser: FxA permanently disabled; no pref can re-enable it.
++lazy.FXA_ENABLED = false;
+ 
+ export const ERROR_INVALID_ACCOUNT_STATE = "ERROR_INVALID_ACCOUNT_STATE";
+ 
+diff --git a/services/sync/Weave.sys.mjs b/services/sync/Weave.sys.mjs
+index 1c4bb449287c..e4fbc0566c26 100644
+--- a/services/sync/Weave.sys.mjs
++++ b/services/sync/Weave.sys.mjs
+@@ -140,10 +140,8 @@ WeaveService.prototype = {
+    * For that, you'll want to check Weave.Status.checkSetup().
+    */
+   get enabled() {
+-    return (
+-      !!lazy.syncUsername &&
+-      Services.prefs.getBoolPref("identity.fxaccounts.enabled")
+-    );
++    // DenBrowser: Firefox Sync permanently disabled.
++    return false;
+   },
+ };
+ 

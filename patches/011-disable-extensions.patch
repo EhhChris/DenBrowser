@@ -38,20 +38,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Pref-level coverage (user.js):
 #   xpinstall.enabled = false — gates the XPI install subsystem entirely.
 
---- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
-+++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
-@@ -2618,4 +2618,8 @@
-     for (let [constructor, name, scope, ...args] of locations) {
-+      // DenBrowser: only register application-scoped (built-in) addon locations.
-+      if (scope !== AddonManager.SCOPE_APPLICATION) {
-+        continue;
-+      }
-       if (!scope || lazy.enabledScopes & scope) {
-         try {
-           let loc = constructor(name, scope, ...args);
+
+diff --git a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
+index 37af7d163d33..8c64c7fd10a4 100644
 --- a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
 +++ b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
-@@ -1389,6 +1389,8 @@
+@@ -1387,6 +1387,8 @@ class AddonInstall {
     * @throws if installation cannot proceed from the current state
     */
    install() {
@@ -60,3 +52,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      switch (this.state) {
        case AddonManager.STATE_DOWNLOADED:
          this.checkPrompt();
+diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+index 74d738e46fe5..474ebf818e0b 100644
+--- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
++++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
+@@ -2633,6 +2633,10 @@ export var XPIProvider = {
+     ];
+ 
+     for (let [constructor, name, scope, ...args] of locations) {
++      // DenBrowser: only register application-scoped (built-in) addon locations.
++      if (scope !== AddonManager.SCOPE_APPLICATION) {
++        continue;
++      }
+       if (!scope || lazy.enabledScopes & scope) {
+         try {
+           let loc = constructor(name, scope, ...args);

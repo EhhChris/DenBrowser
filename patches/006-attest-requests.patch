@@ -160,9 +160,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   netwerk/base/moz.build
 #       — add DenBrowserAttest.cpp to UNIFIED_SOURCES.
 
+
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
 new file mode 100644
-index 0000000..00ec512
+index 000000000000..f930dbd9b58d
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -0,0 +1,521 @@
@@ -689,7 +690,7 @@ index 0000000..00ec512
 +}  // namespace denbrowser
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
 new file mode 100644
-index 0000000..727e5e0
+index 000000000000..4984247dedb5
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.h
 @@ -0,0 +1,70 @@
@@ -763,11 +764,31 @@ index 0000000..727e5e0
 +}  // namespace denbrowser
 +
 +#endif  // DenBrowserAttest_h__
-
+diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
+index 56459dca696f..baf48c8f5d46 100644
+--- a/netwerk/base/moz.build
++++ b/netwerk/base/moz.build
+@@ -126,6 +126,7 @@ XPIDL_SOURCES += [
+ XPIDL_MODULE = "necko"
+ 
+ EXPORTS += [
++    "DenBrowserAttest.h",
+     "netCore.h",
+     "nsASocketHandler.h",
+     "nsAsyncRedirectVerifyHelper.h",
+@@ -183,6 +184,7 @@ UNIFIED_SOURCES += [
+     "ContentRange.cpp",
+     "Dashboard.cpp",
+     "DefaultURI.cpp",
++    "DenBrowserAttest.cpp",
+     "EventTokenBucket.cpp",
+     "ExecuteIfOnMainThreadEventTarget.cpp",
+     "InterceptionInfo.cpp",
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
+index c6d926448e39..000209cf4ae0 100644
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
 +++ b/netwerk/protocol/http/nsHttpChannel.cpp
-@@ -7,6 +7,7 @@
+@@ -5,6 +5,7 @@
  // HttpLog.h should generally be included first
  #include "HttpLog.h"
  
@@ -775,8 +796,7 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
-@@ -1758,6 +1759,15 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
-   if (mWebTransportSessionEventListener) {
+@@ -2025,6 +2026,15 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }
  
@@ -791,23 +811,4 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
 +
    return NS_OK;
  }
-
-diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
---- a/netwerk/base/moz.build
-+++ b/netwerk/base/moz.build
-@@ -132,6 +132,7 @@ XPIDL_MODULE = "necko"
- EXPORTS += [
-+    "DenBrowserAttest.h",
-     "netCore.h",
-     "nsASocketHandler.h",
-     "nsAsyncRedirectVerifyHelper.h",
-     "nsBaseChannel.h",
-     "nsFileStreams.h",
-@@ -186,6 +187,7 @@ UNIFIED_SOURCES += [
-     "ContentRange.cpp",
-     "Dashboard.cpp",
-     "DefaultURI.cpp",
-+    "DenBrowserAttest.cpp",
-     "EventTokenBucket.cpp",
-     "InterceptionInfo.cpp",
-     "IPv4Parser.cpp",
+ 

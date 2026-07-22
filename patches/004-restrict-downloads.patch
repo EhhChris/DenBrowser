@@ -28,9 +28,50 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #    Defense-in-depth block at the C++ shell service level in case the
 #    function is reached by any path other than the context menu item.
 
+
+diff --git a/browser/components/shell/ShellService.sys.mjs b/browser/components/shell/ShellService.sys.mjs
+index 9d57af17c3f7..d10d696fbdbb 100644
+--- a/browser/components/shell/ShellService.sys.mjs
++++ b/browser/components/shell/ShellService.sys.mjs
+@@ -100,6 +100,7 @@ let ShellServiceInternal = {
+    * environments.
+    */
+   get canSetDesktopBackground() {
++    return false; // DenBrowser: writing files to disk is not permitted.
+     if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
+       return true;
+     }
+diff --git a/browser/components/shell/nsMacShellService.cpp b/browser/components/shell/nsMacShellService.cpp
+index 5f5dd4163cb3..8b3d39c7fc04 100644
+--- a/browser/components/shell/nsMacShellService.cpp
++++ b/browser/components/shell/nsMacShellService.cpp
+@@ -101,6 +101,8 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
+ NS_IMETHODIMP
+ nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
+                                         const nsACString& aImageName) {
++  // DenBrowser: writing files to disk is not permitted.
++  return NS_ERROR_ABORT;
+   // Note: We don't support aPosition on OS X.
+ 
+   // Get the image URI:
+diff --git a/browser/components/shell/nsWindowsShellService.cpp b/browser/components/shell/nsWindowsShellService.cpp
+index 2b36517e5bd9..cdbbbab19ac5 100644
+--- a/browser/components/shell/nsWindowsShellService.cpp
++++ b/browser/components/shell/nsWindowsShellService.cpp
+@@ -698,6 +698,8 @@ NS_IMETHODIMP
+ nsWindowsShellService::SetDesktopBackground(dom::Element* aElement,
+                                             int32_t aPosition,
+                                             const nsACString& aImageName) {
++  // DenBrowser: writing files to disk is not permitted.
++  return NS_ERROR_ABORT;
+   if (!aElement || !aElement->IsHTMLElement(nsGkAtoms::img)) {
+     // XXX write background loading stuff!
+     return NS_ERROR_NOT_AVAILABLE;
+diff --git a/toolkit/content/contentAreaUtils.js b/toolkit/content/contentAreaUtils.js
+index 0500166d874d..05f6998d3486 100644
 --- a/toolkit/content/contentAreaUtils.js
 +++ b/toolkit/content/contentAreaUtils.js
-@@ -295,6 +295,14 @@
+@@ -295,6 +295,14 @@ function internalSave(
    aPrincipal,
    aSaveCompleteCallback
  ) {
@@ -45,22 +86,22 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    if (aSkipPrompt == undefined) {
      aSkipPrompt = false;
    }
-
+diff --git a/uriloader/exthandler/nsExternalHelperAppService.cpp b/uriloader/exthandler/nsExternalHelperAppService.cpp
+index 1eab40145589..aca2de35e439 100644
 --- a/uriloader/exthandler/nsExternalHelperAppService.cpp
 +++ b/uriloader/exthandler/nsExternalHelperAppService.cpp
-@@ -88,6 +88,7 @@
-
+@@ -86,6 +86,7 @@
+ 
  #include "nsIStringBundle.h"  // XXX needed to localize error msgs
  #include "nsIPrompt.h"
 +#include "nsIPromptService.h"
-
+ 
  #include "nsITextToSubURI.h"  // to unescape the filename
-
-@@ -754,6 +754,14 @@
-     nsIStreamListener** aStreamListener) {
+ 
+@@ -768,6 +769,14 @@ NS_IMETHODIMP nsExternalHelperAppService::CreateListener(
    MOZ_ASSERT(!XRE_IsContentProcess());
    NS_ENSURE_ARG_POINTER(aChannel);
-
+ 
 +  // DenBrowser: file downloads unconditionally blocked.
 +  if (nsCOMPtr<nsIPromptService> prompt =
 +          do_GetService("@mozilla.org/embedcomp/prompt-service;1")) {
@@ -71,38 +112,4 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  return NS_ERROR_ABORT;
    nsAutoString fileName;
    nsAutoCString fileExtension;
-
---- a/browser/components/shell/ShellService.sys.mjs
-+++ b/browser/components/shell/ShellService.sys.mjs
-@@ -57,6 +57,7 @@
-   get canSetDesktopBackground() {
-+    return false; // DenBrowser: writing files to disk is not permitted.
-     if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
-       return true;
-     }
-
-     if (AppConstants.platform == "linux") {
-
---- a/browser/components/shell/nsMacShellService.cpp
-+++ b/browser/components/shell/nsMacShellService.cpp
-@@ -102,6 +102,8 @@
- NS_IMETHODIMP
- nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
-                                         const nsACString& aImageName) {
-+  // DenBrowser: writing files to disk is not permitted.
-+  return NS_ERROR_ABORT;
-   // Note: We don't support aPosition on OS X.
-
-   // Get the image URI:
-
---- a/browser/components/shell/nsWindowsShellService.cpp
-+++ b/browser/components/shell/nsWindowsShellService.cpp
-@@ -672,6 +672,8 @@
- NS_IMETHODIMP
- nsWindowsShellService::SetDesktopBackground(dom::Element* aElement,
-                                             int32_t aPosition,
-                                             const nsACString& aImageName) {
-+  // DenBrowser: writing files to disk is not permitted.
-+  return NS_ERROR_ABORT;
-   if (!aElement || !aElement->IsHTMLElement(nsGkAtoms::img)) {
-     // XXX write background loading stuff!
+   nsIHelperAppLauncherDialog::reason reason =

@@ -5,17 +5,18 @@
 
 ## Workflow
 
-1. Run `../scripts/fetch-esr.sh` to get the Firefox source.
-2. Make changes in the source tree under `../src/firefox-<version>/`.
-3. Generate a patch:
-   ```
-   cd ../src/firefox-<version>
-   hg diff > ../../patches/00N-my-change.patch
-   # OR if using plain git/diff:
-   diff -Naur original_file modified_file > ../../patches/00N-my-change.patch
-   ```
-4. Test applying cleanly: `patch -p1 --dry-run < ../../patches/00N-my-change.patch`
-5. Patches are applied in lexicographic order by `apply-patches.sh`.
+**These `.patch` files are a generated artifact.** The source of truth is the
+one-commit-per-patch `DenBrowser` branch of the Firefox fork at `../firefox`; the
+files here are regenerated from it with `scripts/gen-patches.sh`. Do **not**
+hand-edit a `.patch` file — edit the corresponding commit on the branch and
+regenerate.
+
+See **[`../docs/patch-workflow.md`](../docs/patch-workflow.md)** for the full
+procedure (bumping to a new ESR, adding a patch, restarting from scratch, tag and
+commit conventions).
+
+At build time, `apply-patches.sh` applies these files (in lexicographic order,
+via `git apply -p1`) to the fetched ESR tarball.
 
 ## Patch naming
 

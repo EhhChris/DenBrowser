@@ -22,47 +22,14 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # Linux/GTK: no reliable cross-compositor API exists; the OS-level capture
 # flag is omitted. The JS block still applies.
 
---- a/widget/cocoa/nsCocoaWindow.mm
-+++ b/widget/cocoa/nsCocoaWindow.mm
-@@ -4761,10 +4761,14 @@
 
-   // Create the window
-   mWindow = [[windowClass alloc] initWithContentRect:contentRect
-                                            styleMask:features
-                                              backing:NSBackingStoreBuffered
-                                                defer:YES];
-+  // DenBrowser: prevent this window from appearing in any screen capture API,
-+  // screen recorder, or screenshot tool. NSWindowSharingNone instructs the
-+  // macOS compositor to exclude the window's backing store from capture.
-+  [mWindow setSharingType:NSWindowSharingNone];
-
-   // Make sure that window titles don't leak to disk in private browsing mode
-   // due to macOS' resume feature.
-   mWindow.restorable = !aIsPrivateBrowsing;
---- a/widget/windows/nsWindow.cpp
-+++ b/widget/windows/nsWindow.cpp
-@@ -956,14 +956,18 @@
-   }
-
-   if (!mWnd) {
-     mWnd =
-         ::CreateWindowExW(desiredStyles.ex, className, L"", desiredStyles.style,
-                           aRect.X(), aRect.Y(), aRect.Width(), aRect.Height(),
-                           parent, nullptr, nsToolkit::mDllInstance, nullptr);
-     if (!mWnd) {
-       NS_WARNING("nsWindow CreateWindowEx failed.");
-       return NS_ERROR_FAILURE;
-     }
-   }
-+  // DenBrowser: exclude this window from all screen capture APIs.
-+  // WDA_EXCLUDEFROMCAPTURE requires Windows 10 build 19041+; on older
-+  // builds the call returns FALSE which we intentionally ignore.
-+  ::SetWindowDisplayAffinity(mWnd, WDA_EXCLUDEFROMCAPTURE);
-
-   {
+diff --git a/browser/components/screenshots/ScreenshotsUtils.sys.mjs b/browser/components/screenshots/ScreenshotsUtils.sys.mjs
+index 042f795c9cff..fa09f6d6d97e 100644
 --- a/browser/components/screenshots/ScreenshotsUtils.sys.mjs
 +++ b/browser/components/screenshots/ScreenshotsUtils.sys.mjs
-@@ -1052,6 +1052,9 @@
+@@ -1161,6 +1161,9 @@ export var ScreenshotsUtils = {
+    * @param type The type of screenshot taken.
+    */
    async takeScreenshot(browser, type) {
 +    // DenBrowser: built-in screenshot capture disabled.
 +    console.error("DenBrowser: screenshot capture is disabled by policy.");
@@ -70,18 +37,19 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      this.closePanel(browser);
      this.closeOverlay(browser, {
        doNotResetMethods: true,
-       highlightRegions: true,
-     });
-@@ -1180,5 +1183,8 @@
+@@ -1297,6 +1300,9 @@ export var ScreenshotsUtils = {
+    * @param browser The current browser
+    */
    async copyScreenshotFromRegion(region, browser) {
 +    // DenBrowser: built-in screenshot capture disabled.
 +    console.error("DenBrowser: screenshot capture is disabled by policy.");
 +    return;
      let canvas = await this.createCanvas(region, browser);
      let blob = await canvas.convertToBlob();
-
-     await this.copyScreenshot(blob, browser, "OverlayCopy");
-@@ -1263,5 +1269,8 @@
+ 
+@@ -1347,6 +1353,9 @@ export var ScreenshotsUtils = {
+    * @param browser The current browser
+    */
    async downloadScreenshotFromRegion(title, region, browser) {
 +    // DenBrowser: built-in screenshot capture disabled.
 +    console.error("DenBrowser: screenshot capture is disabled by policy.");
@@ -89,4 +57,33 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      let canvas = await this.createCanvas(region, browser);
      let blob = await canvas.convertToBlob();
      let blobURL = URL.createObjectURL(blob);
-     this.setBlobURL(browser, blobURL);
+diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
+index ebae2a976d01..6484c3c9a42e 100644
+--- a/widget/cocoa/nsCocoaWindow.mm
++++ b/widget/cocoa/nsCocoaWindow.mm
+@@ -5162,6 +5162,10 @@ static unsigned int WindowMaskForBorderStyle(BorderStyle aBorderStyle) {
+                                            styleMask:features
+                                              backing:NSBackingStoreBuffered
+                                                defer:YES];
++  // DenBrowser: prevent this window from appearing in any screen capture API,
++  // screen recorder, or screenshot tool. NSWindowSharingNone instructs the
++  // macOS compositor to exclude the window's backing store from capture.
++  [mWindow setSharingType:NSWindowSharingNone];
+ 
+   // Make sure that window titles don't leak to disk in private browsing mode
+   // due to macOS' resume feature.
+diff --git a/widget/windows/nsWindow.cpp b/widget/windows/nsWindow.cpp
+index 8a73e6fba95e..fa67e64a578d 100644
+--- a/widget/windows/nsWindow.cpp
++++ b/widget/windows/nsWindow.cpp
+@@ -1099,6 +1099,10 @@ nsresult nsWindow::Create(nsIWidget* aParent, const LayoutDeviceIntRect& aRect,
+       return NS_ERROR_FAILURE;
+     }
+   }
++  // DenBrowser: exclude this window from all screen capture APIs.
++  // WDA_EXCLUDEFROMCAPTURE requires Windows 10 build 19041+; on older
++  // builds the call returns FALSE which we intentionally ignore.
++  ::SetWindowDisplayAffinity(mWnd, WDA_EXCLUDEFROMCAPTURE);
+ 
+   {
+     // Some of the chrome mask window styles can be added implicitly by

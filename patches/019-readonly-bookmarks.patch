@@ -23,11 +23,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # bookmark UI (star button, menus, context-menu items) is a separate cosmetic
 # change, tuned against a real build.
 
+
 diff --git a/toolkit/components/places/Bookmarks.sys.mjs b/toolkit/components/places/Bookmarks.sys.mjs
-index c250b3cdec..7bdf7a6864 100644
+index acd57c4ab931..119ecb14a8a9 100644
 --- a/toolkit/components/places/Bookmarks.sys.mjs
 +++ b/toolkit/components/places/Bookmarks.sys.mjs
-@@ -229,6 +229,9 @@ export var Bookmarks = Object.freeze({
+@@ -228,6 +228,9 @@ export var Bookmarks = Object.freeze({
     * @throws If the arguments are invalid.
     */
    insert(info) {
@@ -37,7 +38,7 @@ index c250b3cdec..7bdf7a6864 100644
      let now = new Date();
      let addedTime = (info && info.dateAdded) || now;
      let modTime = addedTime;
-@@ -383,6 +386,8 @@ export var Bookmarks = Object.freeze({
+@@ -382,6 +385,8 @@ export var Bookmarks = Object.freeze({
     * @throws if the arguments are invalid.
     */
    insertTree(tree, options) {
@@ -46,7 +47,7 @@ index c250b3cdec..7bdf7a6864 100644
      if (!tree || typeof tree != "object") {
        throw new Error("Should be provided a valid tree object.");
      }
-@@ -686,6 +691,8 @@ export var Bookmarks = Object.freeze({
+@@ -685,6 +690,8 @@ export var Bookmarks = Object.freeze({
     * @throws If the arguments are invalid.
     */
    update(info) {
@@ -55,7 +56,7 @@ index c250b3cdec..7bdf7a6864 100644
      // The info object is first validated here to ensure it's consistent, then
      // it's compared to the existing item to remove any properties that don't
      // need to be updated.
-@@ -1015,6 +1022,8 @@ export var Bookmarks = Object.freeze({
+@@ -1014,6 +1021,8 @@ export var Bookmarks = Object.freeze({
     * @throws If the arguments are invalid.
     */
    moveToFolder(guids, parentGuid, index, source) {
@@ -64,7 +65,7 @@ index c250b3cdec..7bdf7a6864 100644
      if (!Array.isArray(guids) || guids.length < 1) {
        throw new Error("guids should be an array of at least one item");
      }
-@@ -1264,6 +1273,8 @@ export var Bookmarks = Object.freeze({
+@@ -1263,6 +1272,8 @@ export var Bookmarks = Object.freeze({
     * @throws if the arguments are invalid.
     */
    remove(guidOrInfo, options = {}) {
@@ -73,7 +74,7 @@ index c250b3cdec..7bdf7a6864 100644
      let infos = guidOrInfo;
      if (!infos) {
        throw new Error("Input should be a valid object");
-@@ -1384,6 +1395,8 @@ export var Bookmarks = Object.freeze({
+@@ -1383,6 +1394,8 @@ export var Bookmarks = Object.freeze({
     * @returns {Promise<void>} Resolved when the removal is complete.
     */
    eraseEverything(options = {}) {
@@ -82,7 +83,7 @@ index c250b3cdec..7bdf7a6864 100644
      if (!options.source) {
        options.source = Bookmarks.SOURCES.DEFAULT;
      }
-@@ -1756,6 +1769,8 @@ export var Bookmarks = Object.freeze({
+@@ -1755,6 +1768,8 @@ export var Bookmarks = Object.freeze({
     * @throws if the arguments are invalid.
     */
    reorder(parentGuid, orderedChildrenGuids, options = {}) {

@@ -32,31 +32,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   toolkit.telemetry.unified = false
 #   datareporting.policy.dataSubmissionPolicyBypassNotification = true
 
---- a/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs
-+++ b/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs
-@@ -278,13 +278,10 @@
-    * This is the master switch for remote server communication. If it is
-    * false, we never request upload or deletion.
-    */
--  get dataSubmissionEnabled() {
--    // Default is true because we are opt-out.
--    return Services.prefs.getBoolPref(
--      TelemetryUtils.Preferences.DataSubmissionEnabled,
--      true
--    );
--  },
-+  get dataSubmissionEnabled() {
-+    // DenBrowser: diagnostics and data submission permanently disabled.
-+    return false;
-+  },
 
-   get currentPolicyVersion() {
-     return Services.prefs.getIntPref(
+diff --git a/toolkit/components/telemetry/app/TelemetryControllerParent.sys.mjs b/toolkit/components/telemetry/app/TelemetryControllerParent.sys.mjs
+index 26f775223ce4..851715ccac7b 100644
 --- a/toolkit/components/telemetry/app/TelemetryControllerParent.sys.mjs
 +++ b/toolkit/components/telemetry/app/TelemetryControllerParent.sys.mjs
-@@ -691,7 +691,9 @@
-    *
-    * @return {Promise} Resolved when TelemetryController and TelemetrySession are fully
+@@ -714,6 +714,8 @@ var Impl = {
     *                   initialized. This is only used in tests.
     */
    setupTelemetry: function setupTelemetry(testing) {
@@ -65,3 +46,21 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
      this._initStarted = true;
      this._shuttingDown = false;
      this._shutDown = false;
+diff --git a/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs b/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs
+index f05dbb80436b..d68e717ae866 100644
+--- a/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs
++++ b/toolkit/components/telemetry/app/TelemetryReportingPolicy.sys.mjs
+@@ -422,11 +422,8 @@ var TelemetryReportingPolicyImpl = {
+    * false, we never request upload or deletion.
+    */
+   get dataSubmissionEnabled() {
+-    // Default is true because we are opt-out.
+-    return Services.prefs.getBoolPref(
+-      TelemetryUtils.Preferences.DataSubmissionEnabled,
+-      true
+-    );
++    // DenBrowser: diagnostics and data submission permanently disabled.
++    return false;
+   },
+ 
+   get currentPolicyVersion() {
