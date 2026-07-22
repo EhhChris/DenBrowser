@@ -1,0 +1,28 @@
+# Disable all automatic line-ending conversion by default.
+# Bytes in the working tree == bytes in the object store.
+* -text
+
+# Patch series MUST be LF. CRLF corrupts blank context lines
+# (" \r\n" instead of " \n") and breaks `git apply` / `patch`.
+patches/**   text eol=lf
+*.patch      text eol=lf
+*.diff       text eol=lf
+
+# Build/tooling files that break under CRLF
+*.sh         text eol=lf
+*.mozconfig  text eol=lf
+mach         text eol=lf
+Makefile     text eol=lf
+*.mk         text eol=lf
+
+# Explicit binaries
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.msi binary
+*.zip binary
+*.7z  binary
+*.bin binary
+*.mar binary
