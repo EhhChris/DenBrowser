@@ -96,7 +96,7 @@ index 00ec512..55bdc13 100644
  #include <iterator>  // std::size
  
  namespace denbrowser {
-@@ -517,4 +520,86 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
+@@ -518,4 +521,86 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
    return NS_OK;
  }
  
@@ -196,9 +196,10 @@ index 727e5e0..3439d01 100644
  
  class nsIInputStream;
  class nsIURI;
-@@ -60,6 +62,30 @@ namespace denbrowser {
+@@ -64,7 +66,31 @@ namespace denbrowser {
  nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
-                           nsIInputStream* aUploadStream);
+                           nsIInputStream* aUploadStream,
+                           uint64_t aUploadLength);
  
 +/**
 + * VerifyProxyPin — return false to abort a TLS handshake when the peer
