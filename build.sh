@@ -370,17 +370,18 @@ fi
 
 # ── Step 2.6: Inject site configuration ──────────────────────────────────────
 # Reads config/site-config.json (if present) and fills the compile-time sentinel
-# blocks in nsCopySupport.cpp and nsDocShell.cpp that were added by patches 003
-# and 014.  If the file is absent or a list is empty, the array defaults to
+# blocks in nsCopySupport.cpp, ContentParent.cpp, and the shared network site
+# filter added by patches 003 and 014. If the file is absent or a list is empty,
+# the array defaults to
 # { nullptr } and that feature is disabled for this build.
 NCOPY_SRC="$FIREFOX_SRC/dom/base/nsCopySupport.cpp"
-DOCSHELL_SRC="$FIREFOX_SRC/docshell/base/nsDocShell.cpp"
 CONTENT_PARENT_SRC="$FIREFOX_SRC/dom/ipc/ContentParent.cpp"
+SITE_FILTER_SRC="$FIREFOX_SRC/netwerk/base/DenBrowserSiteFilter.h"
 if [[ -f "$SITE_CONFIG" ]]; then
-    python3 - "$SITE_CONFIG" "$NCOPY_SRC" "$DOCSHELL_SRC" "$CONTENT_PARENT_SRC" <<'PYEOF' || { echo "[build] ERROR: site-config injection failed — aborting build."; exit 1; }
+    python3 - "$SITE_CONFIG" "$NCOPY_SRC" "$CONTENT_PARENT_SRC" "$SITE_FILTER_SRC" <<'PYEOF' || { echo "[build] ERROR: site-config injection failed — aborting build."; exit 1; }
 import json, sys, re
 
-config_path, ncopy_path, docshell_path, content_parent_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+config_path, ncopy_path, content_parent_path, site_filter_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(config_path, encoding='utf-8') as f:
     config = json.load(f)
@@ -418,8 +419,8 @@ def inject(filepath, sentinel_name, items):
 
 inject(ncopy_path,         'CLIPBOARD_SITES', config.get('clipboard_sites', []))
 inject(content_parent_path,'CLIPBOARD_SITES', config.get('clipboard_sites', []))
-inject(docshell_path,      'SITE_WHITELIST',  config.get('site_whitelist',  []))
-inject(docshell_path,      'SITE_BLACKLIST',  config.get('site_blacklist',  []))
+inject(site_filter_path,   'SITE_WHITELIST',  config.get('site_whitelist',  []))
+inject(site_filter_path,   'SITE_BLACKLIST',  config.get('site_blacklist',  []))
 PYEOF
 else
     echo "[build] No site-config.json — clipboard allow-list and site filter disabled."
