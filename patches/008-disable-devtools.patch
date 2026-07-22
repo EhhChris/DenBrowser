@@ -2,7 +2,28 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 008-disable-devtools
+#
+# Disables all developer tools unconditionally.
+#
+# The DisableDeveloperTools enterprise policy (in policies.json) already
+# gates devtools through the devtools.policy.disabled pref, which covers:
+#   - F12 / Ctrl+Shift+I keyboard shortcuts (DevToolsStartup.onWindowReady skips hookWindow)
+#   - All Tools > Web Developer menu items (hidden by devtools-browser.js)
+#   - Right-click Inspect (removed when pref is set)
+#   - about:debugging, about:devtools-toolbox, about:profiling (blocked)
+#   - --start-debugger-server and --jsconsole command-line flags
+#   - Remote debugging server
+#
+# This patch hardens further by replacing the pref-based runtime check in both
+# shim entry points with an unconditional `return true`. This means DevTools
+# remain disabled even if someone modifies the pref at runtime (e.g. via
+# external tooling or a compromised about:config bypass).
+#
+# Two files are patched because two independent shim modules both expose
+# isDisabledByPolicy() and are each called from different code paths:
+#   - DevToolsShim gates lazy devtools initialization and extension APIs
+#   - DevToolsStartup gates window hookup, keyboard shortcuts, and CLI flags
 
 diff --git a/devtools/startup/DevToolsShim.sys.mjs b/devtools/startup/DevToolsShim.sys.mjs
 index efd4c25201a1..480d19378a11 100644

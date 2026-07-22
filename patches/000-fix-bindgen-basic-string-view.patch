@@ -2,7 +2,21 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 000-fix-bindgen-basic-string-view
+#
+# Fixes a build failure on macOS with newer Clang/libc++ toolchains where
+# bindgen fails to translate the _CharT template parameter in basic_string_view,
+# producing a broken Rust type alias:
+#
+#   pub type basic_string___self_view = root::std::__1::basic_string_view<_CharT>;
+#                                                                          ^^^^^^ not found
+#
+# On macOS, libc++ wraps std:: types in the inline namespace std::__1::, so
+# the pattern must use a wildcard rather than matching "std::basic_string_view"
+# literally. The fix follows the same opaque_type pattern Mozilla already uses
+# for std::string and std::vector in this same file.
+#
+# Numbered 000 so it applies before all other patches.
 
 diff --git a/tools/profiler/rust-api/build.rs b/tools/profiler/rust-api/build.rs
 index 7f9e27012722..9e6bb703748c 100644

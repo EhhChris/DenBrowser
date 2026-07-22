@@ -2,7 +2,84 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 015-strip-blocked-args
+#
+# Strips security-sensitive command-line flags AND environment variables from
+# the process startup state before any Firefox processing occurs, making
+# DenBrowser's lockdowns resistant to being bypassed by invoking the binary
+# directly with custom flags or with security-affecting env vars set.
+#
+# Without this patch, a user with shell access can bypass mozilla.cfg lockdowns
+# in several ways:
+#
+#   denbrowser --profile /tmp/mypersistentprofile     # custom prefs+extensions
+#   MOZ_LOG=all:5 MOZ_LOG_FILE=/tmp/dump denbrowser   # log everything to disk
+#   MOZ_DISABLE_CONTENT_SANDBOX=1 denbrowser          # weaken sandbox
+#   SSLKEYLOGFILE=/tmp/k.log denbrowser               # dump TLS keys
+#   MOZ_PROFILER_STARTUP=1 denbrowser                 # write samples to disk
+#
+# Argv flags stripped (representative — full list in DenBrowserStripBlockedArgs):
+#
+#   --profile / -P / --ProfileManager / --CreateProfile / --migration
+#       Profile selection; a persistent profile bypasses autoconfig +
+#       mozilla.cfg lockdowns and the ramdisk profile (patch 007).
+#   --marionette / --remote-debugging-port / --remote-allow-system-access /
+#   --start-debugger-server / --jsdebugger / --wait-for-jsdebugger /
+#   --jsconsole / --attach-console / --console
+#       Remote-control and debugging surfaces.  Belt over the corresponding
+#       lockPrefs in mozilla.cfg.
+#   --screenshot
+#       Headless capture-to-disk mode that writes a PNG of the URL it was
+#       given — bypasses patch 001 (screenshot disable).
+#   --headless / --new-instance / --no-remote / --safe-mode / --purgecaches
+#       Modes that change save / sandbox / pref-load semantics.
+#   --setDefaultBrowser / --preferences / --recording / --recordreplay
+#       Side-effecting flags with no place in a locked-down deployment.
+#
+# Env vars stripped (representative — full list in DenBrowserStripBlockedEnv):
+#
+#   MOZ_LOG, MOZ_LOG_FILE, NSPR_LOG_MODULES, NSPR_LOG_FILE, R_LOG_*,
+#   SSLKEYLOGFILE
+#       Logging endpoints.  SSLKEYLOGFILE in particular dumps the TLS
+#       master secret to a file readable by any user-level process —
+#       catastrophic against the patch 012 proxy-TLS pinning protections.
+#   MOZ_DISABLE_CONTENT_SANDBOX, MOZ_DISABLE_{GMP,RDD,GPU,SOCKET_PROCESS,
+#       UTILITY,VR}_SANDBOX, MOZ_PERMIT_CSP_VIOLATION
+#       Process-sandbox bypasses.
+#   MOZ_HEADLESS, MOZ_FORCE_DISABLE_E10S, MOZ_USE_REMOTE, MOZ_NO_REMOTE,
+#   MOZ_MARIONETTE, MARIONETTE, MOZ_REMOTE_AGENT, XPCOM_DEBUG_BREAK,
+#   XRE_MAIN_BREAK, MOZ_DEBUG_CHILD_*
+#       Remote-control / alternate-mode / debugger-attach toggles.
+#   MOZ_CRASHREPORTER*
+#       Re-enables crash dump writes (process memory snapshot) despite the
+#       mozconfig --disable-crashreporter flag.
+#   MOZ_PROFILER_STARTUP*
+#       Writes performance samples — including JS source frames — to disk.
+#   MOZ_RUN_GTEST, FUZZER, MOZ_FUZZ
+#       Test-only execution paths that should never fire in a release build.
+#
+# Implementation:
+#
+#   DenStripArg() walks gArgv and removes every occurrence of a named flag
+#   (case-insensitive, handling -, -- and Windows / prefixes), including
+#   inline --flag=value and Windows /flag:value spellings.  Only flags marked
+#   as value-taking consume a separate following argument, so a valueless flag
+#   followed by an ordinary URL does not accidentally remove the URL too.
+#
+#   DenStripEnv() fully removes a variable from the environment so
+#   PR_GetEnv() / getenv() see it as unset.  PR_SetEnv("NAME=") only sets the
+#   variable to empty string — code that uses `if (PR_GetEnv("X"))` for
+#   presence checks would still take the branch.  On Windows we clear both
+#   the CRT _environ table (_putenv_s) and the process env block
+#   (SetEnvironmentVariableA).
+#
+#   DenBrowserStripBlockedArgs() and DenBrowserStripBlockedEnv() are called
+#   from XREMain::XRE_main() immediately after gArgc/gArgv are assigned and
+#   before ScopedLogging initialization — earlier than any other flag or env
+#   processing.
+#
+# This patch operates at the C++ level and cannot be circumvented by profile
+# configuration, mozilla.cfg edits, or enterprise policy changes.
 
 diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
 index 0b0e8a138e45..8656166bf0d1 100644

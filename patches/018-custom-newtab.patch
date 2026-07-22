@@ -2,7 +2,38 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 018-custom-newtab
+#
+# Replaces the new-tab page with a self-contained DenBrowser shortcuts page.
+#
+# Rationale: this browser runs in permanent private browsing with extensions
+# locked down, so the activity-stream new-tab page never renders — its built-in
+# add-on's background script does not run, so about:newtab is left blank/stuck.
+# We serve our own static page instead.
+#
+# Mechanism:
+#   1. about:denbrowserhome is registered as a plain chrome about: page via the
+#      C++ AboutRedirector (AboutRedirector.cpp + components.conf), exactly like
+#      about:robots and about:privatebrowsing. It maps to
+#      chrome://browser/content/denbrowser-newtab.{html,css} (registered in
+#      browser/base/jar.mn). Flags are URI_SAFE_FOR_UNTRUSTED_CONTENT |
+#      URI_MUST_LOAD_IN_CHILD: the page renders as untrusted content in a normal
+#      child content process — it deliberately avoids the privileged-about
+#      process and ALLOW_SCRIPT (the page is static, no JS). This sidesteps the
+#      newtab built-in add-on entirely, along with its init handshake.
+#   2. AboutNewTab.newTabURL is pinned to about:denbrowserhome, so every new tab
+#      (the "+" button, Ctrl+T, preloading — all of which resolve through
+#      BROWSER_NEW_TAB_URL → AboutNewTab.newTabURL) loads our page. The
+#      permanent-PBM logic in BROWSER_NEW_TAB_URL passes our about: URL through
+#      unchanged (it is not a moz-extension URL and the new tab is not
+#      extension-controlled). about:newtab itself is left untouched.
+#   3. about:denbrowserhome is added to gInitialPages so it is treated as an
+#      initial page (blank URL bar, etc.) like about:newtab.
+#
+#   The tiles between the page's DEN_SHORTCUTS markers are generated at build
+#   time by build.sh (Step 2.7) from config/site-config.json's "bookmarks".
+#   The page is pure static HTML (no script), so clicking a tile is an ordinary
+#   top-level navigation.
 
 diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
 index c919cf5c91b3..9de616c03c4e 100644

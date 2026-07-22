@@ -2,7 +2,83 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 016-fixed-window-title
+#
+# PURPOSE: Force a constant window title regardless of the page title that
+# the docshell hands the widget.  The page title is otherwise readable by any
+# user-level process on the host through OS window-list APIs, well before any
+# screen-capture or accessibility hook fires.
+#
+# THREAT MODEL ADDRESSED:
+#
+#   On every desktop OS, a non-privileged sibling process can enumerate the
+#   titles of windows owned by other apps without requesting any permission:
+#
+#     - macOS:  CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID)
+#               returns an array of dictionaries each containing kCGWindowName
+#               (the window's NSWindow.title).
+#     - Windows: EnumWindows() + GetWindowTextW() on every HWND.
+#     - X11:    _NET_WM_NAME / WM_NAME atoms on every top-level window; visible
+#               to any X client via xwininfo, wmctrl, xprop, etc.
+#     - Wayland: gtk_window_set_title() updates xdg_toplevel::set_title which is
+#               sent to the compositor; some compositors expose it back to
+#               other clients via protocol extensions.
+#
+#   Firefox sets the window title to the current page's <title> (plus a
+#   product-name suffix).  In a DenBrowser deployment the page title often
+#   contains sensitive user content — message subject lines, document
+#   filenames, full search queries, ticket numbers — that we otherwise spend
+#   significant effort keeping inside the rendered window
+#   (NSWindowSharingNone in patch 001, screenshot blocks, etc.).
+#
+#   This patch closes the window-title side channel by intercepting the
+#   single platform-widget entry point that web content ultimately reaches
+#   (nsCocoaWindow::SetTitle on macOS, nsWindow::SetTitle on Windows and
+#   GTK), discarding the supplied title, and substituting the constant
+#   string "DenBrowser".
+#
+# WHY AT THE WIDGET LAYER:
+#
+#   Page title updates flow:
+#     document.title  →  DOMTitleChanged  →  <browser>.contentTitle
+#                    →  tabbrowser title-watching code in browser.js
+#                    →  XULBrowserWindow.setOverrideContent() etc.
+#                    →  nsBaseWidget::SetTitle (via nsIBaseWindow)
+#                    →  platform-specific nsCocoaWindow/nsWindow::SetTitle
+#
+#   Intercepting at the platform SetTitle is the lowest layer that catches
+#   every caller — JS-driven title changes, internal chrome-window title
+#   updates, dialog titles, prompt sheets — without having to touch the
+#   chrome-JS layer where there are many entry points.
+#
+# COVERAGE:
+#
+#   Every NSWindow / HWND / GtkWindow the application creates ends up with
+#   the literal title "DenBrowser".  This includes:
+#     - The main browser window.
+#     - All dialog windows (Save dialogs, Page Info, Permissions, etc.) — they
+#       are conventionally titled by their XUL <window title="..."> attribute
+#       which goes through the same SetTitle path.
+#     - Prompt sheets and tab dialogs.
+#     - Picture-in-Picture floating windows.
+#
+#   The functional impact is cosmetic — Firefox's UX never relies on its own
+#   window titles for any operation.
+#
+# WHAT THIS DOES NOT BLOCK:
+#
+#   - On-screen text rendering of the page title elsewhere in the chrome UI
+#     (the tab title strip, the macOS window menu's "Window" entry).  Those
+#     stay rendered for the local user but are inside the same window whose
+#     compositor backing is excluded from capture by patch 001.
+#   - Accessibility-tree exposure of page content other than the window title
+#     (the document tree itself).  --disable-accessibility in mozconfig
+#     covers most of that.
+#
+# FILES MODIFIED:
+#   widget/cocoa/nsCocoaWindow.mm
+#   widget/windows/nsWindow.cpp
+#   widget/gtk/nsWindow.cpp
 
 diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
 index 6484c3c9a42e..1db0fe014894 100644

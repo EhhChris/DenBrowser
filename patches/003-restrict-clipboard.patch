@@ -2,7 +2,92 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 003-restrict-clipboard
+#
+# Blocks all clipboard and drag-to-copy access, with an optional compile-time
+# allow-list that permits in-browser copy/paste between specific sites.
+#
+# CORE BLOCKS (always active — six entry points):
+#
+# 1. Clipboard::ReadHelper (dom/events/Clipboard.cpp)
+#    Blocks Clipboard.read() and Clipboard.readText() for all sites.
+#
+# 2. Clipboard::Write (dom/events/Clipboard.cpp)
+#    Blocks Clipboard.write() / writeText() for all sites.
+#
+# 3. Document::ExecCommand (dom/base/Document.cpp)
+#    Blocks document.execCommand("cut/copy/paste") for all sites.
+#
+# 4. nsCopySupport::FireClipboardEvent (dom/base/nsCopySupport.cpp)
+#    Blocks the user-level copy command (Ctrl+C / right-click Copy) for ALL
+#    content.  Listed sites fall through to the native copy path (see INTERNAL
+#    CLIPBOARD below).  Paste (Ctrl+V) is intercepted here for listed sites.
+#
+# 5. nsBaseClipboard::SetData (widget/nsBaseClipboard.cpp)
+#    Backstop: suppresses every remaining OS clipboard write path AND skips
+#    the in-memory ClipboardCache update.  Both are required: macOS defaults
+#    widget.clipboard.use-cached-data.enabled to true, so without the cache
+#    bypass a non-listed site's paste would hit the cache populated by a
+#    listed-site copy (SetNativeClipboardData is suppressed, OS sequence
+#    number doesn't change, cache stays "valid", non-listed-site GetData
+#    returns the listed-site text — cross-site exfiltration).  An early
+#    return inside the if(aTransferable) block in SetData skips the
+#    clipboardCache->Update() call at end-of-function.
+#
+# 6. nsBaseDragSession::InvokeDragSession (widget/nsBaseDragService.cpp)
+#    Blocks all drag-and-drop to prevent text exfiltration via URL bar drag.
+#
+# INTERNAL CLIPBOARD (optional — activated by site-config.json):
+#
+#   When config/site-config.json lists one or more hostnames in
+#   "clipboard_sites", an in-process clipboard is activated for those sites:
+#
+#   - Copy (Ctrl+C) on a listed site: FireClipboardEvent does NOT intercept;
+#     it falls through to Firefox's native copy flow (nsHTMLCopyEncoder).
+#     ContentParent::RecvSetClipboard receives the transferable the native
+#     encoder produced, detects the listed-site origin via WindowGlobalParent,
+#     extracts text/plain, and stores it in gDenParentClipText (parent process).
+#     nsBaseClipboard::SetData then suppresses the actual OS clipboard write.
+#     This approach avoids the shadow-DOM text duplication that manual
+#     GetTransferableForSelection produced for Amazon-style content.
+#     The OS clipboard sequence number is recorded so an external copy (from
+#     another app) can be detected on paste and the intercept bypassed.
+#
+#   - Paste (Ctrl+V) on a listed site: FireClipboardEvent sets
+#     gDenServePasteFromInternal = true in the paste return block (outside the
+#     clipboardevents conditional — mozilla.cfg locks
+#     dom.event.clipboardevents.enabled false, which skips the entire event-
+#     dispatch block for web content, so the flag must be set after that block).
+#     nsClipboardProxy::GetDataSnapshotSync (and GetData) check this flag and
+#     call SendGetDenInternalClipboard (sync IPC) to fetch gDenParentClipText
+#     from the parent.  The parent's RecvGetDenInternalClipboard checks the OS
+#     clipboard sequence number; if it changed (external copy), it clears the
+#     stored text and returns hasData=false so the content process falls through
+#     to the normal OS clipboard IPC path.
+#     ClipboardPopulatedDataSnapshot requires AddDataFlavor to be called before
+#     SetTransferData so FlavorsTransferableCanExport populates mFlavors; the
+#     GetDataSync strict flavor check then passes for any editor transferable.
+#     The flag gDenServePasteFromInternal is NOT cleared by the intercept so
+#     both a JS event.clipboardData.getData() call and the editor's default
+#     paste (two separate clipboard reads in the same event) both succeed.
+#
+#   gDenServePasteFromInternal lives in the content process.
+#   nsClipboardProxy.cpp externs it from nsCopySupport.cpp (same binary).
+#   gDenParentClipText, gDenParentClipHasData, gDenParentCopySeqNum, and
+#   kDenClipboardSites live in the parent process (ContentParent.cpp).
+#   build.sh injects kDenClipboardSites into both nsCopySupport.cpp AND
+#   ContentParent.cpp at compile time from site-config.json.
+#
+#   Data copied from a listed site is never visible to the OS clipboard or to
+#   any unlisted site.  External clipboard content (from other apps) can flow
+#   IN to listed sites because the OS sequence-number check detects the external
+#   copy and bypasses the intercept.
+#
+# RELATIONSHIP TO PREFS:
+#   lockPref("dom.allow_cut_copy", false) and
+#   lockPref("dom.event.clipboardevents.enabled", false) in mozilla.cfg are
+#   belt-and-suspenders for external sites.  This patch is the authoritative
+#   clipboard control; the prefs do not affect listed-site internal clipboard.
 
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
 index 1081a150609c..b7f7734b2927 100644

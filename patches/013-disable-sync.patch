@@ -2,7 +2,54 @@ This Source Code Form is subject to the terms of the Mozilla Public
 License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-
+# PATCH: 013-disable-sync
+#
+# PURPOSE: Permanently disable Firefox Sync and Firefox Accounts (FxA) at the
+# source level so no pref change, policy override, or runtime manipulation can
+# re-enable them.
+#
+# THREAT MODEL ADDRESSED:
+#
+#   Firefox Sync, if active, exfiltrates browsing history, open tabs, passwords,
+#   form data, and extension state to Mozilla's sync servers.  For a hardened,
+#   VPN-gated browser whose traffic is confined to the attestation proxy, any
+#   out-of-band sync channel is a data-leak vector.  Even with no account
+#   configured at deployment time, a user or attacker with local access could
+#   sign in and begin exfiltrating data.
+#
+# LAYERS OF COVERAGE:
+#
+# 1. WeaveService.enabled (services/sync/Weave.sys.mjs)
+#    The startup auto-connect timer checks this getter before importing any
+#    Sync code.  Hardcoding it to false prevents the entire Sync module graph
+#    from loading, regardless of whether an FxA account is present in the
+#    profile.
+#
+# 2. FXA_ENABLED constant (services/fxaccounts/FxAccounts.sys.mjs)
+#    FxAccounts reads FXA_ENABLED at two points: to auto-sign-out any account
+#    found in profile storage on startup, and to reject any call to
+#    setSignedInUser().  Replacing the pref-backed lazy getter with a hard
+#    false means no pref write or runtime change can make either path return
+#    true.
+#
+# 3. Settings page Sync pane (browser/components/preferences/preferences.js)
+#    The pref-gated block that un-hides the Sync category and registers
+#    gSyncPane is removed unconditionally, so the Sync settings page is never
+#    reachable regardless of pref state.
+#
+# 4. Sidebar Synced Tabs entry (browser/components/sidebar/browser-sidebar.js)
+#    The viewTabsSidebar sidebar registration is removed, so the Synced Tabs
+#    panel never appears in the sidebar launcher or switcher menu.
+#
+# 5. Sidebar switcher menu item (browser/base/content/main-popupset.inc.xhtml)
+#    The sidebar-switcher-tabs menuitem (classic sidebar menu) is removed.
+#
+# RELATIONSHIP TO POLICIES:
+#
+#   policies.json already sets DisableFirefoxAccounts which locks the
+#   identity.fxaccounts.enabled pref to false.  These source patches add
+#   defence-in-depth: the policy depends on policies.json loading correctly at
+#   runtime; the source-level changes are unconditional.
 
 diff --git a/browser/base/content/main-popupset.inc.xhtml b/browser/base/content/main-popupset.inc.xhtml
 index 2338bac0003a..0bb6b8a2d49f 100644
