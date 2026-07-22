@@ -7,7 +7,7 @@
 
 A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. DenBrowser is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
 
-**Currently tracking Firefox ESR 140.x** (most recently built against 140.11.0esr;
+**Currently tracking Firefox ESR 140.x** (most recently built against 140.13.0esr;
 `scripts/fetch-esr.sh` pulls whatever ESR is current at fetch time).
 
 As this project progresses tags will be cut and attempt to follow the latest ESR releases.
@@ -20,7 +20,7 @@ context that they usually carry across point releases unmodified.
 ## Prerequisites
 
 - Python 3, Rust, Node.js (required by Firefox build system — see [Firefox build docs](https://firefox-source-docs.mozilla.org/setup/))
-- **[sccache](https://github.com/mozilla/sccache)** — required compiler wrapper.
+- **[sccache](https://github.com/mozilla/sccache)** — required compiler wrapper. Can disable by commenting out sccache values in `config/mozconfig`.
   `config/mozconfig` sets `--with-compiler-wrapper=sccache`, so the build will
   fail at configure if it's not on `PATH`. It also dramatically reduces
   incremental rebuild times (minutes instead of an hour+ on a warm cache).
@@ -32,26 +32,6 @@ context that they usually carry across point releases unmodified.
   `config/mozconfig`; adjust there if you're tight on disk.
 - ~20 GB free disk space for the source + build artifacts (plus up to 50 GB
   for the sccache cache, separately configurable)
-
-## Deployment requirements
-
-DenBrowser keeps page content out of Firefox's on-disk profile (PBM forced on,
-disk cache hard-disabled, downloads blocked, SanitizeOnShutdown locked).
-What it cannot control is the **operating system** writing process memory
-to disk underneath it. To close that gap, every deployment host must:
-
-- **Enable full-disk encryption** (FileVault on macOS, BitLocker on Windows,
-  LUKS on Linux). Anything the OS pages out to swap/pagefile, captures in a
-  crash dump (`WerFault`, `sysdiagnose`, kernel minidump), or writes to a
-  hibernation image is then encrypted at rest under a user- or TPM-bound key.
-- **Disable hibernation**, or ensure the hibernation image is encrypted.
-  (FDE generally covers this, but verify on locked-down kiosk images.)
-- **On Linux**, prefer `swapoff` or an encrypted swap partition. Unencrypted
-  swap defeats every in-memory protection in this project.
-
-These are operational controls, not build-time controls. The browser cannot
-enforce them; the deployment image must. See `patches/007-ramdisk-profile.patch`
-for the detailed analysis of why DenBrowser does not ship a RAM-disk profile.
 
 ## Quick start
 
@@ -401,5 +381,6 @@ for navigation.
 | 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
+| 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox |
 
 ---
