@@ -400,8 +400,8 @@ index 2ee13e7e51c7..a9510252f8f2 100644
 +      IPCTransferableData transferableData;
 +      nsContentUtils::TransferableToIPCTransferableData(
 +          denTrans, &transferableData, true /* aInSyncMessage */, this);
-+      *aTransferableDataOrError = std::move(transferableData);
-+      return IPC_OK();
++      *aResult = std::move(transferableData);
++      return NS_OK;
 +    }
 +  }
 +
