@@ -75,8 +75,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   partner's cert only touches that partner's entry; the other proxies'
 #   pins are unaffected.
 
+
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
-index 00ec512..55bdc13 100644
+index f930dbd9b58d..f8937fef3104 100644
 --- a/netwerk/base/DenBrowserAttest.cpp
 +++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -32,6 +32,8 @@
@@ -184,7 +185,7 @@ index 00ec512..55bdc13 100644
 +
  }  // namespace denbrowser
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
-index 727e5e0..3439d01 100644
+index 4984247dedb5..159c2eb882b6 100644
 --- a/netwerk/base/DenBrowserAttest.h
 +++ b/netwerk/base/DenBrowserAttest.h
 @@ -6,6 +6,8 @@
@@ -196,8 +197,7 @@ index 727e5e0..3439d01 100644
  
  class nsIInputStream;
  class nsIURI;
-@@ -64,7 +66,31 @@ namespace denbrowser {
- nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
+@@ -65,6 +67,30 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
                            nsIInputStream* aUploadStream,
                            uint64_t aUploadLength);
  
@@ -228,19 +228,19 @@ index 727e5e0..3439d01 100644
  }  // namespace denbrowser
  
  #endif  // DenBrowserAttest_h__
-
 diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manager/ssl/SSLServerCertVerification.cpp
+index 0b3918f9d55f..39bcd6069743 100644
 --- a/security/manager/ssl/SSLServerCertVerification.cpp
 +++ b/security/manager/ssl/SSLServerCertVerification.cpp
-@@ -103,6 +103,7 @@
+@@ -102,6 +102,7 @@
  #include "ScopedNSSTypes.h"
  #include "SharedCertVerifier.h"
  #include "VerifySSLServerCertChild.h"
 +#include "DenBrowserAttest.h"  // denbrowser::VerifyProxyPin
  #include "cert.h"
  #include "mozilla/Assertions.h"
- #include "mozilla/Casting.h"
-@@ -957,5 +958,23 @@
+ #include "mozilla/RefPtr.h"
+@@ -965,6 +966,24 @@ SECStatus AuthCertificateHook(void* arg, PRFileDesc* fd, PRBool checkSig,
    nsTArray<nsTArray<uint8_t>> peerCertsBytes =
        CreateCertBytesArray(peerCertChain);
  
@@ -264,3 +264,4 @@ diff --git a/security/manager/ssl/SSLServerCertVerification.cpp b/security/manag
 +
    // SSL_PeerStapledOCSPResponses will never return a non-empty response if
    // OCSP stapling wasn't enabled because libssl wouldn't have let the server
+   // return a stapled OCSP response.

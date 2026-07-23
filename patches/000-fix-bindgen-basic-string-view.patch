@@ -18,15 +18,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Numbered 000 so it applies before all other patches.
 
+diff --git a/tools/profiler/rust-api/build.rs b/tools/profiler/rust-api/build.rs
+index 7f9e27012722..9e6bb703748c 100644
 --- a/tools/profiler/rust-api/build.rs
 +++ b/tools/profiler/rust-api/build.rs
-@@ -91,5 +91,9 @@
-         // std::vector needs to be converted to an opaque type because, if it's
+@@ -99,6 +99,10 @@ fn generate_bindings() {
          // not an opaque type, bindgen can't find its size properly and
          // MarkerSchema's total size reduces. That causes a heap buffer overflow.
-         .opaque_type("std::vector")
+         .opaque_type("std::vector.*")
 +        // std::basic_string_view uses a _CharT template parameter that bindgen
 +        // fails to translate with newer Clang/libc++ on macOS (std::__1:: inline
 +        // namespace). The wildcard pattern matches both std:: and std::__1:: forms.
 +        .opaque_type("std::.*basic_string_view.*")
          .raw_line("pub use self::root::*;")
+         // Tell cargo to invalidate the built crate whenever any of the
+         // included header files changed.

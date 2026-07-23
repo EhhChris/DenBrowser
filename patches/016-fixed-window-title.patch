@@ -80,16 +80,14 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   widget/windows/nsWindow.cpp
 #   widget/gtk/nsWindow.cpp
 
+diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
+index 6484c3c9a42e..1db0fe014894 100644
 --- a/widget/cocoa/nsCocoaWindow.mm
 +++ b/widget/cocoa/nsCocoaWindow.mm
-@@ -6296,20 +6296,21 @@ int32_t nsCocoaWindow::GetSharingFactor() {
- nsresult nsCocoaWindow::SetTitle(const nsAString& aTitle) {
-   NS_OBJC_BEGIN_TRY_BLOCK_RETURN;
-
-   if (!mWindow) {
+@@ -6886,10 +6886,11 @@ static bool AlwaysUsesNativeFullScreen() {
      return NS_OK;
    }
-
+ 
 -  const nsString& strTitle = PromiseFlatString(aTitle);
 -  const unichar* uniTitle = reinterpret_cast<const unichar*>(strTitle.get());
 -  NSString* title = [NSString stringWithCharacters:uniTitle
@@ -99,46 +97,17 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  // window-list APIs (CGWindowListCopyWindowInfo) without any permission
 +  // prompt — see patch 016 header for the full rationale.
 +  NSString* title = @"DenBrowser";
-   if (mWindow.drawsContentsIntoWindowFrame && !mWindow.wantsTitleDrawn) {
+   if (mWindow.drawsContentsIntoWindowFrame) {
      // Don't cause invalidations when the title isn't displayed.
      [mWindow disableSetNeedsDisplay];
-     [mWindow setTitle:title];
-     [mWindow enableSetNeedsDisplay];
-   } else {
-     [mWindow setTitle:title];
-   }
-
---- a/widget/windows/nsWindow.cpp
-+++ b/widget/windows/nsWindow.cpp
-@@ -3436,14 +3436,15 @@ void nsWindow::SetCursor(const Cursor& aCursor) {
-  *
-  **************************************************************/
-
- nsresult nsWindow::SetTitle(const nsAString& aTitle) {
--  const nsString& strTitle = PromiseFlatString(aTitle);
-+  // DenBrowser: ignore the page-supplied title.  See widget/cocoa/nsCocoaWindow.mm
-+  // SetTitle() for the rationale (window-title leak via OS window-list APIs).
-   AutoRestore<bool> sendingText(mSendingSetText);
-   mSendingSetText = true;
--  ::SendMessageW(mWnd, WM_SETTEXT, (WPARAM)0, (LPARAM)(LPCWSTR)strTitle.get());
-+  ::SendMessageW(mWnd, WM_SETTEXT, (WPARAM)0, (LPARAM)L"DenBrowser");
-   return NS_OK;
- }
-
- /**************************************************************
-  *
-  * SECTION: nsIWidget::SetIcon
-
+diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
+index 9d11df189598..45344fd861fe 100644
 --- a/widget/gtk/nsWindow.cpp
 +++ b/widget/gtk/nsWindow.cpp
-@@ -3575,21 +3575,14 @@ void nsWindow::ApplySizeConstraints() {
- }
-
- nsresult nsWindow::SetTitle(const nsAString& aTitle) {
-   if (!mShell) {
+@@ -1921,17 +1921,10 @@ nsresult nsWindow::SetTitle(const nsAString& aTitle) {
      return NS_OK;
    }
-
+ 
 -  // convert the string into utf8 and set the title.
 -#define UTF8_FOLLOWBYTE(ch) (((ch) & 0xC0) == 0x80)
 -  NS_ConvertUTF16toUTF8 titleUTF8(aTitle);
@@ -154,6 +123,24 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  // SetTitle() for the rationale (window-title leak via _NET_WM_NAME / wmctrl /
 +  // xdg_toplevel::set_title on Wayland).
 +  gtk_window_set_title(GTK_WINDOW(mShell), "DenBrowser");
-
+ 
    return NS_OK;
  }
+diff --git a/widget/windows/nsWindow.cpp b/widget/windows/nsWindow.cpp
+index fa67e64a578d..87a7a29b7d8e 100644
+--- a/widget/windows/nsWindow.cpp
++++ b/widget/windows/nsWindow.cpp
+@@ -3537,10 +3537,11 @@ void* nsWindow::GetNativeData(uint32_t aDataType) {
+  **************************************************************/
+ 
+ nsresult nsWindow::SetTitle(const nsAString& aTitle) {
+-  const nsString& strTitle = PromiseFlatString(aTitle);
++  // DenBrowser: ignore the page-supplied title.  See widget/cocoa/nsCocoaWindow.mm
++  // SetTitle() for the rationale (window-title leak via OS window-list APIs).
+   AutoRestore<bool> sendingText(mSendingSetText);
+   mSendingSetText = true;
+-  ::SendMessageW(mWnd, WM_SETTEXT, (WPARAM)0, (LPARAM)(LPCWSTR)strTitle.get());
++  ::SendMessageW(mWnd, WM_SETTEXT, (WPARAM)0, (LPARAM)L"DenBrowser");
+   return NS_OK;
+ }
+ 

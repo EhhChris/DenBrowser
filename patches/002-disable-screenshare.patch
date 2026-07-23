@@ -26,9 +26,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # parent-process calls funnel through MediaManager::GetUserMedia in the parent,
 # so the hunk above is the single choke point.
 
+
+diff --git a/dom/media/MediaDevices.cpp b/dom/media/MediaDevices.cpp
+index 5c4939eca527..7a1fe7103437 100644
 --- a/dom/media/MediaDevices.cpp
 +++ b/dom/media/MediaDevices.cpp
-@@ -510,6 +510,11 @@
+@@ -521,6 +521,11 @@ already_AddRefed<Promise> MediaDevices::GetDisplayMedia(
      return nullptr;
    }
    nsCOMPtr<nsPIDOMWindowInner> owner = do_QueryInterface(global);
@@ -40,9 +43,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
    /* If the relevant global object of this does not have transient activation,
     * return a promise rejected with a DOMException object whose name attribute
     * has the value InvalidStateError. */
+diff --git a/dom/media/MediaManager.cpp b/dom/media/MediaManager.cpp
+index 82508f935b1f..cc62fc38092d 100644
 --- a/dom/media/MediaManager.cpp
 +++ b/dom/media/MediaManager.cpp
-@@ -2945,19 +2945,12 @@
+@@ -3021,19 +3021,12 @@ RefPtr<MediaManager::StreamPromise> MediaManager::GetUserMedia(
          [[fallthrough]];
        case MediaSourceEnum::Screen:
        case MediaSourceEnum::Window:

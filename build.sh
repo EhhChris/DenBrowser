@@ -69,7 +69,12 @@ if [[ -n "$TARBALL_PATH" ]]; then
     TARBALL_PATH="$(cd "$(dirname "$TARBALL_PATH")" && pwd)/$(basename "$TARBALL_PATH")"
     # Discover the top-level directory from the archive itself rather than parsing
     # the filename — handles stripped/renamed tarballs without caring about the name.
-    _topdir=$(tar -tf "$TARBALL_PATH" 2>/dev/null | head -1 | cut -d/ -f1) || true
+    # Some tarballs prefix every entry with "./" (and may lead with a bare "./"
+    # directory entry), so take the first real path component — skipping empty and
+    # "." fields — instead of blindly cutting field 1. Otherwise _topdir becomes "."
+    # and .esr_version becomes ".esr", sending the build to look for src/firefox-.
+    _topdir=$(tar -tf "$TARBALL_PATH" 2>/dev/null | awk -F/ '
+        { for (i = 1; i <= NF; i++) if ($i != "" && $i != ".") { print $i; exit } }') || true
     if [[ -z "$_topdir" ]]; then
         echo "[build] ERROR: Could not read tarball: $TARBALL_PATH" >&2
         exit 1

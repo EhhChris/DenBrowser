@@ -49,9 +49,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   have shifted.  The script verifies the patch applies cleanly before
 #   overwriting the diff section of this file.
 
+
+diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
+index 6e2b95ff7f93..d0b21b63c483 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3658,6 +3658,455 @@
+@@ -3888,6 +3888,455 @@ void Preferences::SetupTelemetryPref() {
  
  #endif  // MOZ_WIDGET_ANDROID
  
@@ -507,15 +510,15 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -3708,6 +4157,11 @@
-           static_cast<nsISupports*>(static_cast<void*>(sPreferences)),
+@@ -3939,6 +4388,11 @@ already_AddRefed<Preferences> Preferences::GetInstanceForService() {
            "pref-config-startup");
      }
-+
+ 
 +    // DenBrowser: apply compiled-in lockPref set.  Runs unconditionally
 +    // (independent of whether autoconfig.js / mozilla.cfg were loaded)
 +    // and AFTER pref-config-startup, so a tampered mozilla.cfg cannot win.
 +    SetupDenBrowserLockdown();
- 
++
      nsCOMPtr<nsIObserverService> observerService =
          services::GetObserverService();
+     if (!observerService) {

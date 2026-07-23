@@ -36,13 +36,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   top-level navigation.
 
 diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
-index e586f85545..1da429d5f7 100644
+index c919cf5c91b3..9de616c03c4e 100644
 --- a/browser/base/content/browser.js
 +++ b/browser/base/content/browser.js
-@@ -706,6 +706,8 @@ var gInitialPages = [
-   "about:home",
+@@ -724,6 +724,8 @@ var gInitialPages = [
    "about:firefoxview",
    "about:newtab",
+   "about:opentabs",
 +  // DenBrowser: our custom new-tab page is an initial page like about:newtab.
 +  "about:denbrowserhome",
    "about:privatebrowsing",
@@ -50,7 +50,7 @@ index e586f85545..1da429d5f7 100644
    "about:welcome",
 diff --git a/browser/base/content/denbrowser-newtab.css b/browser/base/content/denbrowser-newtab.css
 new file mode 100644
-index 0000000000..3ddc34fb45
+index 000000000000..3ddc34fb4511
 --- /dev/null
 +++ b/browser/base/content/denbrowser-newtab.css
 @@ -0,0 +1,108 @@
@@ -164,7 +164,7 @@ index 0000000000..3ddc34fb45
 +}
 diff --git a/browser/base/content/denbrowser-newtab.html b/browser/base/content/denbrowser-newtab.html
 new file mode 100644
-index 0000000000..9c3b364c85
+index 000000000000..9c3b364c8579
 --- /dev/null
 +++ b/browser/base/content/denbrowser-newtab.html
 @@ -0,0 +1,39 @@
@@ -208,7 +208,7 @@ index 0000000000..9c3b364c85
 +  </body>
 +</html>
 diff --git a/browser/base/jar.mn b/browser/base/jar.mn
-index ad10fe2c55..d476b0e6f9 100644
+index 416391b3ecf2..baeb85bfcd04 100644
 --- a/browser/base/jar.mn
 +++ b/browser/base/jar.mn
 @@ -13,6 +13,8 @@ browser.jar:
@@ -219,12 +219,12 @@ index ad10fe2c55..d476b0e6f9 100644
 +        content/browser/denbrowser-newtab.css         (content/denbrowser-newtab.css)
          content/browser/logos/etp-mobile.svg          (content/logos/etp-mobile.svg)
          content/browser/logos/fxa-logo.svg            (content/logos/fxa-logo.svg)
-         content/browser/logos/lockwise.svg            (content/logos/lockwise.svg)
+         content/browser/logos/ipprotection-states.svg  (content/logos/ipprotection-states.svg)
 diff --git a/browser/components/about/AboutRedirector.cpp b/browser/components/about/AboutRedirector.cpp
-index bf9ca0914f..36972fa160 100644
+index 958db7176c11..136e4f3bc6c7 100644
 --- a/browser/components/about/AboutRedirector.cpp
 +++ b/browser/components/about/AboutRedirector.cpp
-@@ -152,6 +152,15 @@ static const RedirEntry kRedirMap[] = {
+@@ -138,6 +138,15 @@ static const RedirEntry kRedirMap[] = {
           nsIAboutModule::URI_MUST_LOAD_IN_CHILD | nsIAboutModule::ALLOW_SCRIPT |
           nsIAboutModule::URI_CAN_LOAD_IN_PRIVILEGEDABOUT_PROCESS |
           nsIAboutModule::IS_SECURE_CHROME_UI},
@@ -241,22 +241,22 @@ index bf9ca0914f..36972fa160 100644
      {"profilemanager", "chrome://browser/content/profiles/profiles.html",
       nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
 diff --git a/browser/components/about/components.conf b/browser/components/about/components.conf
-index e0a87d43ef..db34eca601 100644
+index 669c6912f636..384264ea893b 100644
 --- a/browser/components/about/components.conf
 +++ b/browser/components/about/components.conf
-@@ -8,6 +8,7 @@ pages = [
+@@ -7,6 +7,7 @@ pages = [
      'asrouter',
      'blocked',
      'certerror',
 +    'denbrowserhome',
      'downloads',
      'framecrashed',
-     'logins',
+     'keyboard',
 diff --git a/browser/modules/AboutNewTab.sys.mjs b/browser/modules/AboutNewTab.sys.mjs
-index 42c9c3889f..4641043ec4 100644
+index 4d6b04e72b22..c7c90da57a3a 100644
 --- a/browser/modules/AboutNewTab.sys.mjs
 +++ b/browser/modules/AboutNewTab.sys.mjs
-@@ -14,6 +14,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
+@@ -19,6 +19,12 @@ ChromeUtils.defineESModuleGetters(lazy, {
  });
  
  const ABOUT_URL = "about:newtab";
@@ -269,7 +269,7 @@ index 42c9c3889f..4641043ec4 100644
  const PREF_ACTIVITY_STREAM_DEBUG = "browser.newtabpage.activity-stream.debug";
  // AboutHomeStartupCache needs us in "quit-application", so stay alive longer.
  // TODO: We could better have a shared async shutdown blocker?
-@@ -112,7 +118,10 @@ export const AboutNewTab = {
+@@ -141,7 +147,10 @@ export const AboutNewTab = {
    },
  
    get newTabURL() {

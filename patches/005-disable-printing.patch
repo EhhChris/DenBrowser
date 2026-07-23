@@ -35,15 +35,20 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #    there and closing the dialog gives reliable feedback, mirroring the
 #    blocked-save alert patch 004 adds to contentAreaUtils.js internalSave().
 
+
+diff --git a/layout/printing/nsPrintJob.cpp b/layout/printing/nsPrintJob.cpp
+index 0904ef055fce..00e13c8ab660 100644
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
-@@ -33,3 +33,4 @@
+@@ -30,6 +30,7 @@
+ #include "nsIBrowserChild.h"
+ #include "nsIDocShell.h"
  #include "nsIOService.h"
 +#include "nsIPromptService.h"
  #include "nsIScriptGlobalObject.h"
  #include "nsIStringBundle.h"
-@@ -326,6 +327,19 @@
- nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
+ #include "nsITextToSubURI.h"
+@@ -324,6 +325,19 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
                                   nsIPrintSettings* aPrintSettings,
                                   nsIWebProgressListener* aWebProgressListener,
                                   Document& aSourceDoc) {
@@ -62,12 +67,14 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  return NS_ERROR_ABORT;
    // Callers must hold a strong reference to |this| to ensure that we stay
    // alive for the duration of this method, because our main owning reference
-
+   // (on nsDocumentViewer) might be cleared during this function (if we cause
+diff --git a/toolkit/components/printing/content/print.js b/toolkit/components/printing/content/print.js
+index d9204f28178b..ed5cf127d0e4 100644
 --- a/toolkit/components/printing/content/print.js
 +++ b/toolkit/components/printing/content/print.js
 @@ -163,6 +163,21 @@ var PrintEventHandler = {
    _noPreviewUpdateSettings: new Set(["numCopies", "printDuplex"]),
-
+ 
    async init() {
 +    // DenBrowser: printing is permanently disabled. The actual block lives in
 +    // nsPrintJob::CommonPrint (patch 005), which aborts the preview render too.
@@ -85,5 +92,5 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +    return;
 +
      Glean.printing.previewOpenedTm.add(1);
-
+ 
      this.printPreviewEl =

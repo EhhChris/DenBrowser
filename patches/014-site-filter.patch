@@ -65,19 +65,34 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   Both are set to: "This site is not on the DenBrowser allow-list. Contact
 #   your administrator for access."
 
+
+diff --git a/browser/locales/en-US/chrome/overrides/appstrings.properties b/browser/locales/en-US/chrome/overrides/appstrings.properties
+index 13464a72e83e..ba5a127f92ff 100644
+--- a/browser/locales/en-US/chrome/overrides/appstrings.properties
++++ b/browser/locales/en-US/chrome/overrides/appstrings.properties
+@@ -45,7 +45,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+ ## LOCALIZATION NOTE (sslv3Used) - Do not translate "%S".
+ sslv3Used=Firefox cannot guarantee the safety of your data on %S because it uses SSLv3, a broken security protocol.
+ inadequateSecurityError=The website tried to negotiate an inadequate level of security.
+-blockedByPolicy=Your organization has blocked access to this page or website.
++blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
+ blockedByCORP=Firefox didn’t load this page because it looks like the security configuration doesn’t match the previous page.
+ invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
+ networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
+index 275d0ce1d33e..d5b0bfed986d 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
-@@ -5,6 +5,8 @@
-  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+@@ -4,6 +4,8 @@
  
  #include "nsDocShell.h"
-+
-+#include "DenBrowserSiteFilter.h"
  
++#include "DenBrowserSiteFilter.h"
++
  #include <algorithm>
+ #include "mozilla/CycleCollectedJSContext.h"
  #include "mozilla/dom/HTMLFormElement.h"
-@@ -9330,6 +9332,21 @@
+@@ -8499,6 +8501,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
  
    MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
  
@@ -99,8 +114,22 @@ diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
    // If we don't have a target, we're loading into ourselves, and our load
    // delegate may want to intercept that load.
    SameDocumentNavigationState sameDocumentNavigationState;
+diff --git a/dom/locales/en-US/chrome/appstrings.properties b/dom/locales/en-US/chrome/appstrings.properties
+index c7adad5d5165..d89ec3e4f460 100644
+--- a/dom/locales/en-US/chrome/appstrings.properties
++++ b/dom/locales/en-US/chrome/appstrings.properties
+@@ -38,7 +38,7 @@ corruptedContentErrorv2=The site at %S has experienced a network protocol violat
+ sslv3Used=The safety of your data on %S could not be guaranteed because it uses SSLv3, a broken security protocol.
+ weakCryptoUsed=The owner of %S has configured their website improperly. To protect your information from being stolen, the connection to this website has not been established.
+ inadequateSecurityError=The website tried to negotiate an inadequate level of security.
+-blockedByPolicy=Your organization has blocked access to this page or website.
++blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
+ blockedByCORP=This page has not been loaded because it looks like the security configuration doesn’t match the previous page.
+ invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
+ networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
 diff --git a/netwerk/base/DenBrowserSiteFilter.h b/netwerk/base/DenBrowserSiteFilter.h
 new file mode 100644
+index 000000000000..60dbd7bb5fad
 --- /dev/null
 +++ b/netwerk/base/DenBrowserSiteFilter.h
 @@ -0,0 +1,64 @@
@@ -169,9 +198,10 @@ new file mode 100644
 +
 +#endif  // DenBrowserSiteFilter_h__
 diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
+index baf48c8f5d46..e43c9cea6329 100644
 --- a/netwerk/base/moz.build
 +++ b/netwerk/base/moz.build
-@@ -131,6 +131,7 @@
+@@ -127,6 +127,7 @@ XPIDL_MODULE = "necko"
  
  EXPORTS += [
      "DenBrowserAttest.h",
@@ -180,9 +210,10 @@ diff --git a/netwerk/base/moz.build b/netwerk/base/moz.build
      "nsASocketHandler.h",
      "nsAsyncRedirectVerifyHelper.h",
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
+index 000209cf4ae0..45503630c8ab 100644
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
 +++ b/netwerk/protocol/http/nsHttpChannel.cpp
-@@ -8,6 +8,7 @@
+@@ -6,6 +6,7 @@
  #include "HttpLog.h"
  
  #include "DenBrowserAttest.h"
@@ -190,7 +221,7 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
-@@ -6705,6 +6706,16 @@
+@@ -7618,6 +7619,16 @@ nsHttpChannel::AsyncOpen(nsIStreamListener* aListener) {
      return NS_FAILED(mStatus) ? mStatus : NS_ERROR_FAILURE;
    }
  
@@ -207,27 +238,3 @@ diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsH
    if (MaybeWaitForUploadStreamNormalization(listener, nullptr)) {
      return NS_OK;
    }
-diff --git a/browser/locales/en-US/chrome/overrides/appstrings.properties b/browser/locales/en-US/chrome/overrides/appstrings.properties
---- a/browser/locales/en-US/chrome/overrides/appstrings.properties
-+++ b/browser/locales/en-US/chrome/overrides/appstrings.properties
-@@ -44,7 +44,7 @@
- ## LOCALIZATION NOTE (sslv3Used) - Do not translate "%S".
- sslv3Used=Firefox cannot guarantee the safety of your data on %S because it uses SSLv3, a broken security protocol.
- inadequateSecurityError=The website tried to negotiate an inadequate level of security.
--blockedByPolicy=Your organization has blocked access to this page or website.
-+blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
- blockedByCORP=Firefox didn’t load this page because it looks like the security configuration doesn’t match the previous page.
- invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
- networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
-diff --git a/dom/locales/en-US/chrome/appstrings.properties b/dom/locales/en-US/chrome/appstrings.properties
---- a/dom/locales/en-US/chrome/appstrings.properties
-+++ b/dom/locales/en-US/chrome/appstrings.properties
-@@ -37,7 +37,7 @@
- sslv3Used=The safety of your data on %S could not be guaranteed because it uses SSLv3, a broken security protocol.
- weakCryptoUsed=The owner of %S has configured their website improperly. To protect your information from being stolen, the connection to this website has not been established.
- inadequateSecurityError=The website tried to negotiate an inadequate level of security.
--blockedByPolicy=Your organization has blocked access to this page or website.
-+blockedByPolicy=This site is not on the DenBrowser allow-list. Contact your administrator for access.
- blockedByCORP=This page has not been loaded because it looks like the security configuration doesn’t match the previous page.
- invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
- networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.

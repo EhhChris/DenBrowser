@@ -25,30 +25,39 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   - DevToolsShim gates lazy devtools initialization and extension APIs
 #   - DevToolsStartup gates window hookup, keyboard shortcuts, and CLI flags
 
+diff --git a/devtools/startup/DevToolsShim.sys.mjs b/devtools/startup/DevToolsShim.sys.mjs
+index efd4c25201a1..480d19378a11 100644
 --- a/devtools/startup/DevToolsShim.sys.mjs
 +++ b/devtools/startup/DevToolsShim.sys.mjs
-@@ -62,6 +62,6 @@
-    * Returns true if the devtools are completely disabled and can not be enabled. All
-    * entry points should return without throwing, initDevTools should never be called.
+@@ -66,7 +66,7 @@ export const DevToolsShim = {
+    * @returns {boolean}
     */
    isDisabledByPolicy() {
 -    return Services.prefs.getBoolPref(DEVTOOLS_POLICY_DISABLED_PREF, false);
 +    return true; // DenBrowser: developer tools permanently disabled.
    },
+ 
+   /**
+diff --git a/devtools/startup/DevToolsStartup.sys.mjs b/devtools/startup/DevToolsStartup.sys.mjs
+index ab008a13b4a6..e8722cc56d48 100644
 --- a/devtools/startup/DevToolsStartup.sys.mjs
 +++ b/devtools/startup/DevToolsStartup.sys.mjs
-@@ -348,3 +348,3 @@
+@@ -353,7 +353,7 @@ export class DevToolsStartup {
+   profilerRecordingButtonCreated = false;
+ 
    isDisabledByPolicy() {
 -    return Services.prefs.getBoolPref(DEVTOOLS_POLICY_DISABLED_PREF, false);
 +    return true; // DenBrowser: developer tools permanently disabled.
-   },
-@@ -683,6 +683,9 @@
-   },
-
+   }
+ 
+   handle(cmdLine) {
+@@ -706,6 +706,9 @@ export class DevToolsStartup {
+   }
+ 
    onMoreToolsViewShowing(moreToolsView) {
 +    if (this.isDisabledByPolicy()) {
 +      return; // DenBrowser: developer tools permanently disabled.
 +    }
      this.addDevToolsItemsToSubview(moreToolsView);
-   },
-
+   }
+ 

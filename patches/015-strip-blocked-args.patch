@@ -81,9 +81,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # This patch operates at the C++ level and cannot be circumvented by profile
 # configuration, mozilla.cfg edits, or enterprise policy changes.
 
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+index 0b0e8a138e45..8656166bf0d1 100644
 --- a/toolkit/xre/nsAppRunner.cpp
 +++ b/toolkit/xre/nsAppRunner.cpp
-@@ -5937,6 +5937,214 @@
+@@ -6332,6 +6332,214 @@ static already_AddRefed<nsIFile> GreOmniPath(int argc, char** argv) {
  }
  #endif
  
@@ -298,7 +300,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  /*
   * XRE_main - A class based main entry point used by most platforms.
   *            Note that on OSX, aAppData->xreDirectory will point to
-@@ -5945,6 +6153,10 @@
+@@ -6340,6 +6548,11 @@ static already_AddRefed<nsIFile> GreOmniPath(int argc, char** argv) {
  int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
    gArgc = argc;
    gArgv = argv;
@@ -306,6 +308,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 +  // before any other Firefox code reads them.
 +  DenBrowserStripBlockedArgs();
 +  DenBrowserStripBlockedEnv();
++
+   AppRunnerTelemFlags appRunnerTelemFlags{};
  
    ScopedLogging log;
- 
