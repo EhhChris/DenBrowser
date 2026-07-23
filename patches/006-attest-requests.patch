@@ -166,7 +166,7 @@ new file mode 100644
 index 000000000000..f930dbd9b58d
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,520 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -206,7 +206,6 @@ index 000000000000..f930dbd9b58d
 +#include "mozilla/Logging.h"
 +#include "mozilla/StaticMutex.h"
 +#include "mozilla/UniquePtr.h"
-+#include "mozilla/Unused.h"
 +#include "nsComponentManagerUtils.h"
 +#include "nsHttp.h"
 +#include "nsHttpRequestHead.h"
@@ -680,9 +679,9 @@ index 000000000000..f930dbd9b58d
 +    return NS_OK;
 +  }
 +
-+  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Ts"_ns, tsStr, false);
-+  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Nonce"_ns, nonceB64, false);
-+  mozilla::Unused << aHead.SetHeader("X-DenBrowser-Token"_ns, tokenB64, false);
++  (void)aHead.SetHeader("X-DenBrowser-Ts"_ns, tsStr, false);
++  (void)aHead.SetHeader("X-DenBrowser-Nonce"_ns, nonceB64, false);
++  (void)aHead.SetHeader("X-DenBrowser-Token"_ns, tokenB64, false);
 +
 +  return NS_OK;
 +}
