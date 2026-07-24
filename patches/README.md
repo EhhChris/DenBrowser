@@ -40,6 +40,7 @@ that line once the patch contains real diff content.
 | Screensharing | `dom/media/webrtc/MediaEngineDefault.cpp`, `browser/modules/ContentObservers.jsm` |
 | Print | `layout/printing/nsPrintJob.cpp`, `toolkit/components/printing/` |
 | Screenshots (built-in) | `browser/extensions/screenshots/` |
+| Citrix endpoint capture bridge | `toolkit/xre/DenCitrixCapture*.{h,cpp}` |
 | Preferences/policies | `browser/components/enterprisepolicies/` |
 | New-tab page routing | `browser/components/about/AboutRedirector.cpp` + `components.conf` (registers `about:denbrowserhome`), `browser/modules/AboutNewTab.sys.mjs` (pins `newTabURL`), `browser/base/content/denbrowser-newtab.{html,css}` |
 | Bookmarks (read-only) | `toolkit/components/places/Bookmarks.sys.mjs` |

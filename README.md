@@ -382,5 +382,6 @@ for navigation.
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox |
+| 021 | `citrix-capture-protection` | In an ICA session, require a verified `DENCAP` virtual-channel lease before showing browser UI, renew it while DenBrowser runs, and release it on orderly final shutdown. The separately deployed Citrix Workspace endpoint module applies `WDA_EXCLUDEFROMCAPTURE` to the owned top-level ICA window; see [`citrix/README.md`](citrix/README.md). |
 
 ---
