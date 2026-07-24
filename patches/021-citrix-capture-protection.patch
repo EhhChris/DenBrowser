@@ -1,0 +1,676 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 021-citrix-capture-protection
+#
+# Windows browser builds running in an ICA session require a verified endpoint
+# capture-protection lease before browser UI is created. The primary process
+# opens the DENCAP static virtual channel through the VDA WFAPI runtime, sends
+# ACQUIRE/RENEW/RELEASE frames, and validates the endpoint WDA read-back.
+#
+# Startup fails closed when no endpoint acknowledgement is available. After an
+# established lease, loss of a verified renewal terminates the browser before
+# the endpoint lease can expire. Local and ordinary RDP sessions are unchanged;
+# patch 001 continues to protect DenBrowser-owned HWNDs there.
+#
+# This patch is only the VDA sender. It requires the separately deployed signed
+# Citrix Workspace virtual-driver module and VDA custom-channel allow-list entry
+# documented in citrix/README.md. WDA is best-effort public-capture protection,
+# not DRM, and the endpoint module must first prove that its process owns the
+# top-level ICA HWND.
+
+
+diff --git a/toolkit/xre/DenCitrixCaptureProtection.cpp b/toolkit/xre/DenCitrixCaptureProtection.cpp
+new file mode 100644
+index 0000000..2e74186
+--- /dev/null
++++ b/toolkit/xre/DenCitrixCaptureProtection.cpp
+@@ -0,0 +1,402 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "DenCitrixCaptureProtection.h"
++
++#include "DenCitrixCaptureProtocol.h"
++#include "mozilla/RandomNum.h"
++
++#include <wtsapi32.h>
++
++#include <array>
++#include <string>
++
++namespace mozilla::denbrowser {
++namespace {
++
++constexpr DWORD kFirstAttemptWaitMs = 5000;
++constexpr DWORD kRenewIntervalMs = 5000;
++constexpr ULONG kAckTimeoutMs = 1500;
++constexpr uint32_t kMinimumAcceptedLeaseMs = kRenewIntervalMs * 2;
++
++using WFVirtualChannelOpenFn = HANDLE(WINAPI*)(HANDLE, DWORD, LPSTR);
++using WFVirtualChannelCloseFn = BOOL(WINAPI*)(HANDLE);
++using WFVirtualChannelReadFn = BOOL(WINAPI*)(HANDLE, ULONG, PCHAR, ULONG,
++                                             PULONG);
++using WFVirtualChannelWriteFn = BOOL(WINAPI*)(HANDLE, PCHAR, ULONG, PULONG);
++using WFGetActiveProtocolFn = INT(WINAPI*)(DWORD);
++
++bool IsAbsoluteLocalPath(const std::wstring& aPath) {
++  return aPath.size() >= 3 &&
++         ((aPath[0] >= L'A' && aPath[0] <= L'Z') ||
++          (aPath[0] >= L'a' && aPath[0] <= L'z')) &&
++         aPath[1] == L':' && (aPath[2] == L'\\' || aPath[2] == L'/');
++}
++
++bool ReadMachineRegistryString(const wchar_t* aSubkey,
++                               const wchar_t* aValueName, REGSAM aView,
++                               std::wstring* aValue) {
++  HKEY key = nullptr;
++  if (::RegOpenKeyExW(HKEY_LOCAL_MACHINE, aSubkey, 0,
++                      KEY_QUERY_VALUE | aView, &key) != ERROR_SUCCESS) {
++    return false;
++  }
++
++  constexpr DWORD kStringTypes = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
++  DWORD bytes = 0;
++  LSTATUS status =
++      ::RegGetValueW(key, nullptr, aValueName, kStringTypes, nullptr, nullptr,
++                     &bytes);
++  if (status != ERROR_SUCCESS || bytes < sizeof(wchar_t)) {
++    ::RegCloseKey(key);
++    return false;
++  }
++
++  aValue->resize(bytes / sizeof(wchar_t));
++  status = ::RegGetValueW(key, nullptr, aValueName, kStringTypes, nullptr,
++                          aValue->data(), &bytes);
++  ::RegCloseKey(key);
++  if (status != ERROR_SUCCESS) {
++    aValue->clear();
++    return false;
++  }
++
++  while (!aValue->empty() && aValue->back() == L'\0') {
++    aValue->pop_back();
++  }
++  return IsAbsoluteLocalPath(*aValue);
++}
++
++struct WfApi {
++  HMODULE module = nullptr;
++  WFVirtualChannelOpenFn open = nullptr;
++  WFVirtualChannelCloseFn close = nullptr;
++  WFVirtualChannelReadFn read = nullptr;
++  WFVirtualChannelWriteFn write = nullptr;
++  WFGetActiveProtocolFn getActiveProtocol = nullptr;
++
++  ~WfApi() {
++    if (module) {
++      ::FreeLibrary(module);
++    }
++  }
++
++  bool ResolveExports() {
++    open = reinterpret_cast<WFVirtualChannelOpenFn>(
++        ::GetProcAddress(module, "WFVirtualChannelOpen"));
++    close = reinterpret_cast<WFVirtualChannelCloseFn>(
++        ::GetProcAddress(module, "WFVirtualChannelClose"));
++    read = reinterpret_cast<WFVirtualChannelReadFn>(
++        ::GetProcAddress(module, "WFVirtualChannelRead"));
++    write = reinterpret_cast<WFVirtualChannelWriteFn>(
++        ::GetProcAddress(module, "WFVirtualChannelWrite"));
++    getActiveProtocol = reinterpret_cast<WFGetActiveProtocolFn>(
++        ::GetProcAddress(module, "WFGetActiveProtocol"));
++    if (open && close && read && write) {
++      return true;
++    }
++
++    ::FreeLibrary(module);
++    module = nullptr;
++    open = nullptr;
++    close = nullptr;
++    read = nullptr;
++    write = nullptr;
++    getActiveProtocol = nullptr;
++    return false;
++  }
++
++  bool LoadFromDirectory(std::wstring aDirectory) {
++    if (!IsAbsoluteLocalPath(aDirectory)) {
++      return false;
++    }
++    if (aDirectory.back() != L'\\' && aDirectory.back() != L'/') {
++      aDirectory.push_back(L'\\');
++    }
++#ifdef _WIN64
++    constexpr wchar_t kDllName[] = L"wfapi64.dll";
++#else
++    constexpr wchar_t kDllName[] = L"wfapi.dll";
++#endif
++    aDirectory.append(kDllName);
++    module = ::LoadLibraryExW(
++        aDirectory.c_str(), nullptr,
++        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++    return module && ResolveExports();
++  }
++
++  bool Load() {
++    // Modern VDAs publish their HDX binary directory in these machine-wide
++    // values. Query both registry views because DenBrowser and the installed
++    // VDA are not required to have the same architecture.
++    struct RegistryLocation {
++      const wchar_t* subkey;
++      const wchar_t* value;
++    };
++    constexpr std::array<RegistryLocation, 2> kCitrixLocations{{
++        {L"SOFTWARE\\Citrix\\Install\\HDX", L"BinFolder"},
++        {L"SOFTWARE\\Citrix\\Install", L"Location"},
++    }};
++    constexpr std::array<REGSAM, 2> kRegistryViews{
++        KEY_WOW64_64KEY, KEY_WOW64_32KEY};
++
++    for (const auto view : kRegistryViews) {
++      for (const auto& location : kCitrixLocations) {
++        std::wstring directory;
++        if (ReadMachineRegistryString(location.subkey, location.value, view,
++                                      &directory) &&
++            LoadFromDirectory(directory)) {
++          return true;
++        }
++      }
++    }
++
++    // Older single-session and multi-session VDAs predate the HDX registry
++    // value. Derive their well-known Citrix subdirectories from machine-wide
++    // Program Files values instead of trusting the process environment.
++    constexpr wchar_t kWindowsLocation[] =
++        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
++    constexpr std::array<const wchar_t*, 2> kProgramFilesValues{
++        L"ProgramFilesDir", L"ProgramFilesDir (x86)"};
++    constexpr std::array<const wchar_t*, 3> kCitrixSubdirectories{
++        L"Citrix\\HDX\\bin", L"Citrix\\ICAService", L"Citrix\\System32"};
++
++    for (const auto view : kRegistryViews) {
++      for (const auto* value : kProgramFilesValues) {
++        std::wstring programFiles;
++        if (!ReadMachineRegistryString(kWindowsLocation, value, view,
++                                       &programFiles)) {
++          continue;
++        }
++        for (const auto* subdirectory : kCitrixSubdirectories) {
++          std::wstring directory = programFiles;
++          if (directory.back() != L'\\' && directory.back() != L'/') {
++            directory.push_back(L'\\');
++          }
++          directory.append(subdirectory);
++          if (LoadFromDirectory(directory)) {
++            return true;
++          }
++        }
++      }
++    }
++
++    // Retain a System32 fallback for VDA releases that install WFAPI there.
++#ifdef _WIN64
++    constexpr wchar_t kDllName[] = L"wfapi64.dll";
++#else
++    constexpr wchar_t kDllName[] = L"wfapi.dll";
++#endif
++    module = ::LoadLibraryExW(kDllName, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++    return module && ResolveExports();
++  }
++};
++
++bool SendMessageAndReadReply(const WfApi& aApi, HANDLE aChannel,
++                             dencap::MessageType aType,
++                             const uint8_t (&aInstanceId)[16],
++                             uint64_t aSequence, dencap::Message* aReply) {
++  dencap::Message message = {};
++  message.magic = dencap::kMagic;
++  message.version = dencap::kProtocolVersion;
++  message.size = sizeof(dencap::Message);
++  message.type = static_cast<uint16_t>(aType);
++  std::memcpy(message.lease_id, aInstanceId, sizeof(message.lease_id));
++  message.sequence = aSequence;
++  if (aType != dencap::MessageType::kRelease) {
++    message.lease_ms = dencap::kDefaultLeaseMs;
++  }
++
++  ULONG bytesWritten = 0;
++  if (!aApi.write(aChannel, reinterpret_cast<PCHAR>(&message), sizeof(message),
++                  &bytesWritten) ||
++      bytesWritten != sizeof(message)) {
++    return false;
++  }
++
++  dencap::Message reply = {};
++  ULONG bytesRead = 0;
++  if (!aApi.read(aChannel, kAckTimeoutMs, reinterpret_cast<PCHAR>(&reply),
++                 sizeof(reply), &bytesRead) ||
++      bytesRead != sizeof(reply)) {
++    return false;
++  }
++
++  if (reply.magic != dencap::kMagic ||
++      reply.version != dencap::kProtocolVersion ||
++      reply.size != sizeof(reply) ||
++      reply.type != static_cast<uint16_t>(dencap::MessageType::kStatus) ||
++      reply.flags != dencap::kResponseFlag || reply.sequence != aSequence ||
++      !dencap::LeaseIdsEqual(reply.lease_id, aInstanceId) ||
++      reply.reserved != 0) {
++    return false;
++  }
++
++  if (aReply) {
++    *aReply = reply;
++  }
++  return true;
++}
++
++}  // namespace
++
++DenCitrixCaptureProtection::DenCitrixCaptureProtection() {
++  const uint64_t first = RandomUint64OrDie();
++  const uint64_t second = RandomUint64OrDie();
++  std::memcpy(mInstanceId, &first, sizeof(first));
++  std::memcpy(mInstanceId + sizeof(first), &second, sizeof(second));
++}
++
++DenCitrixCaptureProtection::~DenCitrixCaptureProtection() {
++  if (mStopEvent) {
++    ::SetEvent(mStopEvent);
++  }
++  if (mThread) {
++    ::WaitForSingleObject(mThread, INFINITE);
++    ::CloseHandle(mThread);
++  }
++  if (mReadyEvent) {
++    ::CloseHandle(mReadyEvent);
++  }
++  if (mStopEvent) {
++    ::CloseHandle(mStopEvent);
++  }
++}
++
++bool DenCitrixCaptureProtection::Start() {
++  if (mThread) {
++    return mFirstAcquireSucceeded;
++  }
++
++  mStopEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
++  mReadyEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
++  if (!mStopEvent || !mReadyEvent) {
++    return false;
++  }
++
++  mThread = ::CreateThread(nullptr, 0, ThreadEntry, this, 0, nullptr);
++  if (!mThread) {
++    return false;
++  }
++
++  // The first acquisition happens before XRE_mainRun creates browser UI. A
++  // finite upper bound keeps a broken endpoint from hanging ICA startup.
++  ::WaitForSingleObject(mReadyEvent, kFirstAttemptWaitMs);
++  return mFirstAcquireSucceeded;
++}
++
++bool DenCitrixCaptureProtection::IsCurrentSessionIca() {
++  LPWSTR buffer = nullptr;
++  DWORD bytes = 0;
++  if (::WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
++                                    WTS_CURRENT_SESSION, WTSClientProtocolType,
++                                    &buffer, &bytes) &&
++      buffer && bytes >= sizeof(USHORT)) {
++    const USHORT protocol = *reinterpret_cast<const USHORT*>(buffer);
++    ::WTSFreeMemory(buffer);
++    if (protocol == WTS_PROTOCOL_TYPE_ICA) {
++      return true;
++    }
++    if (protocol == WTS_PROTOCOL_TYPE_RDP) {
++      return false;
++    }
++  } else if (buffer) {
++    ::WTSFreeMemory(buffer);
++  }
++
++  // Workstation VDAs can present an ICA desktop as the Windows console
++  // session. WFGetActiveProtocol is the VDA-aware discriminator supplied by
++  // WFAPI; use it when WTS reports console or cannot classify the session.
++  WfApi api;
++  return api.Load() && api.getActiveProtocol &&
++         api.getActiveProtocol(0xFFFFFFFFu) == WTS_PROTOCOL_TYPE_ICA;
++}
++
++DWORD WINAPI DenCitrixCaptureProtection::ThreadEntry(void* aContext) {
++  static_cast<DenCitrixCaptureProtection*>(aContext)->Run();
++  return 0;
++}
++
++void DenCitrixCaptureProtection::Run() {
++  WfApi api;
++  if (!api.Load()) {
++    ::SetEvent(mReadyEvent);
++    return;
++  }
++
++  HANDLE channel = nullptr;
++  uint64_t sequence = 0;
++  bool acquired = false;
++  bool firstAttemptComplete = false;
++
++  while (::WaitForSingleObject(mStopEvent, 0) != WAIT_OBJECT_0) {
++    if (!channel) {
++      // WF_CURRENT_SERVER_HANDLE is NULL and WF_CURRENT_SESSION is -1.
++      channel =
++          api.open(nullptr, 0xFFFFFFFFu,
++                   const_cast<LPSTR>(dencap::kWfApiChannelName));
++      if (channel) {
++        dencap::Message reply = {};
++        acquired =
++            SendMessageAndReadReply(api, channel,
++                                    dencap::MessageType::kAcquire, mInstanceId,
++                                    ++sequence, &reply) &&
++            reply.status == static_cast<uint32_t>(dencap::Status::kOk) &&
++            reply.observed_affinity == WDA_EXCLUDEFROMCAPTURE &&
++            reply.lease_ms >= kMinimumAcceptedLeaseMs;
++        if (!acquired) {
++          api.close(channel);
++          channel = nullptr;
++        }
++      }
++
++      if (!firstAttemptComplete) {
++        mFirstAcquireSucceeded = acquired;
++        firstAttemptComplete = true;
++        ::SetEvent(mReadyEvent);
++      }
++    } else {
++      dencap::Message reply = {};
++      if (!SendMessageAndReadReply(api, channel,
++                                   dencap::MessageType::kRenew, mInstanceId,
++                                   ++sequence, &reply) ||
++          reply.status != static_cast<uint32_t>(dencap::Status::kOk) ||
++          reply.observed_affinity != WDA_EXCLUDEFROMCAPTURE ||
++          reply.lease_ms < kMinimumAcceptedLeaseMs) {
++        api.close(channel);
++        channel = nullptr;
++        acquired = false;
++
++        // Once UI may have been shown, continuing without a verified lease
++        // would create a capture window. Avoid an abrupt exit during orderly
++        // shutdown, but otherwise fail closed before the endpoint lease can
++        // expire.
++        if (::WaitForSingleObject(mStopEvent, 0) != WAIT_OBJECT_0) {
++          ::TerminateProcess(::GetCurrentProcess(), ERROR_ACCESS_DENIED);
++          return;
++        }
++      }
++    }
++
++    if (::WaitForSingleObject(mStopEvent, kRenewIntervalMs) == WAIT_OBJECT_0) {
++      break;
++    }
++  }
++
++  if (!firstAttemptComplete) {
++    ::SetEvent(mReadyEvent);
++  }
++
++  if (channel && acquired) {
++    dencap::Message reply = {};
++    (void)SendMessageAndReadReply(api, channel,
++                                  dencap::MessageType::kRelease, mInstanceId,
++                                  ++sequence, &reply);
++  }
++  if (channel) {
++    api.close(channel);
++  }
++}
++
++}  // namespace mozilla::denbrowser
+diff --git a/toolkit/xre/DenCitrixCaptureProtection.h b/toolkit/xre/DenCitrixCaptureProtection.h
+new file mode 100644
+index 0000000..b4eece4
+--- /dev/null
++++ b/toolkit/xre/DenCitrixCaptureProtection.h
+@@ -0,0 +1,56 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef toolkit_xre_DenCitrixCaptureProtection_h
++#define toolkit_xre_DenCitrixCaptureProtection_h
++
++#include <windows.h>
++
++#include <atomic>
++#include <cstdint>
++
++namespace mozilla::denbrowser {
++
++/**
++ * Holds one capture-protection lease for the lifetime of the primary browser
++ * process. The caller creates this guard only in an ICA session; local and RDP
++ * sessions continue to rely on patch 001 for DenBrowser's own HWNDs.
++ *
++ * In an ICA session, a background thread sends ACQUIRE/RENEW/RELEASE messages
++ * over the DENCAP Citrix virtual channel. The endpoint virtual driver is the
++ * component that owns and protects the Citrix Workspace window.
++ */
++class DenCitrixCaptureProtection final {
++ public:
++  DenCitrixCaptureProtection();
++  ~DenCitrixCaptureProtection();
++
++  DenCitrixCaptureProtection(const DenCitrixCaptureProtection&) = delete;
++  DenCitrixCaptureProtection& operator=(const DenCitrixCaptureProtection&) =
++      delete;
++
++  /**
++   * Starts the lease worker and waits for its first channel attempt. A false
++   * result means that no verified endpoint protection acknowledgement was
++   * received, so the caller must abort startup.
++   */
++  bool Start();
++
++  /** Returns true only when WTS identifies this as an ICA session. */
++  static bool IsCurrentSessionIca();
++
++ private:
++  static DWORD WINAPI ThreadEntry(void* aContext);
++  void Run();
++
++  HANDLE mStopEvent = nullptr;
++  HANDLE mReadyEvent = nullptr;
++  HANDLE mThread = nullptr;
++  std::atomic<bool> mFirstAcquireSucceeded{false};
++  uint8_t mInstanceId[16] = {};
++};
++
++}  // namespace mozilla::denbrowser
++
++#endif  // toolkit_xre_DenCitrixCaptureProtection_h
+diff --git a/toolkit/xre/DenCitrixCaptureProtocol.h b/toolkit/xre/DenCitrixCaptureProtocol.h
+new file mode 100644
+index 0000000..dfe7a92
+--- /dev/null
++++ b/toolkit/xre/DenCitrixCaptureProtocol.h
+@@ -0,0 +1,129 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef toolkit_xre_DenCitrixCaptureProtocol_h
++#define toolkit_xre_DenCitrixCaptureProtocol_h
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <type_traits>
++
++// Keep this wire definition synchronized with
++// citrix/protocol/dencap_protocol.h in the DenBrowser repository.
++namespace dencap {
++
++inline constexpr char kChannelName[] = "DENCAP";
++// WFVirtualChannelOpen requires exactly seven visible bytes plus NUL, padding
++// shorter channel names with spaces.
++inline constexpr char kWfApiChannelName[8] = "DENCAP ";
++inline constexpr std::uint32_t kMagic = 0x50434e44U;  // "DNCP", little-endian.
++inline constexpr std::uint16_t kProtocolVersion = 1;
++inline constexpr std::uint16_t kResponseFlag = 0x0001;
++inline constexpr std::uint32_t kMinLeaseMs = 1'000;
++inline constexpr std::uint32_t kDefaultLeaseMs = 15'000;
++inline constexpr std::uint32_t kMaxLeaseMs = 60'000;
++
++enum class MessageType : std::uint16_t {
++  kAcquire = 1,
++  kRenew = 2,
++  kRelease = 3,
++  kStatus = 0x8000,
++};
++
++enum class Status : std::uint32_t {
++  kOk = 0,
++  kInvalidMessage = 1,
++  kUnsupportedVersion = 2,
++  kUnknownMessageType = 3,
++  kInvalidLeaseId = 4,
++  kLeaseNotFound = 5,
++  kStaleSequence = 6,
++  kLeaseTableFull = 7,
++  kIcaWindowQueryFailed = 8,
++  kWindowOwnershipFailed = 9,
++  kGetAffinityFailed = 10,
++  kSetAffinityFailed = 11,
++  kAffinityVerificationFailed = 12,
++  kNotInitialized = 13,
++  kWindowClaimTableFull = 14,
++};
++
++#pragma pack(push, 1)
++struct Message {
++  std::uint32_t magic;
++  std::uint16_t version;
++  std::uint16_t size;
++  std::uint16_t type;
++  std::uint16_t flags;
++  std::uint8_t lease_id[16];
++  std::uint64_t sequence;
++  std::uint32_t lease_ms;
++  std::uint32_t status;
++  std::uint32_t win32_error;
++  std::uint32_t observed_affinity;
++  std::uint64_t monotonic_ms;
++  std::uint32_t reserved;
++};
++#pragma pack(pop)
++
++static_assert(sizeof(Message) == 64,
++              "DENCAP messages must remain exactly 64 bytes");
++static_assert(sizeof(kWfApiChannelName) == 8);
++static_assert(std::is_trivially_copyable_v<Message>);
++static_assert(offsetof(Message, magic) == 0);
++static_assert(offsetof(Message, version) == 4);
++static_assert(offsetof(Message, size) == 6);
++static_assert(offsetof(Message, type) == 8);
++static_assert(offsetof(Message, flags) == 10);
++static_assert(offsetof(Message, lease_id) == 12);
++static_assert(offsetof(Message, sequence) == 28);
++static_assert(offsetof(Message, lease_ms) == 36);
++static_assert(offsetof(Message, status) == 40);
++static_assert(offsetof(Message, win32_error) == 44);
++static_assert(offsetof(Message, observed_affinity) == 48);
++static_assert(offsetof(Message, monotonic_ms) == 52);
++static_assert(offsetof(Message, reserved) == 60);
++
++inline bool LeaseIdIsZero(const std::uint8_t (&aLeaseId)[16]) {
++  std::uint8_t accumulator = 0;
++  for (const auto byte : aLeaseId) {
++    accumulator |= byte;
++  }
++  return accumulator == 0;
++}
++
++inline bool LeaseIdsEqual(const std::uint8_t (&aLeft)[16],
++                          const std::uint8_t (&aRight)[16]) {
++  return std::memcmp(aLeft, aRight, sizeof(aLeft)) == 0;
++}
++
++inline Message MakeStatusMessage(const Message* aRequest, Status aStatus,
++                                 std::uint32_t aWin32Error,
++                                 std::uint32_t aObservedAffinity,
++                                 std::uint64_t aNowMs,
++                                 std::uint32_t aGrantedLeaseMs = 0) {
++  Message response{};
++  response.magic = kMagic;
++  response.version = kProtocolVersion;
++  response.size = sizeof(Message);
++  response.type = static_cast<std::uint16_t>(MessageType::kStatus);
++  response.flags = kResponseFlag;
++  if (aRequest) {
++    std::memcpy(response.lease_id, aRequest->lease_id,
++                sizeof(response.lease_id));
++    response.sequence = aRequest->sequence;
++  }
++  response.lease_ms = aGrantedLeaseMs;
++  response.status = static_cast<std::uint32_t>(aStatus);
++  response.win32_error = aWin32Error;
++  response.observed_affinity = aObservedAffinity;
++  response.monotonic_ms = aNowMs;
++  return response;
++}
++
++}  // namespace dencap
++
++#endif  // toolkit_xre_DenCitrixCaptureProtocol_h
+diff --git a/toolkit/xre/moz.build b/toolkit/xre/moz.build
+index 390b160..68863c7 100644
+--- a/toolkit/xre/moz.build
++++ b/toolkit/xre/moz.build
+@@ -54,6 +54,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+         "nsNativeAppSupportWin.cpp",
+         "WinTokenUtils.cpp",
+     ]
++    SOURCES += [
++        "DenCitrixCaptureProtection.cpp",
++    ]
+     DEFINES["PROXY_PRINTING"] = 1
+     LOCAL_INCLUDES += [
+         "../components/printingui",
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+index 8656166..c9eb61f 100644
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -111,2 +111,3 @@
+ #ifdef XP_WIN
++#  include "DenCitrixCaptureProtection.h"
+ #  include "nsIWinAppHelper.h"
+@@ -6747,2 +6748,25 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+   result = XRE_mainStartup(&exit, appRunnerTelemFlags);
+   if (result != 0 || exit) return result;
++#if defined(XP_WIN) && defined(MOZ_BUILD_APP_IS_BROWSER)
++  // DenBrowser: propagate capture protection across the ICA boundary.  This
++  // guard is created only after startup/remoting has selected the primary
++  // browser process, and its destructor releases the endpoint lease after the
++  // browser run loop exits.
++  UniquePtr<mozilla::denbrowser::DenCitrixCaptureProtection>
++      denCitrixCaptureProtection;
++#  ifdef MOZ_BACKGROUNDTASKS
++  if (!mozilla::BackgroundTasks::IsBackgroundTaskMode())
++#  endif
++  if (mozilla::denbrowser::DenCitrixCaptureProtection::
++          IsCurrentSessionIca()) {
++    denCitrixCaptureProtection =
++        MakeUnique<mozilla::denbrowser::DenCitrixCaptureProtection>();
++    if (!denCitrixCaptureProtection->Start()) {
++      Output(true,
++             "DenBrowser cannot start because Citrix endpoint capture "
++             "protection is unavailable.\n");
++      return 1;
++    }
++  }
++#endif
++
