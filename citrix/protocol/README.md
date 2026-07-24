@@ -23,15 +23,18 @@ visible bytes and followed by NUL.
 | 52 | 8 | monotonic ms | request zero; endpoint diagnostic timestamp |
 | 60 | 4 | reserved | zero |
 
-The endpoint clamps requested leases to 1–60 seconds and uses 15 seconds when
-the request is zero. DenBrowser should request 15 seconds and renew every 5
+The endpoint clamps requested leases to 1–60 seconds and uses 30 seconds when
+the request is zero. DenBrowser should request 30 seconds and renew every 5
 seconds. A RELEASE has no lease duration.
 
 For a UUID that is still active, a sequence equal to or below the most recently
 accepted sequence is rejected as stale and does not extend the expiry. A RENEW
 or RELEASE for an unknown/expired UUID is rejected. An ACQUIRE may allocate a
-new UUID. A successful response echoes the UUID and sequence; `lease_ms`
-contains the granted duration for ACQUIRE/RENEW.
+new UUID or refresh that same active UUID when its sequence is newer. This lets
+the browser recover from an uncertain/lost RENEW acknowledgement by reopening
+the channel and sending ACQUIRE with a fresh sequence. A successful response
+echoes the UUID and sequence; `lease_ms` contains the granted duration for
+ACQUIRE/RENEW.
 
 The virtual channel supplies session transport isolation, but this protocol is
 not cryptographically authenticated. The endpoint treats every frame as
