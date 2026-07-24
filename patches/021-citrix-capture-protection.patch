@@ -10,9 +10,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # ACQUIRE/RENEW/RELEASE frames, and validates the endpoint WDA read-back.
 #
 # Startup fails closed when no endpoint acknowledgement is available. After an
-# established lease, loss of a verified renewal terminates the browser before
-# the endpoint lease can expire. Local and ordinary RDP sessions are unchanged;
-# patch 001 continues to protect DenBrowser-owned HWNDs there.
+# established 30-second lease, uncertain transport failures are retried with
+# fresh sequence numbers; explicit protection failures terminate immediately,
+# while a separate watchdog terminates before an unrenewed lease can expire.
+# Local and ordinary RDP sessions are unchanged; patch 001 continues to protect
+# DenBrowser-owned HWNDs there.
 #
 # This patch is only the VDA sender. It requires the separately deployed signed
 # Citrix Workspace virtual-driver module and VDA custom-channel allow-list entry
@@ -23,10 +25,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 diff --git a/toolkit/xre/DenCitrixCaptureProtection.cpp b/toolkit/xre/DenCitrixCaptureProtection.cpp
 new file mode 100644
-index 0000000..2e74186
+index 0000000..9aec157
 --- /dev/null
 +++ b/toolkit/xre/DenCitrixCaptureProtection.cpp
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,756 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -36,8 +38,10 @@ index 0000000..2e74186
 +#include "DenCitrixCaptureProtocol.h"
 +#include "mozilla/RandomNum.h"
 +
++#include <intrin.h>
 +#include <wtsapi32.h>
 +
++#include <algorithm>
 +#include <array>
 +#include <string>
 +
@@ -45,9 +49,27 @@ index 0000000..2e74186
 +namespace {
 +
 +constexpr DWORD kFirstAttemptWaitMs = 5000;
++constexpr DWORD kShutdownJoinTimeoutMs = 5000;
 +constexpr DWORD kRenewIntervalMs = 5000;
++constexpr DWORD kRetryIntervalMs = 250;
 +constexpr ULONG kAckTimeoutMs = 1500;
-+constexpr uint32_t kMinimumAcceptedLeaseMs = kRenewIntervalMs * 2;
++constexpr uint64_t kLeaseSafetyMarginMs = 2000;
++constexpr uint64_t kAttemptSchedulingMarginMs = 250;
++constexpr uint64_t kLeaseStateNoLease = 0;
++constexpr uint64_t kLeaseStateStopping = 1;
++constexpr uint64_t kLeaseStateFailing = 2;
++
++bool IsLeaseDeadline(uint64_t aState) {
++  return aState > kLeaseStateFailing;
++}
++
++[[noreturn]] void TerminateCurrentProcessNow(DWORD aExitCode) {
++  (void)::TerminateProcess(::GetCurrentProcess(), aExitCode);
++  // TerminateProcess should not return for the current process. Retain a
++  // non-returning fail-fast fallback so no failed API call can continue in an
++  // unprotected or partially destroyed state.
++  __fastfail(FAST_FAIL_FATAL_APP_EXIT);
++}
 +
 +using WFVirtualChannelOpenFn = HANDLE(WINAPI*)(HANDLE, DWORD, LPSTR);
 +using WFVirtualChannelCloseFn = BOOL(WINAPI*)(HANDLE);
@@ -222,10 +244,19 @@ index 0000000..2e74186
 +  }
 +};
 +
-+bool SendMessageAndReadReply(const WfApi& aApi, HANDLE aChannel,
-+                             dencap::MessageType aType,
-+                             const uint8_t (&aInstanceId)[16],
-+                             uint64_t aSequence, dencap::Message* aReply) {
++enum class ExchangeResult {
++  kReply,
++  kNoReply,
++  kChannelFailure,
++  kProtocolFailure,
++};
++
++bool ReplyConfirmsProtection(const dencap::Message& aReply);
++
++ExchangeResult SendMessageAndReadReply(
++    const WfApi& aApi, HANDLE aChannel, dencap::MessageType aType,
++    const uint8_t (&aInstanceId)[16], uint64_t aSequence,
++    uint64_t aAttemptDeadlineMs, dencap::Message* aReply) {
 +  dencap::Message message = {};
 +  message.magic = dencap::kMagic;
 +  message.version = dencap::kProtocolVersion;
@@ -241,31 +272,90 @@ index 0000000..2e74186
 +  if (!aApi.write(aChannel, reinterpret_cast<PCHAR>(&message), sizeof(message),
 +                  &bytesWritten) ||
 +      bytesWritten != sizeof(message)) {
-+    return false;
++    return ExchangeResult::kChannelFailure;
++  }
++  if (aType == dencap::MessageType::kRelease && aReply == nullptr) {
++    return ExchangeResult::kReply;
 +  }
 +
-+  dencap::Message reply = {};
-+  ULONG bytesRead = 0;
-+  if (!aApi.read(aChannel, kAckTimeoutMs, reinterpret_cast<PCHAR>(&reply),
-+                 sizeof(reply), &bytesRead) ||
-+      bytesRead != sizeof(reply)) {
-+    return false;
-+  }
++  dencap::Message bestOlderReply = {};
++  bool haveOlderPositiveReply = false;
 +
-+  if (reply.magic != dencap::kMagic ||
-+      reply.version != dencap::kProtocolVersion ||
-+      reply.size != sizeof(reply) ||
-+      reply.type != static_cast<uint16_t>(dencap::MessageType::kStatus) ||
-+      reply.flags != dencap::kResponseFlag || reply.sequence != aSequence ||
-+      !dencap::LeaseIdsEqual(reply.lease_id, aInstanceId) ||
-+      reply.reserved != 0) {
-+    return false;
-+  }
++  for (;;) {
++    const uint64_t now = ::GetTickCount64();
++    if (now >= aAttemptDeadlineMs) {
++      if (haveOlderPositiveReply && aReply) {
++        *aReply = bestOlderReply;
++        return ExchangeResult::kReply;
++      }
++      return ExchangeResult::kNoReply;
++    }
 +
-+  if (aReply) {
-+    *aReply = reply;
++    dencap::Message reply = {};
++    const ULONG timeout = static_cast<ULONG>(
++        std::min<uint64_t>(aAttemptDeadlineMs - now, MAXDWORD));
++    ULONG bytesRead = 0;
++    ::SetLastError(ERROR_SUCCESS);
++    if (!aApi.read(aChannel, timeout, reinterpret_cast<PCHAR>(&reply),
++                   sizeof(reply), &bytesRead)) {
++      const DWORD error = ::GetLastError();
++      const bool timedOut =
++          error == ERROR_SUCCESS || error == ERROR_TIMEOUT ||
++          error == ERROR_SEM_TIMEOUT || error == WAIT_TIMEOUT;
++      if (timedOut && haveOlderPositiveReply && aReply) {
++        *aReply = bestOlderReply;
++        return ExchangeResult::kReply;
++      }
++      return timedOut ? ExchangeResult::kNoReply
++                      : ExchangeResult::kChannelFailure;
++    }
++    if (bytesRead != sizeof(reply)) {
++      // Citrix static-channel reads are packet-oriented. A short/oversized
++      // status is not appended to a later packet; reopen to re-establish frame
++      // alignment while the previous verified lease remains active.
++      return ExchangeResult::kChannelFailure;
++    }
++
++    if (reply.magic != dencap::kMagic ||
++        reply.version != dencap::kProtocolVersion ||
++        reply.size != sizeof(reply) ||
++        reply.type != static_cast<uint16_t>(dencap::MessageType::kStatus) ||
++        reply.flags != dencap::kResponseFlag ||
++        !dencap::LeaseIdsEqual(reply.lease_id, aInstanceId) ||
++        reply.sequence == 0 || reply.reserved != 0 ||
++        reply.sequence > aSequence) {
++      return ExchangeResult::kProtocolFailure;
++    }
++
++    if (reply.sequence == aSequence) {
++      if (aReply) {
++        *aReply = reply;
++      }
++      return ExchangeResult::kReply;
++    }
++
++    // Drain queued older statuses until the current sequence arrives. Any
++    // negative status is returned immediately; otherwise retain the newest
++    // older positive as a conservative fallback if the current ACK times out.
++    if (!ReplyConfirmsProtection(reply)) {
++      if (aReply) {
++        *aReply = reply;
++      }
++      return ExchangeResult::kReply;
++    }
++    if (!haveOlderPositiveReply ||
++        reply.sequence > bestOlderReply.sequence) {
++      bestOlderReply = reply;
++      haveOlderPositiveReply = true;
++    }
 +  }
-+  return true;
++}
++
++bool ReplyConfirmsProtection(const dencap::Message& aReply) {
++  return aReply.status == static_cast<uint32_t>(dencap::Status::kOk) &&
++         aReply.win32_error == ERROR_SUCCESS &&
++         aReply.observed_affinity == WDA_EXCLUDEFROMCAPTURE &&
++         aReply.lease_ms == dencap::kDefaultLeaseMs;
 +}
 +
 +}  // namespace
@@ -278,12 +368,36 @@ index 0000000..2e74186
 +}
 +
 +DenCitrixCaptureProtection::~DenCitrixCaptureProtection() {
++  uint64_t state = mLeaseState.load(std::memory_order_acquire);
++  while (state != kLeaseStateStopping && state != kLeaseStateFailing &&
++         !mLeaseState.compare_exchange_weak(
++             state, kLeaseStateStopping, std::memory_order_acq_rel,
++             std::memory_order_acquire)) {
++  }
 +  if (mStopEvent) {
 +    ::SetEvent(mStopEvent);
 +  }
++  if (mLeaseChangedEvent) {
++    ::SetEvent(mLeaseChangedEvent);
++  }
 +  if (mThread) {
-+    ::WaitForSingleObject(mThread, INFINITE);
++    // Best-effort cancellation prevents a conforming synchronous WFAPI call
++    // from delaying shutdown. Never destroy this guard while its worker can
++    // still reference it: if cancellation does not complete promptly, the
++    // already-closing process is terminated instead of hanging indefinitely.
++    (void)::CancelSynchronousIo(mThread);
++    if (::WaitForSingleObject(mThread, kShutdownJoinTimeoutMs) !=
++        WAIT_OBJECT_0) {
++      TerminateCurrentProcessNow(ERROR_TIMEOUT);
++    }
 +    ::CloseHandle(mThread);
++  }
++  if (mWatchdogThread) {
++    ::WaitForSingleObject(mWatchdogThread, INFINITE);
++    ::CloseHandle(mWatchdogThread);
++  }
++  if (mLeaseChangedEvent) {
++    ::CloseHandle(mLeaseChangedEvent);
 +  }
 +  if (mReadyEvent) {
 +    ::CloseHandle(mReadyEvent);
@@ -300,12 +414,20 @@ index 0000000..2e74186
 +
 +  mStopEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
 +  mReadyEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-+  if (!mStopEvent || !mReadyEvent) {
++  mLeaseChangedEvent = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
++  if (!mStopEvent || !mReadyEvent || !mLeaseChangedEvent) {
++    return false;
++  }
++
++  mWatchdogThread =
++      ::CreateThread(nullptr, 0, WatchdogThreadEntry, this, 0, nullptr);
++  if (!mWatchdogThread) {
 +    return false;
 +  }
 +
 +  mThread = ::CreateThread(nullptr, 0, ThreadEntry, this, 0, nullptr);
 +  if (!mThread) {
++    ::SetEvent(mStopEvent);
 +    return false;
 +  }
 +
@@ -347,81 +469,315 @@ index 0000000..2e74186
 +  return 0;
 +}
 +
++DWORD WINAPI DenCitrixCaptureProtection::WatchdogThreadEntry(void* aContext) {
++  static_cast<DenCitrixCaptureProtection*>(aContext)->RunWatchdog();
++  return 0;
++}
++
++void DenCitrixCaptureProtection::FailClosed() {
++  uint64_t state = mLeaseState.load(std::memory_order_acquire);
++  while (state != kLeaseStateStopping && state != kLeaseStateFailing) {
++    if (mLeaseState.compare_exchange_weak(
++            state, kLeaseStateFailing, std::memory_order_acq_rel,
++            std::memory_order_acquire)) {
++      TerminateCurrentProcessNow(ERROR_ACCESS_DENIED);
++    }
++  }
++}
++
++bool DenCitrixCaptureProtection::PublishVerifiedDeadline(
++    uint64_t aDeadlineMs) {
++  uint64_t state = mLeaseState.load(std::memory_order_acquire);
++  while (state != kLeaseStateStopping && state != kLeaseStateFailing) {
++    if (IsLeaseDeadline(state) && state >= aDeadlineMs) {
++      return true;
++    }
++    if (mLeaseState.compare_exchange_weak(
++            state, aDeadlineMs, std::memory_order_acq_rel,
++            std::memory_order_acquire)) {
++      ::SetEvent(mLeaseChangedEvent);
++      return true;
++    }
++  }
++  return false;
++}
++
++void DenCitrixCaptureProtection::RunWatchdog() {
++  HANDLE events[] = {mStopEvent, mLeaseChangedEvent};
++
++  for (;;) {
++    if (::WaitForSingleObject(mStopEvent, 0) == WAIT_OBJECT_0) {
++      return;
++    }
++
++    const uint64_t state = mLeaseState.load(std::memory_order_acquire);
++    if (state == kLeaseStateStopping || state == kLeaseStateFailing) {
++      return;
++    }
++    if (state == kLeaseStateNoLease) {
++      const DWORD result =
++          ::WaitForMultipleObjects(2, events, FALSE, INFINITE);
++      if (result == WAIT_OBJECT_0) {
++        return;
++      }
++      if (result != WAIT_OBJECT_0 + 1) {
++        FailClosed();
++        return;
++      }
++      continue;
++    }
++
++    const uint64_t deadline = state;
++    const uint64_t failClosedAt =
++        deadline > kLeaseSafetyMarginMs ? deadline - kLeaseSafetyMarginMs : 0;
++    const uint64_t now = ::GetTickCount64();
++    if (now >= failClosedAt) {
++      uint64_t expected = deadline;
++      if (mLeaseState.compare_exchange_strong(
++              expected, kLeaseStateFailing, std::memory_order_acq_rel,
++              std::memory_order_acquire)) {
++        TerminateCurrentProcessNow(ERROR_ACCESS_DENIED);
++      }
++      continue;
++    }
++
++    const DWORD waitMs = static_cast<DWORD>(
++        std::min<uint64_t>(failClosedAt - now, MAXDWORD - 1));
++    const DWORD result =
++        ::WaitForMultipleObjects(2, events, FALSE, waitMs);
++    if (result == WAIT_OBJECT_0) {
++      return;
++    }
++    if (result != WAIT_OBJECT_0 + 1 && result != WAIT_TIMEOUT) {
++      FailClosed();
++      return;
++    }
++  }
++}
++
 +void DenCitrixCaptureProtection::Run() {
++  bool firstAttemptComplete = false;
++  const auto completeFirstAttempt = [&](bool aSucceeded) {
++    if (!firstAttemptComplete) {
++      mFirstAcquireSucceeded.store(aSucceeded, std::memory_order_release);
++      firstAttemptComplete = true;
++      ::SetEvent(mReadyEvent);
++    }
++  };
++
 +  WfApi api;
 +  if (!api.Load()) {
-+    ::SetEvent(mReadyEvent);
++    completeFirstAttempt(false);
 +    return;
 +  }
 +
 +  HANDLE channel = nullptr;
 +  uint64_t sequence = 0;
-+  bool acquired = false;
-+  bool firstAttemptComplete = false;
++  uint64_t lastVerifiedSequence = 0;
++  bool hasVerifiedLease = false;
++  bool recovering = false;
++  uint64_t nextAttemptAt = 0;
++  struct AttemptRecord {
++    uint64_t sequence = 0;
++    uint64_t started = 0;
++  };
++  std::array<AttemptRecord, 128> attempts = {};
++  const auto rememberAttempt = [&](uint64_t aSequence, uint64_t aStarted) {
++    attempts[static_cast<size_t>(aSequence % attempts.size())] =
++        AttemptRecord{aSequence, aStarted};
++  };
++  const auto findAttemptStart = [&](uint64_t aSequence,
++                                    uint64_t* aStarted) {
++    const AttemptRecord& attempt =
++        attempts[static_cast<size_t>(aSequence % attempts.size())];
++    if (attempt.sequence != aSequence) {
++      return false;
++    }
++    *aStarted = attempt.started;
++    return true;
++  };
 +
 +  while (::WaitForSingleObject(mStopEvent, 0) != WAIT_OBJECT_0) {
++    if (hasVerifiedLease) {
++      const uint64_t deadline =
++          mLeaseState.load(std::memory_order_acquire);
++      if (!IsLeaseDeadline(deadline)) {
++        if (deadline == kLeaseStateStopping) {
++          break;
++        }
++        FailClosed();
++        return;
++      }
++      constexpr uint64_t kAttemptGuardMs =
++          kLeaseSafetyMarginMs + kAckTimeoutMs +
++          kAttemptSchedulingMarginMs;
++      const uint64_t latestAttemptAt =
++          deadline > kAttemptGuardMs ? deadline - kAttemptGuardMs : 0;
++      uint64_t now = ::GetTickCount64();
++      if (now > latestAttemptAt) {
++        FailClosed();
++        return;
++      }
++
++      const uint64_t target =
++          std::min<uint64_t>(nextAttemptAt, latestAttemptAt);
++      const DWORD waitMs = target > now
++                               ? static_cast<DWORD>(std::min<uint64_t>(
++                                     target - now, MAXDWORD - 1))
++                               : 0;
++      const DWORD waitResult =
++          ::WaitForSingleObject(mStopEvent, waitMs);
++      if (waitResult == WAIT_OBJECT_0) {
++        break;
++      }
++      if (waitResult != WAIT_TIMEOUT) {
++        FailClosed();
++        return;
++      }
++
++      now = ::GetTickCount64();
++      if (now > latestAttemptAt) {
++        FailClosed();
++        return;
++      }
++    }
++
 +    if (!channel) {
 +      // WF_CURRENT_SERVER_HANDLE is NULL and WF_CURRENT_SESSION is -1.
 +      channel =
 +          api.open(nullptr, 0xFFFFFFFFu,
 +                   const_cast<LPSTR>(dencap::kWfApiChannelName));
-+      if (channel) {
-+        dencap::Message reply = {};
-+        acquired =
-+            SendMessageAndReadReply(api, channel,
-+                                    dencap::MessageType::kAcquire, mInstanceId,
-+                                    ++sequence, &reply) &&
-+            reply.status == static_cast<uint32_t>(dencap::Status::kOk) &&
-+            reply.observed_affinity == WDA_EXCLUDEFROMCAPTURE &&
-+            reply.lease_ms >= kMinimumAcceptedLeaseMs;
-+        if (!acquired) {
-+          api.close(channel);
-+          channel = nullptr;
-+        }
-+      }
-+
-+      if (!firstAttemptComplete) {
-+        mFirstAcquireSucceeded = acquired;
-+        firstAttemptComplete = true;
-+        ::SetEvent(mReadyEvent);
-+      }
-+    } else {
-+      dencap::Message reply = {};
-+      if (!SendMessageAndReadReply(api, channel,
-+                                   dencap::MessageType::kRenew, mInstanceId,
-+                                   ++sequence, &reply) ||
-+          reply.status != static_cast<uint32_t>(dencap::Status::kOk) ||
-+          reply.observed_affinity != WDA_EXCLUDEFROMCAPTURE ||
-+          reply.lease_ms < kMinimumAcceptedLeaseMs) {
-+        api.close(channel);
-+        channel = nullptr;
-+        acquired = false;
-+
-+        // Once UI may have been shown, continuing without a verified lease
-+        // would create a capture window. Avoid an abrupt exit during orderly
-+        // shutdown, but otherwise fail closed before the endpoint lease can
-+        // expire.
-+        if (::WaitForSingleObject(mStopEvent, 0) != WAIT_OBJECT_0) {
-+          ::TerminateProcess(::GetCurrentProcess(), ERROR_ACCESS_DENIED);
++      if (!channel) {
++        if (!hasVerifiedLease) {
++          completeFirstAttempt(false);
 +          return;
 +        }
++        recovering = true;
++        nextAttemptAt = ::GetTickCount64() + kRetryIntervalMs;
++        continue;
 +      }
 +    }
 +
-+    if (::WaitForSingleObject(mStopEvent, kRenewIntervalMs) == WAIT_OBJECT_0) {
-+      break;
++    const dencap::MessageType messageType =
++        hasVerifiedLease && !recovering ? dencap::MessageType::kRenew
++                                       : dencap::MessageType::kAcquire;
++    const uint64_t attemptStarted = ::GetTickCount64();
++    if (hasVerifiedLease) {
++      const uint64_t deadline =
++          mLeaseState.load(std::memory_order_acquire);
++      if (!IsLeaseDeadline(deadline)) {
++        if (deadline == kLeaseStateStopping) {
++          break;
++        }
++        FailClosed();
++        return;
++      }
++      constexpr uint64_t kAttemptGuardMs =
++          kLeaseSafetyMarginMs + kAckTimeoutMs +
++          kAttemptSchedulingMarginMs;
++      if (deadline <= kAttemptGuardMs ||
++          attemptStarted > deadline - kAttemptGuardMs) {
++        FailClosed();
++        return;
++      }
 +    }
-+  }
 +
-+  if (!firstAttemptComplete) {
-+    ::SetEvent(mReadyEvent);
-+  }
-+
-+  if (channel && acquired) {
 +    dencap::Message reply = {};
++    const uint64_t requestSequence = ++sequence;
++    rememberAttempt(requestSequence, attemptStarted);
++    const ExchangeResult exchange = SendMessageAndReadReply(
++        api, channel, messageType, mInstanceId, requestSequence,
++        attemptStarted + kAckTimeoutMs, &reply);
++
++    if (exchange == ExchangeResult::kReply) {
++      uint64_t acknowledgedAttemptStarted = 0;
++      const bool knownAttempt =
++          findAttemptStart(reply.sequence, &acknowledgedAttemptStarted);
++      if (!knownAttempt || !ReplyConfirmsProtection(reply)) {
++        if (!hasVerifiedLease) {
++          api.close(channel);
++          channel = nullptr;
++          completeFirstAttempt(false);
++          return;
++        }
++        // The endpoint has explicitly reported that current protection cannot
++        // be trusted. Do not risk blocking in channel cleanup before exiting.
++        FailClosed();
++        return;
++      }
++
++      const uint64_t candidateDeadline =
++          acknowledgedAttemptStarted + reply.lease_ms;
++      if (reply.sequence <= lastVerifiedSequence ||
++          ::GetTickCount64() >=
++              candidateDeadline - kLeaseSafetyMarginMs) {
++        if (!hasVerifiedLease) {
++          api.close(channel);
++          channel = nullptr;
++          completeFirstAttempt(false);
++          return;
++        }
++        // A duplicate or excessively delayed positive status is harmless but
++        // cannot extend the trusted deadline. The current request is already
++        // in flight, so continue recovery and consume its fresh status.
++        recovering = true;
++        nextAttemptAt = ::GetTickCount64() + kRetryIntervalMs;
++        continue;
++      }
++
++      if (!PublishVerifiedDeadline(candidateDeadline)) {
++        if (mLeaseState.load(std::memory_order_acquire) ==
++            kLeaseStateStopping) {
++          break;
++        }
++        return;
++      }
++      lastVerifiedSequence = reply.sequence;
++      hasVerifiedLease = true;
++      recovering = reply.sequence != requestSequence;
++      completeFirstAttempt(true);
++      nextAttemptAt =
++          recovering ? ::GetTickCount64() + kRetryIntervalMs
++                     : acknowledgedAttemptStarted + kRenewIntervalMs;
++      continue;
++    }
++
++    if (!hasVerifiedLease) {
++      api.close(channel);
++      channel = nullptr;
++      completeFirstAttempt(false);
++      return;
++    }
++    if (exchange == ExchangeResult::kProtocolFailure) {
++      // A malformed or explicit older negative status is not a transport
++      // hiccup. Fail before any potentially blocking channel cleanup.
++      FailClosed();
++      return;
++    }
++
++    if (exchange == ExchangeResult::kChannelFailure) {
++      api.close(channel);
++      channel = nullptr;
++    }
++
++    // A missing response does not prove that the endpoint stopped protecting
++    // the window: the request or its ACK may have been delayed/lost while the
++    // last verified lease remains active. ACQUIRE the same UUID with a fresh
++    // sequence until the watchdog's conservative deadline. Keep a
++    // packet-aligned channel after a pure timeout so a delayed positive status
++    // can still refresh the deadline; reopen after framing/write failures.
++    recovering = true;
++    nextAttemptAt = ::GetTickCount64() + kRetryIntervalMs;
++  }
++
++  completeFirstAttempt(false);
++
++  if (channel && hasVerifiedLease) {
++    const uint64_t attemptStarted = ::GetTickCount64();
 +    (void)SendMessageAndReadReply(api, channel,
 +                                  dencap::MessageType::kRelease, mInstanceId,
-+                                  ++sequence, &reply);
++                                  ++sequence,
++                                  attemptStarted + kAckTimeoutMs, nullptr);
 +  }
 +  if (channel) {
 +    api.close(channel);
@@ -431,10 +787,10 @@ index 0000000..2e74186
 +}  // namespace mozilla::denbrowser
 diff --git a/toolkit/xre/DenCitrixCaptureProtection.h b/toolkit/xre/DenCitrixCaptureProtection.h
 new file mode 100644
-index 0000000..b4eece4
+index 0000000..a6e1e66
 --- /dev/null
 +++ b/toolkit/xre/DenCitrixCaptureProtection.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,67 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -454,9 +810,11 @@ index 0000000..b4eece4
 + * process. The caller creates this guard only in an ICA session; local and RDP
 + * sessions continue to rely on patch 001 for DenBrowser's own HWNDs.
 + *
-+ * In an ICA session, a background thread sends ACQUIRE/RENEW/RELEASE messages
-+ * over the DENCAP Citrix virtual channel. The endpoint virtual driver is the
-+ * component that owns and protects the Citrix Workspace window.
++ * In an ICA session, a background worker sends ACQUIRE/RENEW/RELEASE messages
++ * over the DENCAP Citrix virtual channel. A separate watchdog enforces the last
++ * verified lease deadline even if a virtual-channel call stalls. The endpoint
++ * virtual driver is the component that owns and protects the Citrix Workspace
++ * window.
 + */
 +class DenCitrixCaptureProtection final {
 + public:
@@ -474,17 +832,26 @@ index 0000000..b4eece4
 +   */
 +  bool Start();
 +
-+  /** Returns true only when WTS identifies this as an ICA session. */
++  /** Returns true only when WTS or VDA WFAPI identifies an ICA session. */
 +  static bool IsCurrentSessionIca();
 +
 + private:
 +  static DWORD WINAPI ThreadEntry(void* aContext);
++  static DWORD WINAPI WatchdogThreadEntry(void* aContext);
 +  void Run();
++  void RunWatchdog();
++  void FailClosed();
++  bool PublishVerifiedDeadline(uint64_t aDeadlineMs);
 +
 +  HANDLE mStopEvent = nullptr;
 +  HANDLE mReadyEvent = nullptr;
++  HANDLE mLeaseChangedEvent = nullptr;
 +  HANDLE mThread = nullptr;
++  HANDLE mWatchdogThread = nullptr;
 +  std::atomic<bool> mFirstAcquireSucceeded{false};
++  // 0 means no verified lease. Two reserved non-deadline values arbitrate
++  // renewal, orderly shutdown, and fail-closed termination without a lock.
++  std::atomic<uint64_t> mLeaseState{0};
 +  uint8_t mInstanceId[16] = {};
 +};
 +
@@ -493,7 +860,7 @@ index 0000000..b4eece4
 +#endif  // toolkit_xre_DenCitrixCaptureProtection_h
 diff --git a/toolkit/xre/DenCitrixCaptureProtocol.h b/toolkit/xre/DenCitrixCaptureProtocol.h
 new file mode 100644
-index 0000000..dfe7a92
+index 0000000..712630b
 --- /dev/null
 +++ b/toolkit/xre/DenCitrixCaptureProtocol.h
 @@ -0,0 +1,129 @@
@@ -522,7 +889,7 @@ index 0000000..dfe7a92
 +inline constexpr std::uint16_t kProtocolVersion = 1;
 +inline constexpr std::uint16_t kResponseFlag = 0x0001;
 +inline constexpr std::uint32_t kMinLeaseMs = 1'000;
-+inline constexpr std::uint32_t kDefaultLeaseMs = 15'000;
++inline constexpr std::uint32_t kDefaultLeaseMs = 30'000;
 +inline constexpr std::uint32_t kMaxLeaseMs = 60'000;
 +
 +enum class MessageType : std::uint16_t {
@@ -648,9 +1015,7 @@ index 8656166..c9eb61f 100644
  #ifdef XP_WIN
 +#  include "DenCitrixCaptureProtection.h"
  #  include "nsIWinAppHelper.h"
-@@ -6747,2 +6748,25 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
-   result = XRE_mainStartup(&exit, appRunnerTelemFlags);
-   if (result != 0 || exit) return result;
+@@ -6750,2 +6751,25 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
 +#if defined(XP_WIN) && defined(MOZ_BUILD_APP_IS_BROWSER)
 +  // DenBrowser: propagate capture protection across the ICA boundary.  This
 +  // guard is created only after startup/remoting has selected the primary
@@ -674,3 +1039,5 @@ index 8656166..c9eb61f 100644
 +  }
 +#endif
 +
+   // Start the real application. We use |aInitJSContext = false| because
+   // XRE_mainRun wants to initialize the JSContext after reading user prefs.

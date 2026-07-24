@@ -75,6 +75,16 @@ int main() {
   Require(wire[36] == 0x98 && wire[37] == 0x3a,
           "wire lease duration offset must be 36");
 
+  FakeProtector default_lease_protector;
+  dencap::LeaseEngine default_lease_engine(default_lease_protector);
+  auto default_lease_request =
+      Request(dencap::MessageType::kAcquire, 0x44, 1, 0);
+  auto default_lease_response = default_lease_engine.HandleFrame(
+      &default_lease_request, sizeof(default_lease_request), 50);
+  Require(default_lease_response.lease_ms == 30'000,
+          "zero-duration request should receive the 30-second default");
+  default_lease_engine.Shutdown();
+
   FakeProtector protector;
   dencap::LeaseEngine engine(protector);
 
@@ -91,13 +101,32 @@ int main() {
   Require(ResponseStatus(response) == dencap::Status::kStaleSequence,
           "replayed sequence should be rejected");
 
+  // Model a successful RENEW whose response is lost in transit. The browser
+  // reopens the channel and uses ACQUIRE with the same UUID and a newer
+  // sequence; that must safely refresh the existing lease in either case.
+  auto lost_ack_renew =
+      Request(dencap::MessageType::kRenew, 1, 2, 2'000);
+  response =
+      engine.HandleFrame(&lost_ack_renew, sizeof(lost_ack_renew), 225);
+  Require(ResponseStatus(response) == dencap::Status::kOk,
+          "RENEW preceding a lost ACK should update the lease");
+
+  auto reconnect_acquire =
+      Request(dencap::MessageType::kAcquire, 1, 3, 2'000);
+  response = engine.HandleFrame(&reconnect_acquire,
+                                sizeof(reconnect_acquire), 250);
+  Require(ResponseStatus(response) == dencap::Status::kOk,
+          "higher-sequence ACQUIRE should recover after a lost ACK");
+  Require(engine.active_lease_count() == 1,
+          "recovery ACQUIRE must not duplicate the existing lease");
+
   auto acquire_second = Request(dencap::MessageType::kAcquire, 2, 1, 2'000);
   response = engine.HandleFrame(&acquire_second, sizeof(acquire_second), 300);
   Require(ResponseStatus(response) == dencap::Status::kOk,
           "second ACQUIRE should succeed");
   Require(engine.active_lease_count() == 2, "two leases should be active");
 
-  auto release_first = Request(dencap::MessageType::kRelease, 1, 2, 0);
+  auto release_first = Request(dencap::MessageType::kRelease, 1, 4, 0);
   response = engine.HandleFrame(&release_first, sizeof(release_first), 400);
   Require(ResponseStatus(response) == dencap::Status::kOk,
           "first RELEASE should succeed");

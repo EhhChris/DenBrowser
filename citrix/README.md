@@ -50,8 +50,8 @@ the SDK's `PVD` context and `WdGetICAWindowInfo`.
 
 ```text
 DenBrowser in VDA
-  ACQUIRE(UUID, sequence, 15 s) ─┐
-  RENEW(UUID, sequence, 15 s)  ──┼─ DENCAP static VC
+  ACQUIRE(UUID, sequence, 30 s) ─┐
+  RENEW(UUID, sequence, 30 s)  ──┼─ DENCAP static VC
   RELEASE(UUID, sequence)      ──┘
                                       │
                                       ▼
@@ -67,14 +67,22 @@ Patch 021 implements the browser side as follows:
    Firefox startup/remoting has selected that process but before browser UI is
    created.
 2. Generate a cryptographically random 128-bit lease ID.
-3. Send `ACQUIRE` with sequence 1 and a 15-second request.
+3. Send `ACQUIRE` with sequence 1 and a 30-second request.
 4. Send `RENEW` every 5 seconds, increasing the sequence each time.
-5. Send `RELEASE` on orderly final shutdown.
-6. Refuse startup without an `ACQUIRE` status that reports `kOk`, affinity
-   `0x11`, and a sufficiently long granted lease.
-7. After a successful acquisition, terminate DenBrowser if a renewal loses
-   that verified protection. Continuing beyond the endpoint lease would create
-   a capture gap.
+5. On a missing response or transport failure, retry `ACQUIRE` for the same
+   UUID with a fresh sequence after a 250 ms backoff while the last verified
+   lease remains valid. Each packet read has a 1.5-second response deadline;
+   delayed positive statuses remain usable via their original sequence/send
+   time. A pure timeout keeps the packet-aligned channel, while a failed write
+   or malformed short frame forces a reopen.
+6. Maintain a separate watchdog which terminates DenBrowser two seconds before
+   the conservative last-verified expiry, even if the channel worker stalls.
+7. Send `RELEASE` on orderly final shutdown.
+8. Refuse startup without an `ACQUIRE` status that reports `kOk`, affinity
+   `0x11`, and the exact requested 30-second lease.
+9. Terminate immediately on an explicit negative protection status. Exhausted
+   transport retries terminate before the last verified endpoint lease could
+   expire, rather than after a single missed acknowledgement.
 
 The endpoint times out a crashed or disconnected browser without relying on a
 channel-close notification. It supports 64 concurrent UUIDs so several
@@ -84,11 +92,28 @@ the window every second and also consumes Citrix's
 it. The callback itself only increments an atomic generation; the work is done
 from `DriverPoll`.
 
-The 15-second expiry is an availability/security tradeoff: it clears stale
-protection after a browser crash, but a suspended VDA/browser that cannot run
-its fail-closed worker can outlive the lease. If that frozen-session case is in
-scope, use a longer timeout or retain protection until ICA disconnect and
+The 30-second expiry is an availability/security tradeoff. A normal renewal
+starts at second 5, leaving roughly 20 seconds for bounded recovery attempts
+before the watchdog fails closed at least 2 seconds before the conservative
+expiry. The browser calculates that deadline from the local request-send time,
+not ACK receipt time or the endpoint's unrelated monotonic clock. Orderly
+shutdown attempts an immediate write-only RELEASE. If the channel is already
+unavailable or that write is lost, the endpoint retains protection for at most
+the remaining lease, just as it does after a crash or disconnect. A suspended
+VDA/browser whose watchdog cannot run can still outlive the lease. If that
+frozen-session case is in scope, retain protection until ICA disconnect and
 accept that abnormal browser exits may require an administrative reset.
+
+The retry grace assumes that the same endpoint virtual-driver instance and
+protected ICA HWND survive while status packets are delayed. It does not treat
+a full Workspace reconnect as equivalent to packet loss: `DriverClose` calls
+`CitrixAdapter::Shutdown`, which restores WDA, and a replacement window starts
+unprotected until the new driver processes ACQUIRE. Pilot disconnect/reconnect
+behavior for every supported Workspace build. If content can remain visible
+during that transition, the production client shell must retain protection
+fail-secure across reconnect/window replacement or provide an immediate
+disconnect signal that makes the browser exit; browser-side lease retries
+alone cannot prove a newly created client window was protected continuously.
 
 Windows affinity has no ownership token. If an unrelated in-process component
 writes the same numeric affinity while DENCAP is active, Windows provides no

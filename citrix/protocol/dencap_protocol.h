@@ -17,7 +17,7 @@ inline constexpr std::uint32_t kMagic = 0x50434e44U; // "DNCP", little-endian.
 inline constexpr std::uint16_t kProtocolVersion = 1;
 inline constexpr std::uint16_t kResponseFlag = 0x0001;
 inline constexpr std::uint32_t kMinLeaseMs = 1'000;
-inline constexpr std::uint32_t kDefaultLeaseMs = 15'000;
+inline constexpr std::uint32_t kDefaultLeaseMs = 30'000;
 inline constexpr std::uint32_t kMaxLeaseMs = 60'000;
 
 enum class MessageType : std::uint16_t {
