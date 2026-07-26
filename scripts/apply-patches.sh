@@ -34,18 +34,56 @@ if [[ ! -d "$FIREFOX_SRC" ]]; then
     exit 1
 fi
 
-# Revert source to pristine state before applying patches so builds are
-# reproducible without re-extracting the tarball.  Skipped with --no-revert.
-if [[ $NO_REVERT -eq 0 && -d "$FIREFOX_SRC/.git" ]]; then
-    echo "[apply-patches] Reverting source to pristine state..."
-    (cd "$FIREFOX_SRC" && git checkout -q HEAD -- . && git clean -qfd)
-    echo "[apply-patches] Source reverted."
-elif [[ $NO_REVERT -eq 1 ]]; then
-    echo "[apply-patches] Skipping revert (--no-revert)"
-else
-    echo "[apply-patches] WARNING: No pristine git snapshot found — skipping revert."
-    echo "[apply-patches]          Run fetch-esr.sh to create one."
-fi
+# Pristine baseline.  Before the first patch touches the tree we copy aside each
+# file the patch set will modify and record each path it will create, so a revert
+# is ~70 file operations instead of snapshotting all 350k files in the tree.
+# The manifest is written from the patches actually queued for this run, so
+# dropping a patch later still reverts the files it used to touch.
+BACKUP_DIR="$SRC_DIR/.pristine-backup-${ESR_VERSION%esr}"
+MANIFEST="$BACKUP_DIR/manifest.tsv"
+
+restore_pristine() {
+    local path kind
+    while IFS=$'\t' read -r path kind; do
+        [[ -n "$path" ]] || continue
+        case "$kind" in
+            MODIFIED)
+                mkdir -p "$FIREFOX_SRC/$(dirname "$path")"
+                cp -p "$BACKUP_DIR/files/$path" "$FIREFOX_SRC/$path" ;;
+            CREATED)
+                rm -rf "${FIREFOX_SRC:?}/$path" ;;
+        esac
+    done < "$MANIFEST"
+    rm -rf "$BACKUP_DIR"
+}
+
+# Highest ancestor of $1 that does not yet exist, so reverting also removes the
+# directories a patch introduces along with whatever later steps (the branding
+# asset copies below) drop inside them.
+topmost_missing() {
+    local path="$1" parent
+    while parent="$(dirname "$path")"; [[ "$parent" != "." && ! -e "$FIREFOX_SRC/$parent" ]]; do
+        path="$parent"
+    done
+    echo "$path"
+}
+
+snapshot_pristine() {
+    local patch_file path
+    mkdir -p "$BACKUP_DIR/files"
+    for patch_file in ${PATCH_QUEUE[@]+"${PATCH_QUEUE[@]}"}; do
+        sed -n -e 's@^+++ b/@@p' -e 's@^--- a/@@p' "$patch_file"
+    done | sort -u | while read -r path; do
+        [[ -n "$path" && "$path" != "/dev/null" ]] || continue
+        if [[ -e "$FIREFOX_SRC/$path" ]]; then
+            mkdir -p "$BACKUP_DIR/files/$(dirname "$path")"
+            cp -p "$FIREFOX_SRC/$path" "$BACKUP_DIR/files/$path"
+            printf '%s\tMODIFIED\n' "$path"
+        else
+            printf '%s\tCREATED\n' "$(topmost_missing "$path")"
+        fi
+    done | sort -u > "$MANIFEST"
+}
 
 echo "[apply-patches] Applying patches to $FIREFOX_SRC"
 echo "[apply-patches] Patch directory: $PATCHES_DIR"
@@ -56,6 +94,7 @@ fi
 APPLIED=0
 SKIPPED=0
 FAILED=0
+PATCH_QUEUE=()
 
 for patch_file in "$PATCHES_DIR"/*.patch; do
     [[ -f "$patch_file" ]] || continue
@@ -80,6 +119,27 @@ for patch_file in "$PATCHES_DIR"/*.patch; do
         done
     fi
 
+    PATCH_QUEUE+=("$patch_file")
+done
+
+if [[ $NO_REVERT -eq 1 ]]; then
+    echo "[apply-patches] Skipping revert (--no-revert)"
+elif [[ -f "$MANIFEST" ]]; then
+    echo "[apply-patches] Reverting source to pristine state..."
+    restore_pristine
+    echo "[apply-patches] Source reverted."
+fi
+
+if [[ -f "$MANIFEST" ]]; then
+    echo "[apply-patches] Keeping existing pristine baseline: $BACKUP_DIR"
+else
+    echo "[apply-patches] Recording pristine baseline..."
+    snapshot_pristine
+    echo "[apply-patches] Baseline recorded ($(wc -l < "$MANIFEST" | tr -d ' ') paths): $BACKUP_DIR"
+fi
+
+for patch_file in ${PATCH_QUEUE[@]+"${PATCH_QUEUE[@]}"}; do
+    patch_name="$(basename "$patch_file")"
     echo "[apply-patches] Applying: $patch_name"
     if (cd "$FIREFOX_SRC" && GIT_CEILING_DIRECTORIES="$ROOT_DIR" git apply --no-index -p1 --check "$patch_file") 2>/dev/null; then
         (cd "$FIREFOX_SRC" && GIT_CEILING_DIRECTORIES="$ROOT_DIR" git apply --no-index -p1 "$patch_file")

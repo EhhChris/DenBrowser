@@ -36,7 +36,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
             echo "                    fetching the latest from Mozilla's product-details API."
             echo "  --tarball PATH    Use a specific source tarball (firefox-X.Y.Zesr.source.tar.xz)."
-            echo "                    Implies --skip-fetch and --no-revert (no git snapshot is created)."
+            echo "                    Implies --skip-fetch and --no-revert (the tree is freshly"
+            echo "                    extracted, so there is nothing to revert)."
             echo "                    Cannot be combined with --ffversion."
             exit 0 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
