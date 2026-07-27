@@ -225,13 +225,18 @@ Setting up one partner end-to-end:
 # add the printed entry to config/site-config.json, then:
 ./build.sh
 
-# run that partner's proxy with its own material:
-cd proxy && cargo run --release -- \
-  --listen   0.0.0.0:8443 \
-  --upstream app-backend.partner-a.internal:443 \
-  --cert     ../build/partner-a-tls.crt \
-  --tls-key  ../build/partner-a-tls.key \
-  --config   partner-a.toml   # its [attestation] private_key names the key
+# configure that partner's proxy in proxy/partner-a.toml:
+# [proxy]
+# listen   = "0.0.0.0:8443"
+# upstream = "app-backend.partner-a.internal:443"
+# tls_cert = "../build/partner-a-tls.crt"
+# tls_key  = "../build/partner-a-tls.key"
+#
+# [attestation]
+# private_key = "../build/partner-a-private.pem"
+#
+# then run it:
+cd proxy && cargo run --release -- --config partner-a.toml
 ```
 
 Each proxy instance is a separate process with its own listener, key, cert, and
@@ -247,12 +252,26 @@ settings tuned per deployment without rebuilding.  It defaults to `proxy.toml`
 in the working directory (override with `--config <path>` or the
 `DENBROWSER_CONFIG` env var); the proxy **exits on startup** if the file is
 missing or unparseable, so it never comes up with unintended (e.g.
-mTLS-disabled) settings.  Copy the annotated `proxy/proxy.example.toml` to
-`proxy/proxy.toml` and edit it.  This config is separate from the compile-time
-attestation/TLS key flags, and from `config/site-config.json` (which feeds the
-browser build), and is the place to grow as more runtime options are added.
+mTLS-disabled) settings. Copy the annotated `proxy/proxy.example.toml` to
+`proxy/proxy.toml` and edit it. This config is separate from
+`config/site-config.json` (which feeds the browser build).
 
-**Attestation key** (`[attestation]`) is the one **required** section — it names
+**Core proxy settings** (`[proxy]`) are required and select where this instance
+listens, where it forwards verified requests, and which TLS identity it presents:
+
+```toml
+[proxy]
+listen = "0.0.0.0:8081"
+upstream = "app-backend.partner-a.internal:443"
+tls_cert = "/etc/denbrowser/partner-a-tls.crt"
+tls_key = "/etc/denbrowser/partner-a-tls.key"
+```
+
+`listen` and `upstream` use `host:port` form. The upstream connection is TLS;
+the certificate and key are PEM files, and the certificate's SPKI must match
+the pin compiled into DenBrowser for this proxy.
+
+**Attestation key** (`[attestation]`) is also required — it names
 this proxy's EC P-256 attestation private key, the private half of the public key
 baked into the browser build for it:
 

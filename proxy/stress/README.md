@@ -59,7 +59,7 @@ docker compose -f test/target-server/compose.yml up -d
 # build/proxy-private.pem (the example config already does).
 # The proxy speaks TLS to its upstream, so target the target's TLS port (8443).
 # The target reuses build/proxy-tls.* (self-signed), so pass --insecure-upstream.
-(cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run --release -- --insecure-upstream)
+(cd proxy && cargo run --release -- --insecure-upstream)
 ```
 
 If the proxy is run with `[mtls]` enabled (client_ca = `build/user-ca.crt`), the

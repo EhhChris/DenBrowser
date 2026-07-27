@@ -3,14 +3,27 @@
 # Copy this file to `proxy.toml` and edit it.  The proxy loads `proxy.toml` from
 # its working directory by default (override with `--config <path>` or the
 # DENBROWSER_CONFIG env var) and is REQUIRED: the proxy exits on startup if the
-# config file is missing or unparseable.  Every feature below is off by default,
-# so a copy of this file with no edits runs the proxy exactly as it behaved
-# before configs existed.  This is the file to grow as more runtime options are
-# added.
+# config file is missing or unparseable. Core listener, upstream, TLS, and
+# attestation values are required; optional features are off by default.
 #
 # Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
 # so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
 # single-quoted literal ('C:\Users\...') or forward slashes ("C:/Users/...").
+
+[proxy]
+# REQUIRED. Address and port on which the proxy accepts browser TLS connections.
+listen = "0.0.0.0:8081"
+
+# REQUIRED. TLS upstream endpoint to receive verified requests (host:port).
+upstream = "localhost:8443"
+
+# REQUIRED. TLS identity presented to the browser. The browser pins the
+# certificate's SPKI, so rotating it requires rebuilding DenBrowser with the
+# new certificate or pin in config/site-config.json.
+tls_cert = "../build/proxy-tls.crt"
+tls_key = "../build/proxy-tls.key"
+
+# ---------------------------------------------------------------------------
 
 [attestation]
 # REQUIRED.  Path to this proxy's EC P-256 attestation private key (SEC1 PEM) —

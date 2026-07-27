@@ -41,24 +41,6 @@ const BOUND_BODY_MAX: usize = 64 * 1024;
 #[derive(Parser, Debug)]
 #[command(about = "DenBrowser attestation proxy — verifies ECIES tokens, strips headers, forwards")]
 struct Args {
-    /// Address to listen on
-    #[arg(long, env = "DENBROWSER_LISTEN", default_value = "0.0.0.0:8081")]
-    listen: String,
-
-    /// Upstream address to forward verified requests to (host:port)
-    #[arg(long, env = "DENBROWSER_UPSTREAM")]
-    upstream: String,
-
-    /// Path to the TLS server certificate (PEM).  The browser pins this
-    /// cert's SPKI; rotating the cert requires rebuilding DenBrowser with
-    /// the new pin.
-    #[arg(long, env = "DENBROWSER_TLS_CERT", default_value = "../build/proxy-tls.crt")]
-    cert: String,
-
-    /// Path to the TLS server private key (PEM).
-    #[arg(long, env = "DENBROWSER_TLS_KEY", default_value = "../build/proxy-tls.key")]
-    tls_key: String,
-
     /// DEV ONLY: skip TLS certificate and hostname verification of the
     /// upstream, allowing self-signed local upstreams.  Never enable in
     /// production — it removes the guarantee that the proxy is talking to the
@@ -66,10 +48,10 @@ struct Args {
     #[arg(long, env = "DENBROWSER_INSECURE_UPSTREAM", default_value_t = false)]
     insecure_upstream: bool,
 
-    /// Path to the operational TOML config file (rate limiting, mTLS, proxy
-    /// bypass, and future runtime options).  Required: the proxy loads this file
-    /// on startup and exits if it cannot be read or parsed.  Defaults to
-    /// `proxy.toml` in the working directory.
+    /// Path to the operational TOML config file (listener, upstream, TLS,
+    /// attestation, rate limiting, mTLS, and proxy bypass). Required: the proxy
+    /// loads this file on startup and exits if it cannot be read or parsed.
+    /// Defaults to `proxy.toml` in the working directory.
     #[arg(long, env = "DENBROWSER_CONFIG", default_value = "proxy.toml")]
     config: String,
 }
@@ -346,6 +328,10 @@ fn main() {
     // with unintended (e.g. mTLS-disabled) settings.  It is loaded first
     // because it carries the attestation private key path.
     let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
+    config
+        .proxy
+        .validate()
+        .unwrap_or_else(|e| panic!("invalid proxy config: {e}"));
 
     // Attestation key: required, and validated here so a proxy that could
     // never decrypt a token refuses to start instead of 403-ing every request.
@@ -388,7 +374,7 @@ fn main() {
 
     let proxy = DenBrowserProxy::new(
         verifier,
-        &args.upstream,
+        &config.proxy.upstream,
         args.insecure_upstream,
         rate_limiter,
         bypass,
@@ -400,7 +386,7 @@ fn main() {
 
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
-    // TLS-only listener.  Browsers verify the SPKI of `args.cert` matches
+    // TLS-only listener.  Browsers verify the SPKI of `tls_cert` matches
     // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
@@ -412,26 +398,32 @@ fn main() {
         Some(m) => {
             let mut tls = TlsSettings::with_callbacks(m.tls_callbacks())
                 .unwrap_or_else(|e| panic!("TLS callback setup failed: {e}"));
-            tls.set_certificate_chain_file(&args.cert)
-                .unwrap_or_else(|e| panic!("TLS cert load failed ({}): {e}", args.cert));
-            tls.set_private_key_file(&args.tls_key, SslFiletype::PEM)
-                .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", args.tls_key));
+            tls.set_certificate_chain_file(&config.proxy.tls_cert)
+                .unwrap_or_else(|e| {
+                    panic!("TLS cert load failed ({}): {e}", config.proxy.tls_cert)
+                });
+            tls.set_private_key_file(&config.proxy.tls_key, SslFiletype::PEM)
+                .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", config.proxy.tls_key));
             tls.set_ca_file(m.ca_path())
                 .unwrap_or_else(|e| panic!("mTLS CA load failed ({}): {e}", m.ca_path()));
             tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
             tls
         }
         // mTLS off: the original listener, unchanged — no client cert requested.
-        None => TlsSettings::intermediate(&args.cert, &args.tls_key).unwrap_or_else(|e| {
-            panic!(
-                "TLS cert/key load failed ({}, {}): {e}",
-                args.cert, args.tls_key
-            )
-        }),
+        None => TlsSettings::intermediate(&config.proxy.tls_cert, &config.proxy.tls_key)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "TLS cert/key load failed ({}, {}): {e}",
+                    config.proxy.tls_cert, config.proxy.tls_key
+                )
+            }),
     };
-    svc.add_tls_with_settings(&args.listen, None, tls);
+    svc.add_tls_with_settings(&config.proxy.listen, None, tls);
 
-    info!("listening TLS on {} → {}", args.listen, args.upstream);
+    info!(
+        "listening TLS on {} → {}",
+        config.proxy.listen, config.proxy.upstream
+    );
     server.add_service(svc);
     server.run_forever();
 }

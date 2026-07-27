@@ -1,5 +1,13 @@
 # DenBrowser proxy — operational configuration.
 
+[proxy]
+listen = "0.0.0.0:8081"
+upstream = "localhost:8443"
+tls_cert = "../build/proxy-tls.crt"
+tls_key = "../build/proxy-tls.key"
+
+# ---------------------------------------------------------------------------
+
 [attestation]
 # REQUIRED.  This proxy's EC P-256 attestation private key (SEC1 PEM) — the
 # private half of the public key baked into the browser build for this proxy.
