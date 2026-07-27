@@ -19,7 +19,7 @@ Usage (from repo root):
     # proxy exits at startup without it.
     # Proxy dials its upstream over TLS; use the target's TLS port (8443).
     # The target's cert is self-signed, so run with --insecure-upstream.
-    (cd proxy && DENBROWSER_UPSTREAM=localhost:8443 cargo run -- --insecure-upstream)
+    (cd proxy && cargo run -- --insecure-upstream)
     python3 test/attestation/test_roundtrip.py
 
 mTLS:

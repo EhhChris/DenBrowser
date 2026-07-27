@@ -9,7 +9,7 @@ services:
     image: nginx:alpine
     ports:
       - "8080:80"     # plaintext, for direct debugging only
-      - "8443:443"    # TLS — point the proxy's DENBROWSER_UPSTREAM here
+      - "8443:443"    # TLS — point [proxy].upstream at this port
     volumes:
       - ./index.html:/usr/share/nginx/html/index.html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

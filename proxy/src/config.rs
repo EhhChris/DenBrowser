@@ -1,22 +1,19 @@
 //! Runtime configuration for the DenBrowser proxy.
 //!
-//! Unlike the compile-time attestation/TLS material (passed as CLI flags), this
-//! is *operational* configuration that a deployment tunes without rebuilding:
-//! start with rate limiting, and grow from here.  The file is TOML so options
-//! can carry inline comments and on/off toggles a human is expected to edit.
-//!
-//! The whole file is optional.  With no `--config`, [`Config::default`] applies
-//! and every feature it gates (currently just rate limiting) stays off, so the
-//! proxy behaves exactly as it did before this module existed.
+//! The file is required. `--config` selects it, defaulting to `proxy.toml` in
+//! the working directory.
 
 use serde::Deserialize;
 
-/// Top-level proxy configuration.  New feature sections are added as sibling
-/// tables here (e.g. `[logging]`, `[upstream]`); each defaults to "off / no-op"
-/// so an older config file keeps working after a new section is introduced.
+/// Top-level proxy configuration. New feature sections are added as sibling
+/// tables here. Optional features default to "off / no-op"; required empty
+/// values are rejected with a field-specific error during startup.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+
     #[serde(default)]
     pub attestation: AttestationConfig,
 
@@ -30,14 +27,54 @@ pub struct Config {
     pub proxy_bypass: ProxyBypassConfig,
 }
 
+/// `[proxy]` — listener, upstream, and TLS settings for this proxy process.
+///
+/// These values are required at startup.  Keeping them in the same file as the
+/// attestation and access-control settings makes a deployment self-contained:
+/// selecting a config file selects the complete proxy instance.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyConfig {
+    /// Address and port for the TLS listener, for example `0.0.0.0:8081`.
+    #[serde(default)]
+    pub listen: String,
+
+    /// TLS upstream endpoint in `host:port` form.
+    #[serde(default)]
+    pub upstream: String,
+
+    /// Path to the TLS server certificate chain in PEM format.
+    #[serde(default)]
+    pub tls_cert: String,
+
+    /// Path to the TLS server private key in PEM format.
+    #[serde(default)]
+    pub tls_key: String,
+}
+
+impl ProxyConfig {
+    /// Reject a missing core setting before Pingora starts.  Empty defaults
+    /// keep deserialization backwards-compatible and make the startup error
+    /// identify the exact field that must be added to an older config.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, value) in [
+            ("listen", self.listen.as_str()),
+            ("upstream", self.upstream.as_str()),
+            ("tls_cert", self.tls_cert.as_str()),
+            ("tls_key", self.tls_key.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                anyhow::bail!("[proxy].{name} is required");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `[attestation]` — the proxy's own attestation key material.
 ///
-/// Unlike every other section here, this one is **required**: the private key is
-/// what decrypts per-request ECIES tokens, so a proxy without it cannot verify
-/// anything.  It is deliberately configuration rather than a CLI default —
-/// a wrong-but-present key path is far easier to spot in a reviewed config file
-/// than in a process's argv, and a deployment that forgets it should fail at
-/// startup instead of inheriting some path that happens to exist on the host.
+/// The private key is what decrypts per-request ECIES tokens,
+/// so a proxy without it cannot verify anything.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationConfig {
@@ -171,9 +208,56 @@ mod tests {
     #[test]
     fn default_disables_everything() {
         let c = Config::default();
+        assert!(c.proxy.listen.is_empty());
+        assert!(c.proxy.upstream.is_empty());
+        assert!(c.proxy.tls_cert.is_empty());
+        assert!(c.proxy.tls_key.is_empty());
         assert!(!c.rate_limiting.enabled);
         assert_eq!(c.rate_limiting.max_requests, 0);
         assert!(c.rate_limiting.rules.is_empty());
+    }
+
+    #[test]
+    fn parses_proxy_config() {
+        let toml = r#"
+            [proxy]
+            listen = "127.0.0.1:9443"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+            tls_key = "/etc/denbrowser/proxy.key"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        c.proxy.validate().unwrap();
+        assert_eq!(c.proxy.listen, "127.0.0.1:9443");
+        assert_eq!(c.proxy.upstream, "backend.internal:443");
+        assert_eq!(c.proxy.tls_cert, "/etc/denbrowser/proxy.crt");
+        assert_eq!(c.proxy.tls_key, "/etc/denbrowser/proxy.key");
+    }
+
+    #[test]
+    fn proxy_config_requires_every_field_at_startup() {
+        let toml = r#"
+            [proxy]
+            listen = "0.0.0.0:8081"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        let error = c.proxy.validate().unwrap_err().to_string();
+        assert!(error.contains("[proxy].tls_key is required"));
+    }
+
+    #[test]
+    fn proxy_config_unknown_key_is_rejected() {
+        let toml = r#"
+            [proxy]
+            listen = "0.0.0.0:8081"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+            tls_key = "/etc/denbrowser/proxy.key"
+            listen_port = 8081
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
     }
 
     #[test]

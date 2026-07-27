@@ -1,6 +1,6 @@
 [package]
 name = "denbrowser-proxy"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [[bin]]
@@ -16,7 +16,7 @@ pingora-limits = "0.8"
 
 async-trait = "0.1"
 
-# Operational config file (rate limiting, and future runtime options).
+# Operational config file (listener, routing, TLS, and access controls).
 serde   = { version = "1", features = ["derive"] }
 toml    = "0.8"
 globset = "0.4"

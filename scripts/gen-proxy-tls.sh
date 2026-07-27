@@ -160,7 +160,7 @@ cat <<EOF
 
     2. Rebuild DenBrowser — build.sh bakes the pin into the proxy table.
     3. Restart the "$NAME" proxy with this cert/key
-       (--cert/--tls-key, or DENBROWSER_TLS_CERT/DENBROWSER_TLS_KEY).
+       ([proxy].tls_cert / [proxy].tls_key in proxy.toml).
     4. Any older build, or any TLS endpoint not presenting this exact
        public key, will fail the handshake before any request is sent.
 EOF
