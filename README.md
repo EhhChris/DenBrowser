@@ -61,6 +61,9 @@ DenBrowser/
 │   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
 │   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites /
 │                               #   attestation proxies / bookmarks
+├── docs/
+│   ├── patch-workflow.md       # Fork-branch <-> patches/ round-trip procedure
+│   └── tpm-attestation.md      # Design: optional TPM-backed attestation (Windows)
 ├── patches/
 │   ├── README.md               # Patch development guide
 │   └── NNN-*.patch             # See "Patches" table below
@@ -216,6 +219,12 @@ them*, and it drives both compile-time proxy features at once:
   32-byte sha256 itself in hex or base64, for production hosts whose cert never
   lands on the build machine.  Set at most one.  An entry with neither is still
   attested but **not pinned** (the build warns).
+
+Note that the browser holds only the proxy's *public* key, so this layer proves
+request binding and rejects replays — it is not proof of client identity, since
+anyone with the compiled-in public key can mint a valid token.  A design for
+adding hardware-rooted client evidence on top of it is in
+[`docs/tpm-attestation.md`](docs/tpm-attestation.md) (not implemented).
 
 Setting up one partner end-to-end:
 
