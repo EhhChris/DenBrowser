@@ -370,6 +370,51 @@ identity, and is **default-deny**:
   allowed_subjects = ["health-checker"]
   ```
 
+**Logging** (`[logging]`) controls where the proxy records what it did.  The
+browser build has telemetry and diagnostics patched out (patch 010), so the proxy
+is the only component that records anything and this output is the audit trail.
+The whole section is optional; omitting it logs at `info` to stderr only.
+
+- `dir` — directory for rotating log files.  **Empty (the default) means stderr
+  only.**  Created at startup if absent; if it is set but cannot be created or
+  written the proxy **exits** rather than run with no audit trail.  Relative
+  paths resolve against the working directory, as `tls_cert` does.
+- `file_prefix` — base filename; the rotation stamp is appended, giving
+  `denbrowser-proxy.log.2026-08-01`.  Default `denbrowser-proxy.log`.
+- `level` — `RUST_LOG` syntax: a bare level (`trace`/`debug`/`info`/`warn`/
+  `error`/`off`) or directives such as `"info,denbrowser_proxy=debug"`.  Default
+  `info`, which records accepted *and* rejected requests; `warn` records only
+  rejections and rate limiting.
+- `rotation` — `"minutely"`, `"hourly"`, `"daily"` (default), or `"never"`.
+- `max_files` — rotated files to keep, oldest deleted first.  Default 14.  `0`
+  keeps everything, leaving disk growth unbounded.
+- `stderr` — mirror to stderr as well (default `true`), for journald capture and
+  local development.  The file itself never contains terminal colour codes.
+
+  ```toml
+  [logging]
+  dir = "/var/log/denbrowser"
+  level = "info"
+  rotation = "daily"
+  max_files = 14
+  ```
+
+  Setting `RUST_LOG` in the environment overrides `level` for that run, which is
+  the quick way to raise detail without editing the file:
+
+  ```sh
+  RUST_LOG=debug denbrowser-proxy --config /etc/denbrowser/proxy.toml
+  ```
+
+  Because the proxy logs through `tracing` and bridges the `log` facade into it,
+  raising the level also surfaces Pingora's own internals in the same file.
+
+> **Upgrade note.** Earlier builds initialised `env_logger` with no default
+> filter, so the effective level was `error` and — since the proxy emits nothing
+> at that level — a stock deployment logged *nothing at all*.  Existing config
+> files keep working untouched, but they will start producing `info` output on
+> stderr where they were previously silent.
+
 ---
 
 ## Patches

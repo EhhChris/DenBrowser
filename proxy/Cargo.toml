@@ -31,8 +31,18 @@ bytes      = "1"
 http       = "1"
 clap       = { version = "4", features = ["derive", "env"] }
 anyhow     = "1"
-log        = "0.4"
-env_logger = "0.11"
+
+# Logging.  `tracing` is the facade the proxy's own call sites use; pingora
+# emits through the older `log` facade, which `tracing-subscriber`'s default
+# `tracing-log` feature bridges into the same subscriber.  `log` stays a direct
+# dependency so `logging.rs` can clamp that bridge's level (see its module docs).
+# `env-filter` is NOT a default feature of tracing-subscriber and must be asked
+# for; it is what gives `[logging].level` and `RUST_LOG` their filter syntax.
+log                = "0.4"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }
+tempfile  = "3"

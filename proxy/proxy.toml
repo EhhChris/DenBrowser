@@ -83,3 +83,14 @@ allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
 # Subject allowlist matched against the mTLS-verified client certificate's Common
 # Name or one of its SubjectAltName DNS entries. Required (non-empty) when enabled.
 allowed_subjects = ["health-checker", "ops.internal", "denbrowser-user"]
+
+# ---------------------------------------------------------------------------
+
+[logging]
+# The proxy is the only DenBrowser component that records anything, so this
+# output is the audit trail.  See proxy.example.toml for every option; the
+# defaults (daily rotation, 14 files kept, stderr mirror on, level = "info")
+# apply to anything not set here.
+#
+# `build/` is gitignored, so dev logs stay out of version control.
+dir = "../build/logs"
