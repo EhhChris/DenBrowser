@@ -4,93 +4,384 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 005-disable-printing
 #
-# Blocks all print paths unconditionally. Three enforcement layers:
+# The DenBrowser build blocks printing at eight enforcement layers. Layers 1
+# and 2 live in configuration; this source patch supplies layers 3 through 8:
 #
-# 1. PrintingEnabled=false enterprise policy (policies.json)
-#    Removes the print menu item, toolbar button, and Ctrl+P/Cmd+P shortcut.
-#    DOES NOT block window.print() or internal print-to-PDF calls from JS.
+# 1. PrintingEnabled=false enterprise policy (config/policies.json)
+#    Removes standard print commands and shortcuts from browser chrome.
 #
-# 2. user.js: print.enabled = false
-#    PrintOuter() (the window.print() entry point) checks StaticPrefs::print_enabled()
-#    and silently returns when false. This blocks JS-triggered print dialogs.
-#    See: dom/base/nsGlobalWindowOuter.cpp::PrintOuter
+# 2. Locked print.enabled=false preference (config/mozilla.cfg and patch 017)
+#    Keeps the supported runtime gate disabled and immutable.
 #
-# 3. nsPrintJob::CommonPrint (this patch)
-#    The single funnel point for all print and print-preview operations, regardless
-#    of trigger source. Both nsPrintJob::Print and nsPrintJob::PrintPreview call
-#    CommonPrint, so one block here covers:
-#      - Programmatic print calls that bypass PrintOuter
-#      - Print-to-PDF (which uses the same print pipeline)
-#      - Any extension or internal caller that reaches nsPrintJob directly
-#    Returns NS_ERROR_ABORT, which the caller uses to call FirePrintingErrorEvent
-#    and DestroyPrintingData — a clean shutdown path.
+# 3. PrintUtils front-end guards (toolkit/components/printing/content/)
+#    Stop page setup, tab-modal preview, silent printing, and the native system
+#    dialog before a dialog, static clone, or print promise is created.
 #
-# 4. print.js init() (this patch)
-#    The modern print dialog renders its preview through CommonPrint with
-#    aIsPrintPreview=true. Layer 3 aborts that too, leaving the preview empty —
-#    which makes the dialog's Print button silently no-op (print() bails on
-#    previewIsEmpty) before it ever reaches layer 3's alert branch. So the only
-#    user-visible artifact was a console error, itself suppressed by patch 008.
-#    init() is the print dialog's single entry point; showing a native alert
-#    there and closing the dialog gives reliable feedback, mirroring the
-#    blocked-save alert patch 004 adds to contentAreaUtils.js internalSave().
+# 4. nsGlobalWindowOuter::PrintOuter and internal Print
+#    Block window.print() and direct content-process callers before delayed
+#    print, modal, print-service, cloning, or IPC state is initialized.
+#
+# 5. CanonicalBrowsingContext::Print and PrintWithNoContentAnalysis
+#    Reject parent-process print promises before content analysis, static
+#    cloning, RemotePrintJob construction, or PBrowser print IPC.
+#
+# 6. WebExtension tabs.saveAsPDF (browser/components/extensions/)
+#    Returns "not_saved" before a file picker or output stream can be opened.
+#
+# 7. nsPrintJob::CommonPrint (layout/printing/)
+#    Final source-level backstop. It follows the existing failure cleanup path
+#    and settles direct progress listeners and remote print actors.
+#
+# 8. print.js init() (toolkit/components/printing/content/)
+#    Last-resort direct-dialog guard; waits for SubDialog's managed close hook,
+#    queues non-modal feedback, and closes without starting preview work.
+#
+# Dedicated DenBrowserPrintingChild/Parent actors carry only trusted blocked
+# events from every content frame and preserve popup opener context. The stock
+# Printing actor remains top-level-only. Patch 004's shared browser-chrome
+# notification displays the message asynchronously for four seconds, with no
+# prompt service, nested event loop, or modal browser-chrome state.
 
 
+diff --git a/browser/components/extensions/parent/ext-tabs.js b/browser/components/extensions/parent/ext-tabs.js
+index f342748..c0f4b44 100644
+--- a/browser/components/extensions/parent/ext-tabs.js
++++ b/browser/components/extensions/parent/ext-tabs.js
+@@ -27,6 +27,8 @@ const TAB_HIDE_CONFIRMED_TYPE = "tabHideNotification";
+ 
+ const TAB_ID_NONE = -1;
+ 
++const DENBROWSER_TABS_PRINTING_DISABLED = true;
++
+ ChromeUtils.defineLazyGetter(this, "tabHidePopup", () => {
+   return new ExtensionControlledPopup({
+     confirmedType: TAB_HIDE_CONFIRMED_TYPE,
+@@ -1408,6 +1410,14 @@ this.tabs = class extends ExtensionAPIPersistent {
+ 
+         saveAsPDF(pageSettings) {
+           let activeTab = getTabOrActive(null);
++          if (DENBROWSER_TABS_PRINTING_DISABLED) {
++            let { PrintUtils } = activeTab.documentGlobal;
++            PrintUtils._notifyPrintingBlocked(
++              activeTab.linkedBrowser.browsingContext
++            );
++            return Promise.resolve("not_saved");
++          }
++
+           let picker = Cc["@mozilla.org/filepicker;1"].createInstance(
+             Ci.nsIFilePicker
+           );
+diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
+index 00c69a2..4e28680 100644
+--- a/docshell/base/CanonicalBrowsingContext.cpp
++++ b/docshell/base/CanonicalBrowsingContext.cpp
+@@ -954,6 +954,8 @@ already_AddRefed<Promise> CanonicalBrowsingContext::PrintJS(
+ 
+ RefPtr<PrintPromise> CanonicalBrowsingContext::Print(
+     nsIPrintSettings* aPrintSettings) {
++  // DenBrowser: reject before content analysis, cloning, or print IPC state.
++  return PrintPromise::CreateAndReject(NS_ERROR_ABORT, __func__);
+ #ifndef NS_PRINTING
+   return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
+ #else
+@@ -1020,6 +1022,8 @@ void CanonicalBrowsingContext::ReleaseClonedPrint(
+ RefPtr<PrintPromise> CanonicalBrowsingContext::PrintWithNoContentAnalysis(
+     nsIPrintSettings* aPrintSettings, bool aForceStaticDocument,
+     const MaybeDiscardedBrowsingContext& aCachedStaticDocument) {
++  // DenBrowser: also cover callers that intentionally bypass content analysis.
++  return PrintPromise::CreateAndReject(NS_ERROR_ABORT, __func__);
+ #ifndef NS_PRINTING
+   return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
+ #else
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+index 0fbb9d9..dd07395 100644
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -263,6 +263,8 @@ using mozilla::OriginAttributes;
+ using mozilla::TimeStamp;
+ using mozilla::layout::RemotePrintJobChild;
+ 
++static bool MOZ_NEVER_INLINE IsDenBrowserPrintingDisabled() { return true; }
++
+ static inline nsGlobalWindowInner* GetCurrentInnerWindowInternal(
+     const nsGlobalWindowOuter* aOuter) {
+   return nsGlobalWindowInner::Cast(aOuter->GetCurrentInnerWindow());
+@@ -4965,6 +4967,14 @@ void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
+     return;
+   }
+ 
++  if (IsDenBrowserPrintingDisabled()) {
++    // Stop before delayed-print, clone, or modal state. The chrome-only event
++    // is forwarded asynchronously by the Printing actor.
++    DispatchCustomEvent(u"DenBrowserPrintingBlocked"_ns,
++                        ChromeOnlyDispatch::eYes);
++    return;
++  }
++
+   // Printing is disabled, silently return.
+   if (!StaticPrefs::print_enabled()) {
+     return;
+@@ -5026,6 +5036,12 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
+     IsPreview aIsPreview, IsForWindowDotPrint aForWindowDotPrint,
+     PrintPreviewResolver&& aPrintPreviewCallback,
+     RefPtr<BrowsingContext>* aCachedBrowsingContext, ErrorResult& aError) {
++  if (IsDenBrowserPrintingDisabled()) {
++    // Also reject direct internal callers before print services, cloning, IPC,
++    // or AutoModalState can be initialized.
++    aError.Throw(NS_ERROR_ABORT);
++    return nullptr;
++  }
+ #ifdef NS_PRINTING
+   nsCOMPtr<nsIPrintSettingsService> printSettingsService =
+       do_GetService("@mozilla.org/gfx/printsettings-service;1");
 diff --git a/layout/printing/nsPrintJob.cpp b/layout/printing/nsPrintJob.cpp
-index 0904ef055fce..00e13c8ab660 100644
+index 0904ef0..c82a9fa 100644
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
-@@ -30,6 +30,7 @@
- #include "nsIBrowserChild.h"
- #include "nsIDocShell.h"
- #include "nsIOService.h"
-+#include "nsIPromptService.h"
- #include "nsIScriptGlobalObject.h"
- #include "nsIStringBundle.h"
- #include "nsITextToSubURI.h"
-@@ -324,6 +325,19 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
-                                  nsIPrintSettings* aPrintSettings,
-                                  nsIWebProgressListener* aWebProgressListener,
-                                  Document& aSourceDoc) {
-+  // DenBrowser: printing permanently disabled; aborts print and preview alike.
-+  // This alert only reaches non-UI callers — the print dialog's own feedback
-+  // is in print.js, since its empty preview stops print() before this branch.
-+  if (!aIsPrintPreview) {
-+    if (nsCOMPtr<nsPIDOMWindowOuter> win = aSourceDoc.GetWindow()) {
-+      if (nsCOMPtr<nsIPromptService> prompt =
-+              do_GetService("@mozilla.org/embedcomp/prompt-service;1")) {
-+        prompt->Alert(win, u"DenBrowser",
-+                      u"Printing is not available in this browser.");
-+      }
-+    }
-+  }
-+  return NS_ERROR_ABORT;
-   // Callers must hold a strong reference to |this| to ensure that we stay
-   // alive for the duration of this method, because our main owning reference
+@@ -329,8 +329,13 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
    // (on nsDocumentViewer) might be cleared during this function (if we cause
+   // script to run and it cancels the print operation).
+ 
+-  nsresult rv = DoCommonPrint(aIsPrintPreview, aPrintSettings,
+-                              aWebProgressListener, aSourceDoc);
++  // DenBrowser: final source-level backstop. Front-end and canonical-context
++  // guards normally abort before a print job or listener is created.
++  (void)aPrintSettings;
++  (void)aSourceDoc;
++  nsCOMPtr<nsIWebProgressListener> progressListener = aWebProgressListener;
++  RefPtr<RemotePrintJobChild> remotePrintJob = mRemotePrintJob;
++  nsresult rv = NS_ERROR_ABORT;
+   if (NS_FAILED(rv)) {
+     if (aIsPrintPreview) {
+       mIsCreatingPrintPreview = false;
+@@ -342,6 +347,20 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
+       FirePrintingErrorEvent(rv);
+     }
+     DestroyPrintingData();
++
++    // Settle any direct callers that reached this last line of defense.
++    if (progressListener) {
++      progressListener->OnStatusChange(nullptr, nullptr, rv, nullptr);
++      progressListener->OnStateChange(
++          nullptr, nullptr,
++          nsIWebProgressListener::STATE_STOP |
++              nsIWebProgressListener::STATE_IS_DOCUMENT,
++          rv);
++    }
++    if (remotePrintJob && remotePrintJob->CanSend()) {
++      (void)remotePrintJob->SendStatusChange(rv);
++      (void)remotePrintJob->SendAbortPrint(rv);
++    }
+   }
+ 
+   return rv;
+diff --git a/toolkit/actors/DenBrowserPrintingChild.sys.mjs b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
+new file mode 100644
+index 0000000..2992236
+--- /dev/null
++++ b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
+@@ -0,0 +1,16 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++export class DenBrowserPrintingChild extends JSWindowActorChild {
++  handleEvent(event) {
++    if (!event.isTrusted) {
++      return;
++    }
++
++    this.sendAsyncMessage("DenBrowserPrinting:Blocked", {
++      sourceBrowsingContextId: this.browsingContext.id,
++      openerBrowsingContextId: this.browsingContext.top.opener?.id ?? null,
++    });
++  }
++}
+diff --git a/toolkit/actors/DenBrowserPrintingParent.sys.mjs b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
+new file mode 100644
+index 0000000..bf998fe
+--- /dev/null
++++ b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
+@@ -0,0 +1,40 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++export class DenBrowserPrintingParent extends JSWindowActorParent {
++  receiveMessage(message) {
++    if (message.name != "DenBrowserPrinting:Blocked") {
++      return undefined;
++    }
++
++    let fallbackBrowser = this.browsingContext.top.embedderElement;
++    let sourceContext = BrowsingContext.get(
++      message.data.sourceBrowsingContextId
++    );
++    let openerContext = message.data.openerBrowsingContextId
++      ? BrowsingContext.get(message.data.openerBrowsingContextId)
++      : null;
++    let sourceBrowser = sourceContext?.top?.embedderElement || fallbackBrowser;
++    let openerBrowser =
++      openerContext?.top?.embedderElement ||
++      sourceContext?.top?.opener?.top?.embedderElement;
++    let chromeRoot = sourceBrowser?.ownerDocument?.documentElement;
++    let browser =
++      openerBrowser &&
++      (!sourceBrowser?.isConnected || chromeRoot?.hasAttribute("chromehidden"))
++        ? openerBrowser
++        : sourceBrowser;
++
++    if (browser?.isConnected) {
++      let chromeWindow = browser.documentGlobal;
++      browser.dispatchEvent(
++        new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
++          bubbles: true,
++        })
++      );
++    }
++
++    return undefined;
++  }
++}
+diff --git a/toolkit/actors/moz.build b/toolkit/actors/moz.build
+index 37de227..b28c5f3 100644
+--- a/toolkit/actors/moz.build
++++ b/toolkit/actors/moz.build
+@@ -51,6 +51,8 @@ FINAL_TARGET_FILES.actors += [
+     "ContentMetaParent.sys.mjs",
+     "ControllersChild.sys.mjs",
+     "ControllersParent.sys.mjs",
++    "DenBrowserPrintingChild.sys.mjs",
++    "DenBrowserPrintingParent.sys.mjs",
+     "ExtFindChild.sys.mjs",
+     "FindBarChild.sys.mjs",
+     "FindBarParent.sys.mjs",
 diff --git a/toolkit/components/printing/content/print.js b/toolkit/components/printing/content/print.js
-index d9204f28178b..ed5cf127d0e4 100644
+index d9204f2..65039f3 100644
 --- a/toolkit/components/printing/content/print.js
 +++ b/toolkit/components/printing/content/print.js
-@@ -163,6 +163,21 @@ var PrintEventHandler = {
+@@ -15,6 +15,7 @@ const INPUT_DELAY_MS = Cu.isInAutomation ? 100 : 500;
+ const MM_PER_POINT = 25.4 / 72;
+ const INCHES_PER_POINT = 1 / 72;
+ const INCHES_PER_MM = 1 / 25.4;
++const DENBROWSER_PRINT_DIALOG_DISABLED = true;
+ const ourBrowser = window.docShell.chromeEventHandler;
+ const PSSVC = Cc["@mozilla.org/gfx/printsettings-service;1"].getService(
+   Ci.nsIPrintSettingsService
+@@ -163,6 +164,19 @@ var PrintEventHandler = {
    _noPreviewUpdateSettings: new Set(["numCopies", "printDuplex"]),
  
    async init() {
-+    // DenBrowser: printing is permanently disabled. The actual block lives in
-+    // nsPrintJob::CommonPrint (patch 005), which aborts the preview render too.
-+    // That leaves this dialog's preview empty, which silently short-circuits
-+    // the Print button (print() bails on previewIsEmpty) with no user feedback —
-+    // only a console error that DenBrowser suppresses. Surface a native alert
-+    // here at the print UI's single entry point, then close the dialog. Mirrors
-+    // the blocked-save feedback in patch 004 (contentAreaUtils.js internalSave).
-+    Services.prompt.alert(
-+      Services.wm.getMostRecentWindow("navigator:browser"),
-+      "DenBrowser",
-+      "Printing is not available in this browser."
-+    );
-+    window.close();
-+    return;
++    if (DENBROWSER_PRINT_DIALOG_DISABLED) {
++      // Last-resort protection for callers that open print.html directly.
++      // Wait until SubDialog has installed its managed close implementation.
++      this.printPreviewEl =
++        ourBrowser.parentElement.querySelector("print-preview");
++      await ourBrowser._dialogReady;
++      PrintUtils._notifyPrintingBlocked(
++        this.printPreviewEl?.getSourceBrowsingContext()
++      );
++      window.close();
++      return;
++    }
 +
      Glean.printing.previewOpenedTm.add(1);
  
      this.printPreviewEl =
+diff --git a/toolkit/components/printing/content/printUtils.js b/toolkit/components/printing/content/printUtils.js
+index c3e6c6e..3ad691f 100644
+--- a/toolkit/components/printing/content/printUtils.js
++++ b/toolkit/components/printing/content/printUtils.js
+@@ -55,6 +55,8 @@ ChromeUtils.defineESModuleGetters(this, {
+   PromptUtils: "resource://gre/modules/PromptUtils.sys.mjs",
+ });
+ 
++const DENBROWSER_PRINTING_DISABLED = true;
++
+ var PrintUtils = {
+   SAVE_TO_PDF_PRINTER: "Mozilla Save to PDF",
+ 
+@@ -97,6 +99,11 @@ var PrintUtils = {
+    * @return true on success, false on failure
+    */
+   showPageSetup() {
++    if (DENBROWSER_PRINTING_DISABLED) {
++      this._notifyPrintingBlocked();
++      return false;
++    }
++
+     let printSettings = this.getPrintSettings();
+     // If we come directly from the Page Setup menu, the hack in
+     // _enterPrintPreview will not have been invoked to set the last used
+@@ -133,6 +140,22 @@ var PrintUtils = {
+     return gBrowser.getTabDialogBox(sourceBrowser);
+   },
+ 
++  _notifyPrintingBlocked(aBrowsingContext = null) {
++    let browser =
++      aBrowsingContext?.top?.embedderElement ||
++      globalThis.gBrowser?.selectedBrowser;
++    if (browser?.localName != "browser") {
++      return;
++    }
++
++    let chromeWindow = browser.documentGlobal;
++    browser.dispatchEvent(
++      new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
++        bubbles: true,
++      })
++    );
++  },
++
+   getPreviewBrowser(sourceBrowser) {
+     let dialogBox = this.getTabDialogBox(sourceBrowser);
+     for (let dialog of dialogBox.getTabDialogManager()._dialogs) {
+@@ -228,6 +251,12 @@ var PrintUtils = {
+    *        {printFrameOnly}      Whether to print the selected frame.
+    */
+   startPrintWindow(aBrowsingContext, aOptions) {
++    if (DENBROWSER_PRINTING_DISABLED) {
++      // Stop before option handling can create a tab-modal dialog or clone.
++      this._notifyPrintingBlocked(aBrowsingContext);
++      return null;
++    }
++
+     // At most, one of these is set.
+     let { printSelectionOnly, printFrameOnly, windowDotPrintOpenWindowInfo } =
+       aOptions || {};
+@@ -540,6 +569,11 @@ var PrintUtils = {
+   // Show the system print dialog, saving modified preferences.
+   // Returns true if the user clicked print (Not cancel).
+   async handleSystemPrintDialog(aWindow, aHasSelection, aSettings) {
++    if (DENBROWSER_PRINTING_DISABLED) {
++      this._notifyPrintingBlocked();
++      return false;
++    }
++
+     // Prompt the user to choose a printer and make any desired print
+     // settings changes.
+     try {
+diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
+index 8cab331..c895505 100644
+--- a/toolkit/modules/ActorManagerParent.sys.mjs
++++ b/toolkit/modules/ActorManagerParent.sys.mjs
+@@ -524,6 +524,19 @@ let JSWINDOWACTORS = {
+     allFrames: true,
+   },
+ 
++  DenBrowserPrinting: {
++    parent: {
++      esModuleURI: "resource://gre/actors/DenBrowserPrintingParent.sys.mjs",
++    },
++    child: {
++      esModuleURI: "resource://gre/actors/DenBrowserPrintingChild.sys.mjs",
++      events: {
++        DenBrowserPrintingBlocked: { capture: true },
++      },
++    },
++    allFrames: true,
++  },
++
+   Printing: {
+     parent: {
+       esModuleURI: "resource://gre/actors/PrintingParent.sys.mjs",
