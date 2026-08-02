@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::Parser;
-use log::{info, warn};
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
 use pingora_core::tls::ssl::{SslFiletype, SslVerifyMode};
@@ -11,9 +10,11 @@ use pingora_core::Result;
 use pingora_http::RequestHeader;
 use pingora_proxy::{http_proxy_service, ProxyHttp, Session};
 use sha2::{Digest, Sha256};
+use tracing::{error, info, warn};
 
 mod attest;
 mod config;
+mod logging;
 mod mtls;
 mod passthrough;
 mod ratelimit;
@@ -242,6 +243,10 @@ impl ProxyHttp for DenBrowserProxy {
                 let _ = session.respond_error(403).await;
                 return Ok(true);
             }
+            info!(
+                "accepted — {method} {host}{} (unbound upload)",
+                path_without_query(&path)
+            );
             return Ok(false);
         }
 
@@ -285,6 +290,10 @@ impl ProxyHttp for DenBrowserProxy {
 
         // Fully verified.  Pingora's retry buffer holds the body and replays it
         // to the upstream on its own.
+        info!(
+            "accepted — {method} {host}{} ({total} byte body)",
+            path_without_query(&path)
+        );
         Ok(false)
     }
 
@@ -306,6 +315,22 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
 }
 
+/// Drop the query string from a path for logging.
+///
+/// The accept path logs one line per *successful* request, so unlike the
+/// rejection logs it sees ordinary user traffic in bulk — and query strings
+/// routinely carry session tokens, search terms, and other content this product
+/// exists to keep from leaking.  Recording the path alone is enough to audit
+/// what was allowed through without turning the audit trail into its own
+/// disclosure risk.  Rejection logs keep the full path deliberately: they are
+/// comparatively rare and the query is often the reason the request was refused.
+fn path_without_query(path: &str) -> &str {
+    match path.split_once('?') {
+        Some((head, _)) => head,
+        None => path,
+    }
+}
+
 /// Read the mTLS client identity the TLS layer recorded on this connection's
 /// digest (see `mtls::Recorder`).  `None` means mTLS is disabled or the peer
 /// presented no certificate — with baseline mTLS enforced at the handshake, a
@@ -319,23 +344,49 @@ fn client_cert(session: &Session) -> Option<&ClientCert> {
         .get::<ClientCert>()
 }
 
+/// Abort startup with a logged reason.
+///
+/// Startup failures used to `panic!`, which produced a backtrace-shaped message
+/// on stderr and nothing in the log file.  Routing them through `error!` puts
+/// them in the audit trail alongside everything else.  `process::exit` skips the
+/// appender's flush-on-drop, but the stderr mirror is on by default, so the
+/// message reaches the operator either way.
+fn fatal(msg: impl std::fmt::Display) -> ! {
+    error!("{msg}");
+    std::process::exit(1);
+}
+
 fn main() {
-    env_logger::init();
     let args = Args::parse();
 
     // The config file is mandatory — fail loudly rather than fall back to
     // silent defaults, so a missing or unreadable config never starts a proxy
     // with unintended (e.g. mTLS-disabled) settings.  It is loaded first
-    // because it carries the attestation private key path.
-    let config = Config::load(&args.config).unwrap_or_else(|e| panic!("{e}"));
+    // because it carries the attestation private key path, and because it also
+    // carries the logging settings: this one failure genuinely predates the
+    // logger, so it reports itself on stderr rather than through `fatal`.
+    let config = Config::load(&args.config).unwrap_or_else(|e| {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    });
+
+    // Logging comes up next so every check below is recorded.  The guard owns
+    // the background file-writer thread and must stay alive for the life of the
+    // process; see `logging`'s module docs for why that is not quite the same
+    // as being dropped cleanly.
+    let _log_guard = logging::init(&config.logging).unwrap_or_else(|e| {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    });
+
     config
         .proxy
         .validate()
-        .unwrap_or_else(|e| panic!("invalid proxy config: {e}"));
+        .unwrap_or_else(|e| fatal(format!("invalid proxy config: {e}")));
 
     // Attestation key: required, and validated here so a proxy that could
     // never decrypt a token refuses to start instead of 403-ing every request.
-    let verifier = Verifier::from_config(&config.attestation).unwrap_or_else(|e| panic!("{e}"));
+    let verifier = Verifier::from_config(&config.attestation).unwrap_or_else(|e| fatal(e));
     info!(
         "attestation key loaded from {}",
         config.attestation.private_key
@@ -348,7 +399,7 @@ fn main() {
         );
     }
     let rate_limiter = RateLimiter::from_config(&config.rate_limiting)
-        .unwrap_or_else(|e| panic!("invalid rate_limiting config: {e}"));
+        .unwrap_or_else(|e| fatal(format!("invalid rate_limiting config: {e}")));
     match &rate_limiter {
         Some(_) => info!("rate limiting enabled"),
         None => info!("rate limiting disabled"),
@@ -357,7 +408,7 @@ fn main() {
     // Baseline mTLS: when enabled, every client must present a certificate
     // chaining to the configured CA (enforced at the TLS handshake below).
     let mtls = mtls::Mtls::from_config(&config.mtls)
-        .unwrap_or_else(|e| panic!("invalid mtls config: {e}"));
+        .unwrap_or_else(|e| fatal(format!("invalid mtls config: {e}")));
     match &mtls {
         Some(_) => info!("mTLS enabled — client certificates required"),
         None => info!("mTLS disabled"),
@@ -366,7 +417,7 @@ fn main() {
     // Attestation bypass builds on baseline mTLS and matches the mTLS-verified
     // identity against a subject allowlist plus a source-IP range.
     let bypass = passthrough::from_config(&config.proxy_bypass, mtls.is_some())
-        .unwrap_or_else(|e| panic!("invalid proxy_bypass config: {e}"));
+        .unwrap_or_else(|e| fatal(format!("invalid proxy_bypass config: {e}")));
     match &bypass {
         Some(_) => info!("attestation bypass enabled"),
         None => info!("attestation bypass disabled"),
@@ -379,9 +430,12 @@ fn main() {
         rate_limiter,
         bypass,
     )
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| fatal(e));
 
-    let mut server = Server::new(None).expect("Pingora server init failed");
+    // `None` leaves pingora's `daemon` flag false.  Keep it that way: the log
+    // appender's writer thread would not survive a fork (see `logging`).
+    let mut server =
+        Server::new(None).unwrap_or_else(|e| fatal(format!("pingora init failed: {e}")));
     server.bootstrap();
 
     let mut svc = http_proxy_service(&server.configuration, proxy);
@@ -397,25 +451,27 @@ fn main() {
         // valid certificate never reaches the request path.
         Some(m) => {
             let mut tls = TlsSettings::with_callbacks(m.tls_callbacks())
-                .unwrap_or_else(|e| panic!("TLS callback setup failed: {e}"));
+                .unwrap_or_else(|e| fatal(format!("TLS callback setup failed: {e}")));
             tls.set_certificate_chain_file(&config.proxy.tls_cert)
                 .unwrap_or_else(|e| {
-                    panic!("TLS cert load failed ({}): {e}", config.proxy.tls_cert)
+                    fatal(format!("TLS cert load failed ({}): {e}", config.proxy.tls_cert))
                 });
             tls.set_private_key_file(&config.proxy.tls_key, SslFiletype::PEM)
-                .unwrap_or_else(|e| panic!("TLS key load failed ({}): {e}", config.proxy.tls_key));
+                .unwrap_or_else(|e| {
+                    fatal(format!("TLS key load failed ({}): {e}", config.proxy.tls_key))
+                });
             tls.set_ca_file(m.ca_path())
-                .unwrap_or_else(|e| panic!("mTLS CA load failed ({}): {e}", m.ca_path()));
+                .unwrap_or_else(|e| fatal(format!("mTLS CA load failed ({}): {e}", m.ca_path())));
             tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
             tls
         }
         // mTLS off: the original listener, unchanged — no client cert requested.
         None => TlsSettings::intermediate(&config.proxy.tls_cert, &config.proxy.tls_key)
             .unwrap_or_else(|e| {
-                panic!(
+                fatal(format!(
                     "TLS cert/key load failed ({}, {}): {e}",
                     config.proxy.tls_cert, config.proxy.tls_key
-                )
+                ))
             }),
     };
     svc.add_tls_with_settings(&config.proxy.listen, None, tls);
@@ -426,4 +482,20 @@ fn main() {
     );
     server.add_service(svc);
     server.run_forever();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_without_query_strips_from_the_first_question_mark() {
+        assert_eq!(path_without_query("/"), "/");
+        assert_eq!(path_without_query("/search"), "/search");
+        assert_eq!(path_without_query("/search?q=secret"), "/search");
+        // A `?` in the query value must not resurrect the rest of it.
+        assert_eq!(path_without_query("/a?b=1?2&token=shh"), "/a");
+        // Empty query still drops the separator, so the line reads cleanly.
+        assert_eq!(path_without_query("/a?"), "/a");
+    }
 }

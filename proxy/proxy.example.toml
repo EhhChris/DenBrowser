@@ -122,3 +122,45 @@ allowed_ip_ranges = ["10.0.0.0/8", "192.168.1.0/24"]
 # Name or one of its SubjectAltName DNS entries. Lets one CA issue many user
 # certs while only these identities may bypass. Required (non-empty) when enabled.
 allowed_subjects = ["health-checker", "ops.internal"]
+
+# ---------------------------------------------------------------------------
+
+[logging]
+# Where and how this proxy records what it did.  DenBrowser's browser build has
+# telemetry and diagnostics patched out, so the proxy is the only component that
+# records anything — this output IS the audit trail.
+#
+# Every setting below is optional and the defaults shown are what applies when
+# the whole section is omitted.
+
+# Directory for rotating log files.  EMPTY (the default) means stderr only.
+# Created at startup if it does not exist; the proxy EXITS if it is set but
+# cannot be created or written, rather than starting with no audit trail.
+# Relative paths resolve against the proxy's working directory, as tls_cert and
+# client_ca do.  The Windows backslash note at the top of this file applies here.
+dir = "../build/logs"
+
+# Base filename inside `dir`.  The rotation stamp is appended, giving files like
+# denbrowser-proxy.log.2026-08-01.
+file_prefix = "denbrowser-proxy.log"
+
+# Verbosity, in RUST_LOG syntax: a bare level (trace, debug, info, warn, error,
+# off) or per-module directives such as "info,denbrowser_proxy=debug".  Setting
+# RUST_LOG in the environment overrides this value entirely, which is the
+# convenient way to turn up detail for one run without editing this file.
+#
+# `info` records both accepted and rejected requests.  Drop to `warn` to log
+# only rejections and rate limiting.
+level = "info"
+
+# How often to start a new file: "minutely", "hourly", "daily", or "never".
+rotation = "daily"
+
+# How many rotated files to keep, oldest deleted first.  0 keeps every file —
+# disk growth is then unbounded, so pair it with external retention.
+max_files = 14
+
+# Also mirror everything to stderr.  Keep this on for systemd/journald capture
+# and for local development; the file stays free of terminal colour codes either
+# way.
+stderr = true

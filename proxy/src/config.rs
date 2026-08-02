@@ -25,6 +25,9 @@ pub struct Config {
 
     #[serde(default)]
     pub proxy_bypass: ProxyBypassConfig,
+
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 /// `[proxy]` — listener, upstream, and TLS settings for this proxy process.
@@ -187,6 +190,121 @@ pub struct ProxyBypassConfig {
     /// Required (non-empty) when `enabled`.
     #[serde(default)]
     pub allowed_subjects: Vec<String>,
+}
+
+/// Rotation periods accepted by `[logging].rotation`.
+///
+/// Declared once here so `validate` and `logging::rotation_from_str` cannot
+/// drift apart: config validation rejects anything outside this list, so the
+/// mapping in `logging` only ever sees a value it knows.
+pub const LOG_ROTATIONS: [&str; 4] = ["minutely", "hourly", "daily", "never"];
+
+/// Bare level names accepted by `[logging].level`.
+///
+/// Only used to catch typos — see [`LoggingConfig::validate`].  A level string
+/// containing `,` or `=` is directive syntax and is handed to `EnvFilter` whole.
+pub const LOG_LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "off"];
+
+/// `[logging]` — where and how the proxy writes its own log output.
+///
+/// The proxy is the only DenBrowser component permitted to record anything (the
+/// browser build has diagnostics patched out), so this output *is* the audit
+/// trail.  It is nonetheless off-by-file by default: `dir` is empty, which means
+/// stderr only, so a config file written before this section existed keeps
+/// working and simply gains visible output.
+///
+/// Unlike the sections above, this one uses a container-level `#[serde(default)]`
+/// rather than a per-field one.  Every other section's defaults are zero values,
+/// so `derive(Default)` and serde agree by construction; these are not
+/// (`level = "info"`, `max_files = 14`, `stderr = true`), and per-field
+/// `default = "..."` functions would be a second copy of them, free to drift.
+/// Deferring to `Default` keeps one source of truth for both paths.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LoggingConfig {
+    /// Directory to write rotating log files into.  Empty (the default)
+    /// disables file logging and leaves only the stderr mirror.  Created at
+    /// startup if it does not exist; relative paths resolve against the proxy's
+    /// working directory, as `tls_cert` and `client_ca` do.
+    pub dir: String,
+
+    /// Base filename inside `dir`.  The appender appends the rotation stamp,
+    /// producing e.g. `denbrowser-proxy.log.2026-08-01`.
+    pub file_prefix: String,
+
+    /// Verbosity, in `RUST_LOG` syntax — a bare level (`"info"`) or per-module
+    /// directives (`"info,denbrowser_proxy=debug"`).  `RUST_LOG`, when set in
+    /// the environment, overrides this value entirely.
+    pub level: String,
+
+    /// How often to start a new file: one of [`LOG_ROTATIONS`].
+    pub rotation: String,
+
+    /// How many rotated files to keep, oldest deleted first.  0 keeps every
+    /// file, which makes disk growth unbounded — pair it with external
+    /// retention if you choose it.
+    pub max_files: usize,
+
+    /// Also mirror output to stderr.  On by default so `cargo run`, journald,
+    /// and the test scripts under `test/` still show live output.
+    pub stderr: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            file_prefix: "denbrowser-proxy.log".to_owned(),
+            level: "info".to_owned(),
+            rotation: "daily".to_owned(),
+            max_files: 14,
+            stderr: true,
+        }
+    }
+}
+
+impl LoggingConfig {
+    /// True when file logging is configured; `dir` is the master switch.
+    pub fn file_enabled(&self) -> bool {
+        !self.dir.trim().is_empty()
+    }
+
+    /// Reject an unusable logging setup before the subscriber is built, so the
+    /// operator sees which field is wrong rather than a generic init failure.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !LOG_ROTATIONS.contains(&self.rotation.as_str()) {
+            anyhow::bail!(
+                "[logging].rotation must be one of {} (got {:?})",
+                LOG_ROTATIONS.join(", "),
+                self.rotation
+            );
+        }
+        // Only meaningful once a file is actually being written; an empty
+        // prefix would otherwise yield files named for the date alone.
+        if self.file_enabled() && self.file_prefix.trim().is_empty() {
+            anyhow::bail!("[logging].file_prefix is required when [logging].dir is set");
+        }
+
+        // `EnvFilter`'s grammar reads any bare word as a *target* name, so it
+        // accepts `level = "inf"` without complaint — as "log only the target
+        // named inf", which silently produces no output at all.  That failure
+        // mode is precisely what this section exists to fix, so a single bare
+        // token is checked against the real level names here.  Anything with a
+        // `,` or `=` is genuine directive syntax and is left to `EnvFilter`.
+        let level = self.level.trim();
+        if !level.is_empty()
+            && !level.contains(',')
+            && !level.contains('=')
+            && !LOG_LEVELS.contains(&level.to_ascii_lowercase().as_str())
+        {
+            anyhow::bail!(
+                "[logging].level must be one of {} (or a RUST_LOG-style directive list) — got {:?}",
+                LOG_LEVELS.join(", "),
+                self.level
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Config {
@@ -380,6 +498,156 @@ mod tests {
             [proxy_bypass]
             enabled = true
             allow_all = true
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn logging_defaults_to_stderr_only() {
+        // A config file written before `[logging]` existed must still parse, and
+        // must not start writing files somewhere the operator did not choose.
+        let c: Config = toml::from_str("[proxy]\nlisten = \"0.0.0.0:8081\"\n").unwrap();
+        assert!(!c.logging.file_enabled());
+        assert!(c.logging.dir.is_empty());
+        assert!(c.logging.stderr);
+        assert_eq!(c.logging.level, "info");
+        assert_eq!(c.logging.rotation, "daily");
+        assert_eq!(c.logging.max_files, 14);
+        assert_eq!(c.logging.file_prefix, "denbrowser-proxy.log");
+        c.logging.validate().unwrap();
+    }
+
+    #[test]
+    fn logging_serde_defaults_match_the_default_impl() {
+        // The container-level `#[serde(default)]` is what keeps these in step;
+        // this fails loudly if someone reintroduces per-field defaults.
+        let parsed: Config = toml::from_str("[logging]\n").unwrap();
+        let default = LoggingConfig::default();
+        assert_eq!(parsed.logging.dir, default.dir);
+        assert_eq!(parsed.logging.file_prefix, default.file_prefix);
+        assert_eq!(parsed.logging.level, default.level);
+        assert_eq!(parsed.logging.rotation, default.rotation);
+        assert_eq!(parsed.logging.max_files, default.max_files);
+        assert_eq!(parsed.logging.stderr, default.stderr);
+    }
+
+    #[test]
+    fn parses_logging_config() {
+        let toml = r#"
+            [logging]
+            dir = "/var/log/denbrowser"
+            file_prefix = "proxy.log"
+            level = "info,denbrowser_proxy=debug"
+            rotation = "hourly"
+            max_files = 48
+            stderr = false
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        c.logging.validate().unwrap();
+        assert!(c.logging.file_enabled());
+        assert_eq!(c.logging.dir, "/var/log/denbrowser");
+        assert_eq!(c.logging.file_prefix, "proxy.log");
+        assert_eq!(c.logging.level, "info,denbrowser_proxy=debug");
+        assert_eq!(c.logging.rotation, "hourly");
+        assert_eq!(c.logging.max_files, 48);
+        assert!(!c.logging.stderr);
+    }
+
+    #[test]
+    fn logging_partial_section_keeps_other_defaults() {
+        let c: Config = toml::from_str("[logging]\ndir = \"../build/logs\"\n").unwrap();
+        assert!(c.logging.file_enabled());
+        assert_eq!(c.logging.rotation, "daily");
+        assert_eq!(c.logging.max_files, 14);
+        assert!(c.logging.stderr);
+    }
+
+    #[test]
+    fn logging_rejects_unknown_rotation() {
+        let toml = r#"
+            [logging]
+            rotation = "weekly"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        let error = c.logging.validate().unwrap_err().to_string();
+        assert!(error.contains("[logging].rotation"), "got: {error}");
+        assert!(error.contains("weekly"), "error should quote the bad value: {error}");
+    }
+
+    #[test]
+    fn logging_every_advertised_rotation_validates() {
+        for rotation in LOG_ROTATIONS {
+            let c = LoggingConfig {
+                rotation: rotation.to_owned(),
+                ..LoggingConfig::default()
+            };
+            c.validate()
+                .unwrap_or_else(|e| panic!("{rotation} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn logging_requires_file_prefix_only_when_writing_files() {
+        let without_dir = LoggingConfig {
+            file_prefix: String::new(),
+            ..LoggingConfig::default()
+        };
+        // No file being written, so the prefix is irrelevant.
+        without_dir.validate().unwrap();
+
+        let with_dir = LoggingConfig {
+            dir: "/var/log/denbrowser".to_owned(),
+            file_prefix: "  ".to_owned(),
+            ..LoggingConfig::default()
+        };
+        let error = with_dir.validate().unwrap_err().to_string();
+        assert!(error.contains("[logging].file_prefix is required"), "got: {error}");
+    }
+
+    #[test]
+    fn logging_rejects_bare_level_typos() {
+        // The whole point of this section is that output stops being silent, so
+        // the near-misses that would reintroduce silence are rejected by name.
+        for typo in ["inf", "warning", "verbose", "INFOO"] {
+            let c = LoggingConfig {
+                level: typo.to_owned(),
+                ..LoggingConfig::default()
+            };
+            let error = match c.validate() {
+                Err(e) => e.to_string(),
+                Ok(()) => panic!("{typo} should have been rejected as a level"),
+            };
+            assert!(error.contains("[logging].level"), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn logging_accepts_valid_levels_and_directives() {
+        for level in LOG_LEVELS {
+            let c = LoggingConfig {
+                level: level.to_owned(),
+                ..LoggingConfig::default()
+            };
+            c.validate()
+                .unwrap_or_else(|e| panic!("{level} should validate: {e}"));
+        }
+        // Case-insensitive, and directive lists bypass the bare-token check.
+        for level in ["INFO", "Warn", "info,denbrowser_proxy=debug", "pingora_core=off"] {
+            let c = LoggingConfig {
+                level: level.to_owned(),
+                ..LoggingConfig::default()
+            };
+            c.validate()
+                .unwrap_or_else(|e| panic!("{level} should validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn logging_unknown_key_is_rejected() {
+        let toml = r#"
+            [logging]
+            dir = "/var/log/denbrowser"
+            path = "/var/log/denbrowser/proxy.log"
         "#;
         assert!(toml::from_str::<Config>(toml).is_err());
     }
