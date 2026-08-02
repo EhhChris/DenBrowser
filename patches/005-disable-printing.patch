@@ -6,7 +6,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Blocks all print paths unconditionally. Three enforcement layers:
 #
-# 1. DisablePrinting enterprise policy (policies.json)
+# 1. PrintingEnabled=false enterprise policy (policies.json)
 #    Removes the print menu item, toolbar button, and Ctrl+P/Cmd+P shortcut.
 #    DOES NOT block window.print() or internal print-to-PDF calls from JS.
 #

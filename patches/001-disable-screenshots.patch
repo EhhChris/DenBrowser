@@ -17,7 +17,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # 3. JS screenshot component (browser/components/screenshots/ScreenshotsUtils.sys.mjs)
 #    Blocks the three public entry points that Firefox's built-in screenshot
-#    tool calls. Belt-and-suspenders alongside the DisableScreenshots policy.
+#    tool calls. Belt-and-suspenders alongside the DisableFirefoxScreenshots policy.
 #
 # Linux/GTK: no reliable cross-compositor API exists; the OS-level capture
 # flag is omitted. The JS block still applies.

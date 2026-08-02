@@ -635,8 +635,8 @@ if [[ -n "$PREF_DIR" ]]; then
     # Enterprise policies: the policy engine reads <app>/distribution/policies.json
     # (relative to the binary on Windows/Linux, or Contents/Resources on macOS).
     # mach does not package browser/app/distribution/, so install the file
-    # generated in Step 4 here — without this, NO policy (Bookmarks, FirefoxHome,
-    # DisablePocket, …) takes effect; the lockdown otherwise rides on mozilla.cfg.
+    # generated in Step 4 here — without this, NO policy (AIControls, FirefoxHome,
+    # PasswordManagerEnabled, …) takes effect; the lockdown otherwise rides on mozilla.cfg.
     mkdir -p "$GRE_DIR/distribution"
     cp "$DIST_DIR/policies.json" "$GRE_DIR/distribution/policies.json"
     echo "[build] Installed policies.json into $PLATFORM_LABEL distribution/"

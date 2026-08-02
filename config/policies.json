@@ -1,20 +1,35 @@
 {
   "policies": {
-    "AppUpdateURL": "",
     "DisableAppUpdate": true,
+    "DisableRemoteSettingsAndAcceptSecurityConsequences": true,
+    "DisableRemoteImprovements": true,
     "DisableFirefoxAccounts": true,
     "DisableFirefoxStudies": true,
-    "DisableMasterPasswordCreation": false,
-    "DisablePocket": true,
+    "DisableMasterPasswordCreation": true,
+    "DisablePasswordReveal": true,
     "DisableTelemetry": true,
     "DisableFormHistory": true,
+    "AutofillAddressEnabled": false,
+    "AutofillCreditCardEnabled": false,
     "NoDefaultBookmarks": true,
     "OverrideFirstRunPage": "",
     "OverridePostUpdatePage": "",
 
-    "DisablePrinting": true,
-    "DisableScreenshots": true,
+    "PrintingEnabled": false,
+    "DisableFirefoxScreenshots": true,
     "DisableDeveloperTools": true,
+
+    "AIControls": {
+      "Default": {
+        "Value": "blocked",
+        "Locked": true
+      }
+    },
+
+    "BrowserDataBackup": false,
+    "IPProtectionAvailable": false,
+    "VisualSearchEnabled": false,
+    "DisplayBookmarksToolbar": "never",
 
     "BlockAboutConfig": true,
     "BlockAboutProfiles": true,
@@ -29,19 +44,19 @@
 
     "Permissions": {
       "Camera": {
-        "Block": ["<all_urls>"],
+        "BlockNewRequests": true,
         "Locked": true
       },
       "Microphone": {
-        "Block": ["<all_urls>"],
+        "BlockNewRequests": true,
         "Locked": true
       },
       "Location": {
-        "Block": ["<all_urls>"],
+        "BlockNewRequests": true,
         "Locked": true
       },
       "Notifications": {
-        "Block": ["<all_urls>"],
+        "BlockNewRequests": true,
         "Locked": true
       },
       "Autoplay": {
@@ -49,7 +64,7 @@
         "Locked": true
       },
       "VirtualReality": {
-        "Block": ["<all_urls>"],
+        "BlockNewRequests": true,
         "Locked": true
       }
     },
@@ -57,7 +72,6 @@
     "Cookies": {
       "Behavior": "reject-foreign",
       "BehaviorPrivateBrowsing": "reject-foreign",
-      "ExpireAtSessionEnd": true,
       "Locked": true
     },
 
@@ -67,20 +81,25 @@
     },
 
     "FirefoxHome": {
-      "Pocket": false,
-      "Snippets": false,
+      "Stories": false,
       "TopSites": false,
       "Highlights": false,
       "Search": false,
       "SponsoredTopSites": false,
-      "SponsoredPocket": false,
+      "SponsoredStories": false,
       "Locked": true
     },
 
-    "PromptForDownloadLocation": false,
-
     "DNSOverHTTPS": {
       "Enabled": false,
+      "Locked": true
+    },
+
+    "LocalNetworkAccess": {
+      "Enabled": true,
+      "BlockTrackers": true,
+      "EnablePrompting": true,
+      "SkipDomains": [],
       "Locked": true
     },
 
@@ -100,17 +119,16 @@
     },
 
     "UserMessaging": {
-      "WhatsNew": false,
       "ExtensionRecommendations": false,
       "FeatureRecommendations": false,
       "UrlbarInterventions": false,
       "SkipOnboarding": true,
-      "MoreFromMozilla": false
+      "MoreFromMozilla": false,
+      "Locked": true
     },
 
     "PasswordManagerEnabled": false,
     "HttpsOnlyMode": "force_enabled",
-    "TranslateEnabled": false,
     "DisableFeedbackCommands": true,
     "DisableProfileImport": true,
     "DisableSystemAddonUpdate": true
