@@ -32,7 +32,7 @@ ac_add_options --enable-optimize="-O2"
 ac_add_options --disable-debug
 ac_add_options --enable-strip                 # [dev-reversed] → removed (debug symbols preserved)
 ac_add_options --enable-install-strip         # [dev-reversed] → removed (debug symbols preserved)
-ac_add_options --with-compiler-wrapper=sccache
+ac_add_options --with-ccache=sccache
 
 # ── Security hardening ────────────────────────────────────────────────────────
 ac_add_options --enable-hardening
