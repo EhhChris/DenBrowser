@@ -1,0 +1,37 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 023-disable-context-search
+#
+# Removes Firefox's "Search <engine> for <selection or link text>" actions
+# from the content context menu. Firefox uses the same relevance value for the
+# normal and private-search menu items, and for both manually selected text and
+# the visible label of an unselected link.
+#
+# The source-level false relevance value makes Firefox's existing menu-update
+# logic mark both items hidden. Retaining that logic also preserves the normal
+# separator handling and avoids relying on unsupported userChrome.css selectors
+# or a profile preference that users could disable.
+#
+# This patch does not disable searches initiated through the address bar or
+# other browser search UI. Visual image search is a separate context-menu path
+# and remains disabled by browser.search.visualSearch.featureGate in
+# config/mozilla.cfg (compiled into libxul by patch 017).
+
+
+diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
+index 55283b5..4b6f915 100644
+--- a/browser/base/content/nsContextMenu.sys.mjs
++++ b/browser/base/content/nsContextMenu.sys.mjs
+@@ -2677,7 +2677,9 @@ export class nsContextMenu {
+     );
+ 
+     let opts = {
+-      isContextRelevant: (this.isTextSelected || this.onLink) && !this.onImage,
++      // DenBrowser: never expose selected or link text through a context-menu
++      // search. Keep both menu items hidden through Firefox's normal logic.
++      isContextRelevant: false,
+       searchTerms: selectedText,
+       searchUrlType: lazy.SearchUtils.URL_TYPE.SEARCH,
+     };
