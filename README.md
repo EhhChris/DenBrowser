@@ -7,7 +7,7 @@
 
 A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. DenBrowser is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
 
-**Currently tracking Firefox ESR 140.x** (most recently built against 140.13.0esr;
+**Currently tracking Firefox ESR 153.x** (most recently built against 153.0esr;
 `scripts/fetch-esr.sh` pulls whatever ESR is current at fetch time).
 
 As this project progresses tags will be cut and attempt to follow the latest ESR releases.
