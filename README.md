@@ -144,6 +144,7 @@ lives.
 | Phone-home endpoints (Safe Browsing, captive-portal, Remote Settings, OCSP, blocklist, etc.) | — | `DisableRemoteSettingsAndAcceptSecurityConsequences` | `browser.safebrowsing.*`, `network.captive-portal-service.enabled`, `network.connectivity-service.enabled`, `browser.discovery.enabled`, `security.OCSP.*`, `security.remote_settings.*`, `extensions.blocklist.enabled`, `extensions.update.url`, `network.trr.confirmationNS` |
 | Built-in VPN / local-network access | — | `IPProtectionAvailable: false`, `LocalNetworkAccess` | `browser.ipProtection.enabled`, `network.lna.*` |
 | Visual Search | — | `VisualSearchEnabled: false` | `browser.search.visualSearch.featureGate` |
+| Context-menu search for selected/link text | 023 | — | — |
 | Web-platform capability APIs (Share / FS Access / Serial / MIDI / Payments / Push / Notifications / SpeechSynth / Battery / Sensors / WebTransport / file://) | — | — | `dom.webshare.enabled`, `dom.fs.enabled`, `dom.webserial.enabled`, `dom.webmidi.enabled`, `dom.payments.request.enabled`, `dom.push.enabled`, `dom.webnotifications.enabled`, `media.webspeech.synth.enabled`, `media.webspeech.recognition.enable`, `dom.battery.enabled`, `device.sensors.enabled`, `network.webtransport.enabled`, `network.protocol-handler.expose.file` |
 
 Per-deployment configuration (`config/site-config.json`) drives the
@@ -451,5 +452,6 @@ for navigation.
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox |
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
+| 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
 
 ---
