@@ -28,7 +28,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #    preventing allowlisted internal data from leaking through the native cache.
 #
 # 6. nsBaseDragSession::InvokeDragSession (widget/nsBaseDragService.cpp)
-#    Blocks drag-and-drop to prevent text exfiltration through browser chrome.
+#    Blocks content, URL-bar, and other drag-to-copy paths before native drag
+#    startup. Trusted tab-strip transport remains available for tab reordering,
+#    with automation limited to IPC/mock services. Blocked sessions use
+#    Firefox's failure cleanup so dragend always runs.
 #
 # INTERNAL CLIPBOARD (optional - activated by site-config.json):
 #
@@ -1075,19 +1078,49 @@ index 71bbb8a..3aef75b 100644
    if (NS_FAILED(rv)) {
      MOZ_CLIPBOARD_LOG("%s: setting native clipboard data failed.",
 diff --git a/widget/nsBaseDragService.cpp b/widget/nsBaseDragService.cpp
-index c88b4f6..ef35c14 100644
+index c88b4f6..47b01d1 100644
 --- a/widget/nsBaseDragService.cpp
 +++ b/widget/nsBaseDragService.cpp
-@@ -310,6 +310,9 @@ nsresult nsBaseDragSession::InvokeDragSession(
+@@ -25,6 +25,7 @@
+ #include "nsXULPopupManager.h"
+ #include "nsMenuPopupFrame.h"
+ #include "nsTreeBodyFrame.h"
++#include "mozilla/BasePrincipal.h"
+ #include "mozilla/MouseEvents.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/PresShell.h"
+@@ -395,8 +396,29 @@ nsresult nsBaseDragSession::InvokeDragSession(
+     }
+   }
  
-   // stash the document of the dom node
-   mSourceDocument = aDOMNode->OwnerDoc();
-+  // DenBrowser: block all drag-and-drop to prevent text exfiltration (incl. URL
-+  // bar).
-+  return NS_ERROR_ABORT;
-   mTriggeringPrincipal = aPrincipal;
-   mPolicyContainer = aPolicyContainer;
-   mSourceNode = aDOMNode;
++  // DenBrowser: permit only trusted browser tab transport. Content, URL-bar,
++  // and other chrome drags remain blocked before the native drag service can
++  // expose data outside the browser. Route blocked attempts through Firefox's
++  // normal failure cleanup below so dragend fires and the registered drag
++  // session cannot remain stuck. Remote content drags carry mDragStartData and
++  // must not inherit the system principal of their parent <browser> element.
++  const bool isInternalBrowserTabDrag =
++      !mDragStartData && mSourceNode->NodePrincipal()->IsSystemPrincipal() &&
++      mDataTransfer &&
++      mDataTransfer->HasType(u"application/x-moz-tabbrowser-tab"_ns);
++  nsCOMPtr<nsIDragService> dragService =
++      do_GetService("@mozilla.org/widget/dragservice;1");
+-  nsresult rv =
+-      InvokeDragSessionImpl(aWidget, aTransferableArray, mRegion, aActionType);
++  // Content-process automation sends its data over IPC to the mock service in
++  // the parent. The parent may proceed only when that mock is actually active,
++  // so tests cannot accidentally enter the platform's native drag loop.
++  const bool isAutomationTestDrag =
++      xpc::IsInAutomation() &&
++      (XRE_IsContentProcess() ||
++       (dragService && dragService->GetIsMockService()));
++  nsresult rv = isInternalBrowserTabDrag || isAutomationTestDrag
++                    ? InvokeDragSessionImpl(aWidget, aTransferableArray,
++                                            mRegion, aActionType)
++                    : NS_ERROR_ABORT;
+
+   if (NS_FAILED(rv)) {
+     // Set mDoingDrag so that EndDragSession cleans up and sends the dragend
 diff --git a/widget/nsClipboardProxy.cpp b/widget/nsClipboardProxy.cpp
 index a3c51c8..7eacf5b 100644
 --- a/widget/nsClipboardProxy.cpp
