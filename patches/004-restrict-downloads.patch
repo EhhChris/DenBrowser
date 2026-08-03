@@ -19,70 +19,93 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #    returns NS_ERROR_ABORT with a null out-parameter.
 #
 # 4. ShellService.canSetDesktopBackground (browser/components/shell/)
-#    Suppresses the desktop-background command before it can invoke persistence.
+#    Suppresses the desktop-background command before persistence can start.
 #
 # 5. nsMacShellService::SetDesktopBackground and
 #    nsWindowsShellService::SetDesktopBackground
 #    Abort at the native shell-service boundary as defense in depth.
 #
-# Shared feedback for patches 004 and 005 is asynchronous and non-modal.
-# browser-init.js coalesces repeated save/print events into per-tab notification
-# bars, re-arms a four-second lifetime, and reroutes short-lived popups to their
-# opener, including a popup that closes before its queued notification runs.
+# SHARED BLOCKED-ACTION FEEDBACK:
+#
+# browser-init.js owns one dismissible notification bar per browser for blocked
+# save, print, copy, and developer-tools actions. Mixed or repeated bursts are
+# serialized into that single bar, update it to the newest action, re-arm its
+# four-second lifetime, and remove it without overlapping slide animations.
+#
+# Feedback is asynchronous and non-modal. Attempts from short-lived popups are
+# rerouted only to a connected opener with a live document global; otherwise the
+# live source browser is used. This remains safe if a popup closes before its
+# queued notification is displayed.
 
 
 diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
-index 311e36a..beacf61 100644
+index 311e36a..64819c5 100644
 --- a/browser/base/content/browser-init.js
 +++ b/browser/base/content/browser-init.js
-@@ -40,6 +40,162 @@ var gSerialDeviceObserver = {
+@@ -40,6 +40,189 @@ var gSerialDeviceObserver = {
    },
  };
  
 +const DENBROWSER_BLOCKED_NOTIFICATION_TIMEOUT_MS = 4000;
++const DENBROWSER_BLOCKED_NOTIFICATION_VALUE = "denbrowser-action-blocked";
 +const DENBROWSER_BLOCKED_NOTIFICATION_DETAILS = new Map([
 +  [
 +    "DenBrowserSaveBlocked",
 +    {
-+      value: "denbrowser-saving-blocked",
 +      l10nId: "denbrowser-saving-blocked-infobar",
 +    },
 +  ],
 +  [
 +    "DenBrowserPrintingBlocked",
 +    {
-+      value: "denbrowser-printing-blocked",
 +      l10nId: "denbrowser-printing-blocked-infobar",
++    },
++  ],
++  [
++    "DenBrowserCopyBlocked",
++    {
++      l10nId: "denbrowser-copying-blocked-infobar",
++    },
++  ],
++  [
++    "DenBrowserDevToolsBlocked",
++    {
++      l10nId: "denbrowser-devtools-blocked-infobar",
 +    },
 +  ],
 +]);
 +const gDenBrowserBlockedNotificationStates = new WeakMap();
 +
-+function clearDenBrowserBlockedNotificationState(browser, value, state) {
++function clearDenBrowserBlockedNotificationState(browser, state) {
 +  if (state.timer) {
-+    window.clearTimeout(state.timer);
++    browser.documentGlobal?.clearTimeout(state.timer);
++    state.timer = null;
 +  }
-+  let browserStates = gDenBrowserBlockedNotificationStates.get(browser);
-+  if (browserStates?.get(value) == state) {
-+    browserStates.delete(value);
++  if (gDenBrowserBlockedNotificationStates.get(browser) == state) {
++    gDenBrowserBlockedNotificationStates.delete(browser);
 +  }
 +}
 +
 +function armDenBrowserBlockedNotificationTimeout(
 +  browser,
 +  notificationBox,
-+  details,
 +  state
 +) {
-+  if (state.timer) {
-+    window.clearTimeout(state.timer);
++  let timerWindow = browser.documentGlobal;
++  if (!timerWindow) {
++    clearDenBrowserBlockedNotificationState(browser, state);
++    return;
 +  }
-+  state.timer = window.setTimeout(() => {
++  if (state.timer) {
++    timerWindow.clearTimeout(state.timer);
++  }
++  state.timer = timerWindow.setTimeout(() => {
 +    if (state.notification?.isConnected) {
-+      notificationBox.removeNotification(state.notification);
-+    } else {
-+      clearDenBrowserBlockedNotificationState(browser, details.value, state);
++      // Removing immediately avoids overlapping slide animations when several
++      // different blocked actions are attempted in quick succession.
++      notificationBox.removeNotification(state.notification, true);
 +    }
++    clearDenBrowserBlockedNotificationState(browser, state);
 +  }, DENBROWSER_BLOCKED_NOTIFICATION_TIMEOUT_MS);
 +}
 +
@@ -92,64 +115,72 @@ index 311e36a..beacf61 100644
 +    return;
 +  }
 +
-+  let browserStates = gDenBrowserBlockedNotificationStates.get(browser);
-+  if (!browserStates) {
-+    browserStates = new Map();
-+    gDenBrowserBlockedNotificationStates.set(browser, browserStates);
++  let state = gDenBrowserBlockedNotificationStates.get(browser);
++  if (!state) {
++    state = {
++      notification: null,
++      creationPromise: null,
++      timer: null,
++      details,
++    };
++    gDenBrowserBlockedNotificationStates.set(browser, state);
++  } else {
++    state.details = details;
 +  }
 +
-+  let state = browserStates.get(details.value);
-+  if (state) {
-+    if (state.notification?.isConnected) {
-+      armDenBrowserBlockedNotificationTimeout(
-+        browser,
-+        notificationBox,
-+        details,
-+        state
-+      );
-+    }
++  if (state.notification?.isConnected) {
++    state.notification.label = { "l10n-id": state.details.l10nId };
++    armDenBrowserBlockedNotificationTimeout(browser, notificationBox, state);
 +    return;
 +  }
 +
-+  state = { notification: null, timer: null };
-+  browserStates.set(details.value, state);
++  // A mixed burst (for example Print followed immediately by Save) should
++  // update the one pending bar, not start concurrent append animations.
++  if (state.creationPromise) {
++    return;
++  }
 +
 +  try {
-+    let existing = notificationBox.getNotificationWithValue(details.value);
-+    state.notification =
-+      existing ||
-+      (await notificationBox.appendNotification(details.value, {
-+        label: { "l10n-id": details.l10nId },
-+        priority: notificationBox.PRIORITY_INFO_LOW,
-+        eventCallback: event => {
-+          if (
-+            event == "dismissed" ||
-+            event == "removed" ||
-+            event == "disconnected"
-+          ) {
-+            clearDenBrowserBlockedNotificationState(
-+              browser,
-+              details.value,
-+              state
-+            );
-+          }
-+        },
-+      }));
++    state.notification = notificationBox.getNotificationWithValue(
++      DENBROWSER_BLOCKED_NOTIFICATION_VALUE
++    );
++    if (!state.notification) {
++      state.creationPromise = notificationBox.appendNotification(
++        DENBROWSER_BLOCKED_NOTIFICATION_VALUE,
++        {
++          label: { "l10n-id": state.details.l10nId },
++          priority: notificationBox.PRIORITY_INFO_LOW,
++          eventCallback: event => {
++            if (
++              event == "dismissed" ||
++              event == "removed" ||
++              event == "disconnected"
++            ) {
++              clearDenBrowserBlockedNotificationState(browser, state);
++            }
++          },
++        }
++      );
++      state.notification = await state.creationPromise;
++      state.creationPromise = null;
++    }
 +
-+    if (!state.notification?.isConnected) {
-+      clearDenBrowserBlockedNotificationState(browser, details.value, state);
++    if (
++      gDenBrowserBlockedNotificationStates.get(browser) != state ||
++      !state.notification?.isConnected
++    ) {
++      clearDenBrowserBlockedNotificationState(browser, state);
 +      return;
 +    }
 +
-+    armDenBrowserBlockedNotificationTimeout(
-+      browser,
-+      notificationBox,
-+      details,
-+      state
-+    );
++    // An event may have changed the requested message while appendNotification
++    // was awaiting custom-element creation or Fluent translation.
++    state.notification.label = { "l10n-id": state.details.l10nId };
++    armDenBrowserBlockedNotificationTimeout(browser, notificationBox, state);
 +  } catch {
 +    // The tab or window may have closed while the notification was being made.
-+    clearDenBrowserBlockedNotificationState(browser, details.value, state);
++    state.creationPromise = null;
++    clearDenBrowserBlockedNotificationState(browser, state);
 +  }
 +}
 +
@@ -164,6 +195,9 @@ index 311e36a..beacf61 100644
 +  // Short-lived chromeless popups commonly close as soon as print() returns.
 +  // Put their notification on the opener so that it remains visible.
 +  let openerBrowser = browser.browsingContext?.opener?.top?.embedderElement;
++  if (!openerBrowser?.isConnected || !openerBrowser.documentGlobal) {
++    openerBrowser = null;
++  }
 +  let chromeDocument = browser.documentGlobal?.document?.documentElement;
 +  if (
 +    openerBrowser &&
@@ -198,7 +232,7 @@ index 311e36a..beacf61 100644
  let _resolveDelayedStartup;
  var delayedStartupPromise = new Promise(resolve => {
    _resolveDelayedStartup = resolve;
-@@ -309,6 +465,15 @@ var gBrowserInit = {
+@@ -309,6 +492,23 @@ var gBrowserInit = {
    },
  
    onLoad() {
@@ -208,6 +242,14 @@ index 311e36a..beacf61 100644
 +    );
 +    document.addEventListener(
 +      "DenBrowserPrintingBlocked",
++      queueDenBrowserBlockedNotification
++    );
++    document.addEventListener(
++      "DenBrowserCopyBlocked",
++      queueDenBrowserBlockedNotification
++    );
++    document.addEventListener(
++      "DenBrowserDevToolsBlocked",
 +      queueDenBrowserBlockedNotification
 +    );
 +
@@ -290,17 +332,19 @@ index 2b36517..4b32fa9 100644
      // XXX write background loading stuff!
      return NS_ERROR_NOT_AVAILABLE;
 diff --git a/browser/locales/en-US/browser/browser.ftl b/browser/locales/en-US/browser/browser.ftl
-index f05045a..abb71c0 100644
+index f05045a..2f879ac 100644
 --- a/browser/locales/en-US/browser/browser.ftl
 +++ b/browser/locales/en-US/browser/browser.ftl
-@@ -1318,6 +1318,11 @@ restore-session-startup-suggestion-button = Show me how
+@@ -1318,6 +1318,13 @@ restore-session-startup-suggestion-button = Show me how
  
  filepicker-blocked-infobar = Your organization has blocked access to local files on this computer
  
-+## Non-modal feedback for DenBrowser's source-level save and print blocks
++## Non-modal feedback for DenBrowser's source-level action blocks
 +
 +denbrowser-saving-blocked-infobar = Saving files is not available in this browser.
 +denbrowser-printing-blocked-infobar = Printing is not available in this browser.
++denbrowser-copying-blocked-infobar = Copying is not available for this site.
++denbrowser-devtools-blocked-infobar = Developer tools are not available in this browser.
 +
  ## Mozilla data reporting notification (Telemetry, Firefox Health Report, etc)
  

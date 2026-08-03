@@ -45,6 +45,7 @@ ac_add_options --disable-tests
 ac_add_options --disable-parental-controls
 ac_add_options --disable-profiling            # [dev-reversed] → --enable-profiling
 ac_add_options --disable-accessibility
+ac_add_options --disable-printing             # Firefox 153+: compile out native printing and print UI
 
 # ── macOS-specific ────────────────────────────────────────────────────────────
 # Uncomment and set SDK path for your Xcode version:

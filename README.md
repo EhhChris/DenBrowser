@@ -432,12 +432,12 @@ for navigation.
 | 000 | `fix-bindgen-basic-string-view` | Upstream build fix for libclang/bindgen on recent toolchains.  No security effect. |
 | 001 | `disable-screenshots` | Block built-in screenshot UI **and** exclude the window from OS screen-capture (`NSWindowSharingNone` on macOS, `WDA_EXCLUDEFROMCAPTURE` on Windows). |
 | 002 | `disable-screenshare` | Unconditionally reject `getDisplayMedia()` and legacy `getUserMedia({video:{mediaSource:"screen"}})` at both JS and C++ layers. |
-| 003 | `restrict-clipboard` | Block clipboard read/write and drag-and-drop everywhere; optional in-process clipboard for `clipboard_sites` so copy/paste works within the controlled site set without ever touching the OS clipboard. |
-| 004 | `restrict-downloads` | Cancel every file-save path: `internalSave`, `nsExternalHelperAppService::CreateListener`, `ShellService.canSetDesktopBackground`, and the Mac / Windows `SetDesktopBackground` C++ entry points. |
-| 005 | `disable-printing` | Reject `nsPrintJob::CommonPrint` for both print and print-preview — covers `window.print`, print-to-PDF, and any internal caller. |
+| 003 | `restrict-clipboard` | Block clipboard read/write and drag-and-drop everywhere; optional in-process clipboard for `clipboard_sites`, plus non-modal feedback for blocked user copy attempts from content, chrome pages, and context-menu commands. |
+| 004 | `restrict-downloads` | Cancel every file-save path before persistence or picker state is created; own the shared, deduplicated four-second notification bar for blocked save, print, copy, and DevTools actions. |
+| 005 | `disable-printing` | Compile printing out with Firefox's real `--disable-printing` option and retain eight source-level enforcement layers for custom printing-enabled builds, with feedback before dialog, clone, service, or IPC initialization. |
 | 006 | `attest-requests` | Inject per-request ECIES attestation headers (v2: binds nonce + ts + host + method + path + body hash) into outbound HTTP/HTTPS requests for the Pingora proxy to verify.  Carries a build-time table of N proxies (domains → attestation key + TLS pin, generated from `site-config.json`'s `proxies`) and attests with the key of the proxy claiming the request's host; hosts no proxy claims are left untouched. |
 | 007 | `ramdisk-profile` | **Intentionally not implemented** (STUB).  The header documents why: PBM + locked disk-cache prefs + `SanitizeOnShutdown` already keep content off disk, and the residual swap/hibernation risk needs FDE on the host — see [Deployment requirements](#deployment-requirements). |
-| 008 | `disable-devtools` | Hardcode `isDisabledByPolicy()` to `true` in both `DevToolsShim` and `DevToolsStartup`, so devtools stay off even if the policy/pref state is manipulated. |
+| 008 | `disable-devtools` | Hardcode policy backstops, guard direct loader initialization, and turn blocked keyboard shortcuts into non-modal feedback before the full DevTools loader or toolbox starts. |
 | 009 | `denbrowser-branding` | DenBrowser branding directory (icons, brand strings, Windows installer assets, Visual Elements manifest). |
 | 010 | `disable-diagnostics` | Replace `TelemetryReportingPolicy.dataSubmissionEnabled` getter with `return false`; short-circuit `TelemetryController.setupTelemetry` to a no-op. |
 | 011 | `disable-extensions` | Filter addon install locations to `SCOPE_APPLICATION` only; throw on any `AddonInstall.install()` call regardless of state. |
@@ -450,5 +450,6 @@ for navigation.
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox |
+| 022 | `clear-stale-movingtab` | Recover from incomplete or malformed tab drags that leave Firefox's `movingtab` marker set and disable pointer events for the URL bar, extension buttons, and application menu. |
 
 ---

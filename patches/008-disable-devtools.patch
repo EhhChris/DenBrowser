@@ -4,32 +4,42 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 008-disable-devtools
 #
-# Disables all developer tools unconditionally.
+# Disables developer tools unconditionally in production builds.
 #
-# The DisableDeveloperTools enterprise policy (in policies.json) already
-# gates devtools through the devtools.policy.disabled pref, which covers:
-#   - F12 / Ctrl+Shift+I keyboard shortcuts (DevToolsStartup.onWindowReady skips hookWindow)
-#   - All Tools > Web Developer menu items (hidden by devtools-browser.js)
-#   - Right-click Inspect (removed when pref is set)
-#   - about:debugging, about:devtools-toolbox, about:profiling (blocked)
-#   - --start-debugger-server and --jsconsole command-line flags
-#   - Remote debugging server
+# The DisableDeveloperTools enterprise policy already locks the supported pref,
+# hides DevTools/Inspect UI, blocks the DevTools about: pages, command-line and
+# remote-debugging routes, and gates lazy loader entry points. Both shim policy
+# checks return true as a source-level backstop if runtime prefs are modified.
 #
-# This patch hardens further by replacing the pref-based runtime check in both
-# shim entry points with an unconditional `return true`. This means DevTools
-# remain disabled even if someone modifies the pref at runtime (e.g. via
-# external tooling or a compromised about:config bypass).
+# Policy-disabled browser windows still register Firefox's stock localized
+# DevTools shortcuts. The shortcut handler immediately emits
+# DenBrowserDevToolsBlocked on the selected browser and returns before tracing,
+# telemetry, full DevTools loader initialization, or a toolbox can start. The
+# profiler shortcut follows the same disabled-policy route. Patch 004 displays
+# the event in the shared non-modal notification bar.
 #
-# Two files are patched because two independent shim modules both expose
-# isDisabledByPolicy() and are each called from different code paths:
-#   - DevToolsShim gates lazy devtools initialization and extension APIs
-#   - DevToolsStartup gates window hookup, keyboard shortcuts, and CLI flags
+# The customkeys-ui observer callback is guarded while disabled, closing a direct
+# loader-initialization path, and initDevTools has a non-notifying hard backstop
+# for internal/non-user callers. Hidden menu and Inspect commands are not
+# re-exposed. Direct DevTools about: URLs keep their policy-blocked page.
+#
+# build.sh --dev skips this patch, so diagnostic builds retain normal DevTools.
+
 
 diff --git a/devtools/startup/DevToolsShim.sys.mjs b/devtools/startup/DevToolsShim.sys.mjs
-index efd4c25201a1..480d19378a11 100644
+index efd4c25..0fc8058 100644
 --- a/devtools/startup/DevToolsShim.sys.mjs
 +++ b/devtools/startup/DevToolsShim.sys.mjs
-@@ -66,7 +66,7 @@ export const DevToolsShim = {
+@@ -21,8 +21,6 @@ ChromeUtils.defineLazyGetter(lazy, "Telemetry", function () {
+   return Telemetry;
+ });
+ 
+-const DEVTOOLS_POLICY_DISABLED_PREF = "devtools.policy.disabled";
+-
+ function removeItem(array, callback) {
+   const index = array.findIndex(callback);
+   if (index >= 0) {
+@@ -66,7 +64,7 @@ export const DevToolsShim = {
     * @returns {boolean}
     */
    isDisabledByPolicy() {
@@ -39,10 +49,19 @@ index efd4c25201a1..480d19378a11 100644
  
    /**
 diff --git a/devtools/startup/DevToolsStartup.sys.mjs b/devtools/startup/DevToolsStartup.sys.mjs
-index ab008a13b4a6..e8722cc56d48 100644
+index ab008a1..c6c05ee 100644
 --- a/devtools/startup/DevToolsStartup.sys.mjs
 +++ b/devtools/startup/DevToolsStartup.sys.mjs
-@@ -353,7 +353,7 @@ export class DevToolsStartup {
+@@ -25,8 +25,6 @@ const kDebuggerPrefs = [
+   "devtools.chrome.enabled",
+ ];
+ 
+-const DEVTOOLS_POLICY_DISABLED_PREF = "devtools.policy.disabled";
+-
+ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+ 
+ const lazy = {};
+@@ -353,7 +351,7 @@ export class DevToolsStartup {
    profilerRecordingButtonCreated = false;
  
    isDisabledByPolicy() {
@@ -51,7 +70,40 @@ index ab008a13b4a6..e8722cc56d48 100644
    }
  
    handle(cmdLine) {
-@@ -706,6 +706,9 @@ export class DevToolsStartup {
+@@ -383,8 +381,10 @@ export class DevToolsStartup {
+       // Add DevTools menu items so they can be picked up by the customize
+       // keyboard shortcuts UI.
+       Services.obs.addObserver(() => {
+-        // Initialize DevTools to create all menuitems in the system menu.
+-        this.initDevTools("CustomKeysUI");
++        if (!this.isDisabledByPolicy()) {
++          // Initialize DevTools to create all menuitems in the system menu.
++          this.initDevTools("CustomKeysUI");
++        }
+       }, "customkeys-ui-showing");
+       /* eslint-enable mozilla/balanced-observers */
+ 
+@@ -566,10 +566,15 @@ export class DevToolsStartup {
+    * @param {Window} window
+    */
+   onWindowReady(window) {
+-    if (
+-      this.isDisabledByPolicy() ||
+-      AppConstants.MOZ_APP_NAME == "thunderbird"
+-    ) {
++    if (AppConstants.MOZ_APP_NAME == "thunderbird") {
++      return;
++    }
++
++    if (this.isDisabledByPolicy()) {
++      // Keep only Firefox's exact stock shortcut definitions. onKey() turns
++      // them into lightweight blocked-action feedback without initializing the
++      // full DevTools loader/toolbox or adding menus/toolbars.
++      this.hookKeyShortcuts(window);
+       return;
+     }
+ 
+@@ -706,6 +711,9 @@ export class DevToolsStartup {
    }
  
    onMoreToolsViewShowing(moreToolsView) {
@@ -61,3 +113,36 @@ index ab008a13b4a6..e8722cc56d48 100644
      this.addDevToolsItemsToSubview(moreToolsView);
    }
  
+@@ -912,6 +920,19 @@ export class DevToolsStartup {
+ 
+   async onKey(window, key) {
+     try {
++      if (this.isDisabledByPolicy()) {
++        const browser = window.gBrowser?.selectedBrowser;
++        if (browser?.localName == "browser") {
++          const chromeWindow = browser.documentGlobal;
++          browser.dispatchEvent(
++            new chromeWindow.CustomEvent("DenBrowserDevToolsBlocked", {
++              bubbles: true,
++            })
++          );
++        }
++        return;
++      }
++
+       // The profiler doesn't care if DevTools is loaded, so provide a quick check
+       // first to bail out of checking if DevTools is available.
+       switch (key.id) {
+@@ -979,6 +1000,12 @@ export class DevToolsStartup {
+   }
+ 
+   initDevTools(reason, key = "") {
++    if (this.isDisabledByPolicy()) {
++      // Non-notifying source-level backstop for internal callers that bypass
++      // the guarded keyboard, menu, observer, session, and command-line routes.
++      throw new Error("Developer tools are disabled by DenBrowser policy");
++    }
++
+     // In the case of the --jsconsole and --jsdebugger command line parameters
+     // there is no browser window yet so we don't send any telemetry yet.
+     if (reason !== "CommandLine") {

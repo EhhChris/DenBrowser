@@ -4,73 +4,314 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 005-disable-printing
 #
-# The DenBrowser build blocks printing at eight enforcement layers. Layers 1
-# and 2 live in configuration; this source patch supplies layers 3 through 8:
+# DenBrowser removes printing from production builds with Firefox 153's real
+# --disable-printing configure option. PrintingEnabled=false policy and the
+# locked print.enabled=false preference retain the supported runtime gates.
 #
-# 1. PrintingEnabled=false enterprise policy (config/policies.json)
-#    Removes standard print commands and shortcuts from browser chrome.
+# gfx/thebes/moz.build also omits the platform PrintTargetPDF, PrintTargetCG,
+# and PrintTargetWindows implementations when NS_PRINTING is false. Android and
+# Cocoa print sources, factories, and component registrations now follow the
+# same gate, keeping their consumers aligned with Cairo and the graphics targets.
 #
-# 2. Locked print.enabled=false preference (config/mozilla.cfg and patch 017)
-#    Keeps the supported runtime gate disabled and immutable.
+# This patch also keeps source-level enforcement for direct callers and custom
+# printing-enabled builds:
 #
-# 3. PrintUtils front-end guards (toolkit/components/printing/content/)
-#    Stop page setup, tab-modal preview, silent printing, and the native system
-#    dialog before a dialog, static clone, or print promise is created.
+# - Browser commands remain dispatchable under the locked preference so Ctrl+P
+#   and command-bound UI can report the block. Browser commands, hardware print
+#   commands, frame/selection context actions, BrowserDOMWindow OPEN_PRINT_BROWSER
+#   routes, the Save as PDF quick action, and direct print-dialog opens notify and
+#   return before tab-dialog modal state, progress listeners, preview browsers,
+#   print services, or IPC are initialized.
 #
-# 4. nsGlobalWindowOuter::PrintOuter and internal Print
-#    Block window.print() and direct content-process callers before delayed
-#    print, modal, print-service, cloning, or IPC state is initialized.
+# - WebExtension tabs.print and tabs.saveAsPDF return before PrintUtils, a file
+#   picker, output stream, or print promise is created. saveAsPDF resolves with
+#   "not_saved".
 #
-# 5. CanonicalBrowsingContext::Print and PrintWithNoContentAnalysis
-#    Reject parent-process print promises before content analysis, static
-#    cloning, RemotePrintJob construction, or PBrowser print IPC.
+# - PrintUtils and print.js stop page setup, preview, silent/system printing,
+#   and direct-dialog initialization before cloning or opening native UI. The
+#   direct print.html backstop also avoids acquiring nsIPrintSettingsService at
+#   module evaluation.
 #
-# 6. WebExtension tabs.saveAsPDF (browser/components/extensions/)
-#    Returns "not_saved" before a file picker or output stream can be opened.
+# - nsGlobalWindowOuter blocks window.print() and internal content callers;
+#   CanonicalBrowsingContext rejects parent print promises before analysis,
+#   cloning, RemotePrintJob creation, or PBrowser IPC; nsPrintJob::CommonPrint
+#   remains the final printing-enabled source backstop and follows existing
+#   failure cleanup.
 #
-# 7. nsPrintJob::CommonPrint (layout/printing/)
-#    Final source-level backstop. It follows the existing failure cleanup path
-#    and settles direct progress listeners and remote print actors.
-#
-# 8. print.js init() (toolkit/components/printing/content/)
-#    Last-resort direct-dialog guard; waits for SubDialog's managed close hook,
-#    queues non-modal feedback, and closes without starting preview work.
-#
-# Dedicated DenBrowserPrintingChild/Parent actors carry only trusted blocked
-# events from every content frame and preserve popup opener context. The stock
-# Printing actor remains top-level-only. Patch 004's shared browser-chrome
-# notification displays the message asynchronously for four seconds, with no
-# prompt service, nested event loop, or modal browser-chrome state.
+# DenBrowserPrintingChild/Parent are dedicated all-frame actors so subframe and
+# popup attempts preserve their owning-tab/opener context. Firefox's stock
+# Printing actor remains top-level-only. Patch 004 displays all feedback through
+# the shared four-second, non-modal notification bar.
 
 
+diff --git a/browser/base/content/browser-sets.js b/browser/base/content/browser-sets.js
+index b3615d0..60af2f8 100644
+--- a/browser/base/content/browser-sets.js
++++ b/browser/base/content/browser-sets.js
+@@ -51,17 +51,13 @@ document.addEventListener(
+             MailIntegration.sendLinkForBrowser(gBrowser.selectedBrowser);
+             break;
+           case "cmd_pageSetup":
+-            PrintUtils.showPageSetup();
++            window.notifyDenBrowserPrintingBlocked();
+             break;
+           case "cmd_print":
+-            PrintUtils.startPrintWindow(
+-              gBrowser.selectedBrowser.browsingContext
+-            );
++            window.notifyDenBrowserPrintingBlocked();
+             break;
+           case "cmd_printPreviewToggle":
+-            PrintUtils.togglePrintPreview(
+-              gBrowser.selectedBrowser.browsingContext
+-            );
++            window.notifyDenBrowserPrintingBlocked();
+             break;
+           case "cmd_file_importFromAnotherBrowser":
+             MigrationUtils.showMigrationWizard(window, {
+diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
+index c919cf5..1df07b2 100644
+--- a/browser/base/content/browser.js
++++ b/browser/base/content/browser.js
+@@ -606,6 +606,21 @@ XPCOMUtils.defineLazyPreferenceGetter(
+   }
+ );
+ 
++window.notifyDenBrowserPrintingBlocked = function (aBrowsingContext = null) {
++  let browser =
++    aBrowsingContext?.top?.embedderElement || gBrowser.selectedBrowser;
++  if (browser?.localName != "browser") {
++    return;
++  }
++
++  let chromeWindow = browser.documentGlobal;
++  browser.dispatchEvent(
++    new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
++      bubbles: true,
++    })
++  );
++};
++
+ customElements.setElementCreationCallback("screenshots-buttons", () => {
+   Services.scriptloader.loadSubScript(
+     "chrome://browser/content/screenshots/screenshots-buttons.js",
+@@ -836,17 +851,15 @@ function UpdateBackForwardCommands(aWebNavigation) {
+   }
+ }
+ 
+-function updatePrintCommands(enabled) {
++function updatePrintCommands() {
+   var printCommand = document.getElementById("cmd_print");
+   var printPreviewCommand = document.getElementById("cmd_printPreviewToggle");
+ 
+-  if (enabled) {
+-    printCommand.removeAttribute("disabled");
+-    printPreviewCommand.removeAttribute("disabled");
+-  } else {
+-    printCommand.setAttribute("disabled", "true");
+-    printPreviewCommand.setAttribute("disabled", "true");
+-  }
++  // DenBrowser keeps the command dispatchers active so Ctrl+P and any visible
++  // command-bound UI reach the lightweight blocked-action notifier. Source and
++  // compile-time guards still prevent all printing work.
++  printCommand.removeAttribute("disabled");
++  printPreviewCommand.removeAttribute("disabled");
+ }
+ 
+ /**
+@@ -1286,7 +1299,7 @@ function HandleAppCommandEvent(evt) {
+       BrowserCommands.openFileWindow();
+       break;
+     case "Print":
+-      PrintUtils.startPrintWindow(gBrowser.selectedBrowser.browsingContext);
++      window.notifyDenBrowserPrintingBlocked();
+       break;
+     case "Save":
+       saveBrowser(gBrowser.selectedBrowser);
+@@ -1869,7 +1882,13 @@ let gFileMenu = {
+         document.getElementById("menu_savePage")
+       );
+     }
+-    PrintUtils.updatePrintSetupMenuHiddenState();
++    // Production DenBrowser builds compile the printing component (including
++    // printUtils.js) out. Keep the already-disabled Page Setup entry hidden
++    // without attempting to lazy-load that absent script.
++    let printSetupMenuItem = document.getElementById("menu_printSetup");
++    if (printSetupMenuItem) {
++      printSetupMenuItem.hidden = true;
++    }
+ 
+     const aiWindowMenu = event.target.querySelector("#menu_newAIWindow");
+     const classicWindowMenu = event.target.querySelector(
+@@ -4239,6 +4258,14 @@ class TabDialogBox {
+     } = {},
+     ...aParams
+   ) {
++    if (aURL == "chrome://global/content/print.html") {
++      // DenBrowser: reject before _onFirstDialogOpen() can set
++      // tabDialogShowing, register modal progress listeners, or expose the
++      // overlay. This is the final front-end backstop for direct dialog opens.
++      window.notifyDenBrowserPrintingBlocked(this.browser.browsingContext);
++      return { closedPromise: Promise.resolve(), dialog: null };
++    }
++
+     let resolveClosed;
+     let closedPromise = new Promise(resolve => (resolveClosed = resolve));
+     // Get the dialog manager to open the prompt with.
+diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
+index a4d6956..55283b5 100644
+--- a/browser/base/content/nsContextMenu.sys.mjs
++++ b/browser/base/content/nsContextMenu.sys.mjs
+@@ -2472,15 +2472,11 @@ export class nsContextMenu {
+   }
+ 
+   printFrame() {
+-    this.window.PrintUtils.startPrintWindow(this.actor.browsingContext, {
+-      printFrameOnly: true,
+-    });
++    this.window.notifyDenBrowserPrintingBlocked(this.actor.browsingContext);
+   }
+ 
+   printSelection() {
+-    this.window.PrintUtils.startPrintWindow(this.actor.browsingContext, {
+-      printSelectionOnly: true,
+-    });
++    this.window.notifyDenBrowserPrintingBlocked(this.actor.browsingContext);
+   }
+ 
+   switchPageDirection() {
 diff --git a/browser/components/extensions/parent/ext-tabs.js b/browser/components/extensions/parent/ext-tabs.js
-index f342748..c0f4b44 100644
+index f342748..b52d549 100644
 --- a/browser/components/extensions/parent/ext-tabs.js
 +++ b/browser/components/extensions/parent/ext-tabs.js
-@@ -27,6 +27,8 @@ const TAB_HIDE_CONFIRMED_TYPE = "tabHideNotification";
+@@ -27,6 +27,22 @@ const TAB_HIDE_CONFIRMED_TYPE = "tabHideNotification";
  
  const TAB_ID_NONE = -1;
  
 +const DENBROWSER_TABS_PRINTING_DISABLED = true;
 +
++function notifyDenBrowserPrintingBlocked(tab) {
++  let browser = tab?.linkedBrowser;
++  if (browser?.localName != "browser") {
++    return;
++  }
++
++  let chromeWindow = browser.documentGlobal;
++  browser.dispatchEvent(
++    new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
++      bubbles: true,
++    })
++  );
++}
++
  ChromeUtils.defineLazyGetter(this, "tabHidePopup", () => {
    return new ExtensionControlledPopup({
      confirmedType: TAB_HIDE_CONFIRMED_TYPE,
-@@ -1408,6 +1410,14 @@ this.tabs = class extends ExtensionAPIPersistent {
+@@ -1397,6 +1413,12 @@ this.tabs = class extends ExtensionAPIPersistent {
+ 
+         print() {
+           let activeTab = getTabOrActive(null);
++          if (DENBROWSER_TABS_PRINTING_DISABLED) {
++            // This path must not depend on printUtils.js: production builds
++            // compile the printing component out entirely.
++            notifyDenBrowserPrintingBlocked(activeTab);
++            return;
++          }
+           let { PrintUtils } = activeTab.documentGlobal;
+           PrintUtils.startPrintWindow(activeTab.linkedBrowser.browsingContext);
+         },
+@@ -1408,6 +1430,11 @@ this.tabs = class extends ExtensionAPIPersistent {
  
          saveAsPDF(pageSettings) {
            let activeTab = getTabOrActive(null);
 +          if (DENBROWSER_TABS_PRINTING_DISABLED) {
-+            let { PrintUtils } = activeTab.documentGlobal;
-+            PrintUtils._notifyPrintingBlocked(
-+              activeTab.linkedBrowser.browsingContext
-+            );
++            notifyDenBrowserPrintingBlocked(activeTab);
 +            return Promise.resolve("not_saved");
 +          }
 +
            let picker = Cc["@mozilla.org/filepicker;1"].createInstance(
              Ci.nsIFilePicker
            );
+diff --git a/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs b/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
+index b99a80b..ed7783d 100644
+--- a/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
++++ b/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
+@@ -237,18 +237,9 @@ const DEFAULT_ACTIONS = {
+       return Services.prefs.getBoolPref("print.enabled");
+     },
+     onPick: (_queryContext, controller) => {
+-      // This writes over the users last used printer which we
+-      // should not do. Refactor to launch the print preview with
+-      // custom settings.
+-      Cc["@mozilla.org/gfx/printsettings-service;1"]
+-        .getService(Ci.nsIPrintSettingsService)
+-        .maybeSaveLastUsedPrinterNameToPrefs(
+-          controller.browserWindow.PrintUtils.SAVE_TO_PDF_PRINTER
+-        );
+-      controller.browserWindow.PrintUtils.startPrintWindow(
+-        controller.browserWindow.gBrowser.selectedBrowser.browsingContext,
+-        {}
+-      );
++      // This remains a source-level backstop if the locked visibility pref is
++      // ever bypassed, and does not depend on compile-disabled printUtils.js.
++      controller.browserWindow.notifyDenBrowserPrintingBlocked();
+     },
+   },
+   screenshot: {
+diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserDOMWindow.sys.mjs
+index 29c5b15..e45e09c 100644
+--- a/browser/modules/BrowserDOMWindow.sys.mjs
++++ b/browser/modules/BrowserDOMWindow.sys.mjs
+@@ -53,6 +53,22 @@ export class BrowserDOMWindow {
+     this.win = win;
+   }
+ 
++  #notifyDenBrowserPrintingBlocked(browsingContext = null) {
++    let browser =
++      browsingContext?.top?.embedderElement ||
++      this.win.gBrowser.selectedBrowser;
++    if (browser?.localName != "browser") {
++      return;
++    }
++
++    let chromeWindow = browser.documentGlobal;
++    browser.dispatchEvent(
++      new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
++        bubbles: true,
++      })
++    );
++  }
++
+   /**
+    * @param {Window} win
+    */
+@@ -392,11 +408,9 @@ export class BrowserDOMWindow {
+         break;
+       }
+       case Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER: {
+-        let browser =
+-          this.win.PrintUtils.handleStaticCloneCreatedForPrint(aOpenWindowInfo);
+-        if (browser) {
+-          browsingContext = browser.browsingContext;
+-        }
++        // DenBrowser: stop the parent-side print-browser route before it can
++        // construct a preview browser or hand a BrowsingContext back to C++.
++        this.#notifyDenBrowserPrintingBlocked(aOpenWindowInfo?.parent);
+         break;
+       }
+       default:
+@@ -478,9 +492,8 @@ export class BrowserDOMWindow {
+     aSkipLoad
+   ) {
+     if (aWhere == Ci.nsIBrowserDOMWindow.OPEN_PRINT_BROWSER) {
+-      return this.win.PrintUtils.handleStaticCloneCreatedForPrint(
+-        aParams.openWindowInfo
+-      );
++      this.#notifyDenBrowserPrintingBlocked(aParams.openWindowInfo?.parent);
++      return null;
+     }
+ 
+     if (
 diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
 index 00c69a2..4e28680 100644
 --- a/docshell/base/CanonicalBrowsingContext.cpp
@@ -134,6 +375,92 @@ index 0fbb9d9..dd07395 100644
  #ifdef NS_PRINTING
    nsCOMPtr<nsIPrintSettingsService> printSettingsService =
        do_GetService("@mozilla.org/gfx/printsettings-service;1");
+diff --git a/gfx/thebes/moz.build b/gfx/thebes/moz.build
+index 6919fcf..d757eed 100644
+--- a/gfx/thebes/moz.build
++++ b/gfx/thebes/moz.build
+@@ -85,16 +85,12 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
+         "gfxFT2FontBase.h",
+         "gfxFT2Fonts.h",
+     ]
+-    EXPORTS.mozilla.gfx += [
+-        "PrintTargetPDF.h",
+-    ]
+     SOURCES += [
+         "gfxAndroidPlatform.cpp",
+         "gfxFT2FontBase.cpp",
+         "gfxFT2FontList.cpp",
+         "gfxFT2Fonts.cpp",
+         "gfxFT2Utils.cpp",
+-        "PrintTargetPDF.cpp",
+     ]
+     UNIFIED_SOURCES += [
+         "AndroidSystemFontIterator.cpp",
+@@ -115,27 +111,16 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] in ("cocoa", "uikit"):
+         "gfxQuartzNativeDrawing.cpp",
+         "gfxQuartzSurface.cpp",
+     ]
+-    if CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
+-        EXPORTS.mozilla.gfx += [
+-            "PrintTargetCG.h",
+-        ]
+-        SOURCES += [
+-            "PrintTargetCG.mm",
+-        ]
+ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
+     EXPORTS += [
+         "gfxFT2FontBase.h",
+         "gfxPlatformGtk.h",
+     ]
+-    EXPORTS.mozilla.gfx += [
+-        "PrintTargetPDF.h",
+-    ]
+     SOURCES += [
+         "gfxFcPlatformFontList.cpp",
+         "gfxFT2FontBase.cpp",
+         "gfxFT2Utils.cpp",
+         "gfxPlatformGtk.cpp",
+-        "PrintTargetPDF.cpp",
+     ]
+ 
+     if CONFIG["MOZ_X11"]:
+@@ -158,10 +143,6 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+         "gfxWindowsPlatform.h",
+         "gfxWindowsSurface.h",
+     ]
+-    EXPORTS.mozilla.gfx += [
+-        "PrintTargetPDF.h",
+-        "PrintTargetWindows.h",
+-    ]
+     SOURCES += [
+         "DisplayConfigWindows.cpp",
+         "gfxDWriteCommon.cpp",
+@@ -169,13 +150,23 @@ elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
+         "gfxWindowsNativeDrawing.cpp",
+         "gfxWindowsPlatform.cpp",
+         "gfxWindowsSurface.cpp",
+-        "PrintTargetPDF.cpp",
+-        "PrintTargetWindows.cpp",
+     ]
+     UNIFIED_SOURCES += [
+         "gfxDWriteFontList.cpp",
+     ]
+ 
++if CONFIG["NS_PRINTING"]:
++    if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("android", "gtk", "windows"):
++        EXPORTS.mozilla.gfx += ["PrintTargetPDF.h"]
++        SOURCES += ["PrintTargetPDF.cpp"]
++    elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
++        EXPORTS.mozilla.gfx += ["PrintTargetCG.h"]
++        SOURCES += ["PrintTargetCG.mm"]
++
++    if CONFIG["MOZ_WIDGET_TOOLKIT"] == "windows":
++        EXPORTS.mozilla.gfx += ["PrintTargetWindows.h"]
++        SOURCES += ["PrintTargetWindows.cpp"]
++
+ # Are we targeting x86 or x64?  If so, build gfxAlphaRecoverySSE2.cpp.
+ if CONFIG["INTEL_ARCHITECTURE"]:
+     SOURCES += ["gfxAlphaRecoverySSE2.cpp"]
 diff --git a/layout/printing/nsPrintJob.cpp b/layout/printing/nsPrintJob.cpp
 index 0904ef0..c82a9fa 100644
 --- a/layout/printing/nsPrintJob.cpp
@@ -177,7 +504,7 @@ index 0904ef0..c82a9fa 100644
    return rv;
 diff --git a/toolkit/actors/DenBrowserPrintingChild.sys.mjs b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
 new file mode 100644
-index 0000000..2992236
+index 0000000..62a5810
 --- /dev/null
 +++ b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
 @@ -0,0 +1,16 @@
@@ -187,7 +514,7 @@ index 0000000..2992236
 +
 +export class DenBrowserPrintingChild extends JSWindowActorChild {
 +  handleEvent(event) {
-+    if (!event.isTrusted) {
++    if (!event.isTrusted || event.type != "DenBrowserPrintingBlocked") {
 +      return;
 +    }
 +
@@ -199,10 +526,10 @@ index 0000000..2992236
 +}
 diff --git a/toolkit/actors/DenBrowserPrintingParent.sys.mjs b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
 new file mode 100644
-index 0000000..bf998fe
+index 0000000..73f8587
 --- /dev/null
 +++ b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,43 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -224,6 +551,9 @@ index 0000000..bf998fe
 +    let openerBrowser =
 +      openerContext?.top?.embedderElement ||
 +      sourceContext?.top?.opener?.top?.embedderElement;
++    if (!openerBrowser?.isConnected || !openerBrowser.documentGlobal) {
++      openerBrowser = null;
++    }
 +    let chromeRoot = sourceBrowser?.ownerDocument?.documentElement;
 +    let browser =
 +      openerBrowser &&
@@ -231,7 +561,7 @@ index 0000000..bf998fe
 +        ? openerBrowser
 +        : sourceBrowser;
 +
-+    if (browser?.isConnected) {
++    if (browser?.isConnected && browser.documentGlobal) {
 +      let chromeWindow = browser.documentGlobal;
 +      browser.dispatchEvent(
 +        new chromeWindow.CustomEvent("DenBrowserPrintingBlocked", {
@@ -244,31 +574,40 @@ index 0000000..bf998fe
 +  }
 +}
 diff --git a/toolkit/actors/moz.build b/toolkit/actors/moz.build
-index 37de227..b28c5f3 100644
+index 3c6d8d0..d0789ae 100644
 --- a/toolkit/actors/moz.build
 +++ b/toolkit/actors/moz.build
-@@ -51,6 +51,8 @@ FINAL_TARGET_FILES.actors += [
-     "ContentMetaParent.sys.mjs",
-     "ControllersChild.sys.mjs",
+@@ -53,6 +53,8 @@ FINAL_TARGET_FILES.actors += [
      "ControllersParent.sys.mjs",
+     "DenBrowserClipboardChild.sys.mjs",
+     "DenBrowserClipboardParent.sys.mjs",
 +    "DenBrowserPrintingChild.sys.mjs",
 +    "DenBrowserPrintingParent.sys.mjs",
      "ExtFindChild.sys.mjs",
      "FindBarChild.sys.mjs",
      "FindBarParent.sys.mjs",
 diff --git a/toolkit/components/printing/content/print.js b/toolkit/components/printing/content/print.js
-index d9204f2..65039f3 100644
+index d9204f2..9e938cd 100644
 --- a/toolkit/components/printing/content/print.js
 +++ b/toolkit/components/printing/content/print.js
-@@ -15,6 +15,7 @@ const INPUT_DELAY_MS = Cu.isInAutomation ? 100 : 500;
+@@ -15,10 +15,13 @@ const INPUT_DELAY_MS = Cu.isInAutomation ? 100 : 500;
  const MM_PER_POINT = 25.4 / 72;
  const INCHES_PER_POINT = 1 / 72;
  const INCHES_PER_MM = 1 / 25.4;
 +const DENBROWSER_PRINT_DIALOG_DISABLED = true;
  const ourBrowser = window.docShell.chromeEventHandler;
- const PSSVC = Cc["@mozilla.org/gfx/printsettings-service;1"].getService(
-   Ci.nsIPrintSettingsService
-@@ -163,6 +164,19 @@ var PrintEventHandler = {
+-const PSSVC = Cc["@mozilla.org/gfx/printsettings-service;1"].getService(
+-  Ci.nsIPrintSettingsService
+-);
++const PSSVC = DENBROWSER_PRINT_DIALOG_DISABLED
++  ? null
++  : Cc["@mozilla.org/gfx/printsettings-service;1"].getService(
++      Ci.nsIPrintSettingsService
++    );
+ 
+ var logger = (function () {
+   const getMaxLogLevel = () =>
+@@ -163,6 +166,19 @@ var PrintEventHandler = {
    _noPreviewUpdateSettings: new Set(["numCopies", "printDuplex"]),
  
    async init() {
@@ -289,7 +628,7 @@ index d9204f2..65039f3 100644
  
      this.printPreviewEl =
 diff --git a/toolkit/components/printing/content/printUtils.js b/toolkit/components/printing/content/printUtils.js
-index c3e6c6e..3ad691f 100644
+index c3e6c6e..1603d69 100644
 --- a/toolkit/components/printing/content/printUtils.js
 +++ b/toolkit/components/printing/content/printUtils.js
 @@ -55,6 +55,8 @@ ChromeUtils.defineESModuleGetters(this, {
@@ -336,7 +675,31 @@ index c3e6c6e..3ad691f 100644
    getPreviewBrowser(sourceBrowser) {
      let dialogBox = this.getTabDialogBox(sourceBrowser);
      for (let dialog of dialogBox.getTabDialogManager()._dialogs) {
-@@ -228,6 +251,12 @@ var PrintUtils = {
+@@ -165,6 +188,13 @@ var PrintUtils = {
+     aPrintSelectionOnly,
+     aPrintFrameOnly
+   ) {
++    if (DENBROWSER_PRINTING_DISABLED) {
++      // Also cover direct callers of this private helper before TabDialogBox
++      // marks the tab as modal or exposes a dialog overlay.
++      this._notifyPrintingBlocked(aBrowsingContext);
++      return null;
++    }
++
+     let sourceBrowser = aBrowsingContext.top.embedderElement;
+     let previewBrowser = this.getPreviewBrowser(sourceBrowser);
+     if (previewBrowser) {
+@@ -188,6 +218,9 @@ var PrintUtils = {
+       { features: "resizable=no", sizeTo: "available" },
+       args
+     );
++    if (!dialog) {
++      return null;
++    }
+     closedPromise.catch(e => {
+       console.error(e);
+     });
+@@ -228,6 +261,12 @@ var PrintUtils = {
     *        {printFrameOnly}      Whether to print the selected frame.
     */
    startPrintWindow(aBrowsingContext, aOptions) {
@@ -349,7 +712,7 @@ index c3e6c6e..3ad691f 100644
      // At most, one of these is set.
      let { printSelectionOnly, printFrameOnly, windowDotPrintOpenWindowInfo } =
        aOptions || {};
-@@ -540,6 +569,11 @@ var PrintUtils = {
+@@ -540,6 +579,11 @@ var PrintUtils = {
    // Show the system print dialog, saving modified preferences.
    // Returns true if the user clicked print (Not cancel).
    async handleSystemPrintDialog(aWindow, aHasSelection, aSettings) {
@@ -362,13 +725,14 @@ index c3e6c6e..3ad691f 100644
      // settings changes.
      try {
 diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
-index 8cab331..c895505 100644
+index 1404039..04ac05d 100644
 --- a/toolkit/modules/ActorManagerParent.sys.mjs
 +++ b/toolkit/modules/ActorManagerParent.sys.mjs
-@@ -524,6 +524,19 @@ let JSWINDOWACTORS = {
+@@ -536,6 +536,20 @@ let JSWINDOWACTORS = {
+     },
      allFrames: true,
    },
- 
++
 +  DenBrowserPrinting: {
 +    parent: {
 +      esModuleURI: "resource://gre/actors/DenBrowserPrintingParent.sys.mjs",
@@ -385,3 +749,214 @@ index 8cab331..c895505 100644
    Printing: {
      parent: {
        esModuleURI: "resource://gre/actors/PrintingParent.sys.mjs",
+diff --git a/widget/android/components.conf b/widget/android/components.conf
+index 97b84da..4874e79 100644
+--- a/widget/android/components.conf
++++ b/widget/android/components.conf
+@@ -54,19 +54,6 @@ Classes = [
+         'type': 'nsClipboardHelper',
+         'headers': ['/widget/nsClipboardHelper.h'],
+     },
+-    {
+-        'cid': '{841387c8-72e6-484b-9296-bf6eea80d58a}',
+-        'contract_ids': ['@mozilla.org/gfx/printsettings-service;1'],
+-        'type': 'nsPrintSettingsServiceAndroid',
+-        'headers': ['/widget/android/nsPrintSettingsServiceAndroid.h'],
+-        'init_method': 'Init',
+-    },
+-    {
+-        'cid': '{d3f69889-e13a-4321-980c-a39332e21f34}',
+-        'contract_ids': ['@mozilla.org/gfx/devicecontextspec;1'],
+-        'type': 'nsDeviceContextSpecAndroid',
+-        'headers': ['/widget/android/nsDeviceContextAndroid.h'],
+-    },
+     {
+         'cid': '{948a0023-e3a7-11d2-96cf-0060b0fb9956}',
+         'contract_ids': ['@mozilla.org/widget/htmlformatconverter;1'],
+@@ -105,3 +92,20 @@ Classes = [
+         'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+     },
+ ]
++
++if defined('NS_PRINTING'):
++    Classes += [
++        {
++            'cid': '{841387c8-72e6-484b-9296-bf6eea80d58a}',
++            'contract_ids': ['@mozilla.org/gfx/printsettings-service;1'],
++            'type': 'nsPrintSettingsServiceAndroid',
++            'headers': ['/widget/android/nsPrintSettingsServiceAndroid.h'],
++            'init_method': 'Init',
++        },
++        {
++            'cid': '{d3f69889-e13a-4321-980c-a39332e21f34}',
++            'contract_ids': ['@mozilla.org/gfx/devicecontextspec;1'],
++            'type': 'nsDeviceContextSpecAndroid',
++            'headers': ['/widget/android/nsDeviceContextAndroid.h'],
++        },
++    ]
+diff --git a/widget/android/moz.build b/widget/android/moz.build
+index 25b6911..4a83964 100644
+--- a/widget/android/moz.build
++++ b/widget/android/moz.build
+@@ -145,10 +145,8 @@ UNIFIED_SOURCES += [
+     "MozLogSupport.cpp",
+     "nsAppShell.cpp",
+     "nsClipboard.cpp",
+-    "nsDeviceContextAndroid.cpp",
+     "nsDragService.cpp",
+     "nsLookAndFeel.cpp",
+-    "nsPrintSettingsServiceAndroid.cpp",
+     "nsUserIdleServiceAndroid.cpp",
+     "nsWidgetFactory.cpp",
+     "nsWindow.cpp",
+@@ -157,6 +155,12 @@ UNIFIED_SOURCES += [
+     "WebExecutorSupport.cpp",
+ ]
+ 
++if CONFIG["NS_PRINTING"]:
++    UNIFIED_SOURCES += [
++        "nsDeviceContextAndroid.cpp",
++        "nsPrintSettingsServiceAndroid.cpp",
++    ]
++
+ XPCOM_MANIFESTS += [
+     "components.conf",
+ ]
+diff --git a/widget/cocoa/components.conf b/widget/cocoa/components.conf
+index 0ca2fba..27cb774 100644
+--- a/widget/cocoa/components.conf
++++ b/widget/cocoa/components.conf
+@@ -78,30 +78,6 @@ Classes = [
+         'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+         'singleton': True,
+     },
+-    {
+-        'cid': '{d3f69889-e13a-4321-980c-a39332e21f34}',
+-        'contract_ids': ['@mozilla.org/gfx/devicecontextspec;1'],
+-        'type': 'nsDeviceContextSpecX',
+-        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+-    },
+-    {
+-        'cid': '{a6cf9129-15b3-11d2-932e-00805f8add32}',
+-        'contract_ids': ['@mozilla.org/gfx/printerlist;1'],
+-        'type': 'nsPrinterListCUPS',
+-        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+-    },
+-    {
+-        'cid': '{841387c8-72e6-484b-9296-bf6eea80d58a}',
+-        'contract_ids': ['@mozilla.org/gfx/printsettings-service;1'],
+-        'type': 'nsPrintSettingsServiceX',
+-        'processes': ProcessSelector.ALLOW_IN_GPU_RDD_VR_SOCKET_AND_UTILITY_PROCESS,
+-    },
+-    {
+-        'cid': '{06beec76-a183-4d9f-85dd-085f26da565a}',
+-        'contract_ids': ['@mozilla.org/widget/printdialog-service;1'],
+-        'type': 'nsPrintDialogServiceX',
+-        'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+-    },
+     {
+         'cid': '{6987230e-0089-4e78-bc5f-1493ee7519fa}',
+         'contract_ids': ['@mozilla.org/widget/useridleservice;1'],
+@@ -170,3 +146,31 @@ Classes = [
+         'processes': ProcessSelector.MAIN_PROCESS_ONLY,
+     },
+ ]
++
++if defined('NS_PRINTING'):
++    Classes += [
++        {
++            'cid': '{d3f69889-e13a-4321-980c-a39332e21f34}',
++            'contract_ids': ['@mozilla.org/gfx/devicecontextspec;1'],
++            'type': 'nsDeviceContextSpecX',
++            'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++        },
++        {
++            'cid': '{a6cf9129-15b3-11d2-932e-00805f8add32}',
++            'contract_ids': ['@mozilla.org/gfx/printerlist;1'],
++            'type': 'nsPrinterListCUPS',
++            'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++        },
++        {
++            'cid': '{841387c8-72e6-484b-9296-bf6eea80d58a}',
++            'contract_ids': ['@mozilla.org/gfx/printsettings-service;1'],
++            'type': 'nsPrintSettingsServiceX',
++            'processes': ProcessSelector.ALLOW_IN_GPU_RDD_VR_SOCKET_AND_UTILITY_PROCESS,
++        },
++        {
++            'cid': '{06beec76-a183-4d9f-85dd-085f26da565a}',
++            'contract_ids': ['@mozilla.org/widget/printdialog-service;1'],
++            'type': 'nsPrintDialogServiceX',
++            'processes': ProcessSelector.MAIN_PROCESS_ONLY,
++        },
++    ]
+diff --git a/widget/cocoa/moz.build b/widget/cocoa/moz.build
+index a6d1438..909c9b3 100644
+--- a/widget/cocoa/moz.build
++++ b/widget/cocoa/moz.build
+@@ -47,7 +47,6 @@ UNIFIED_SOURCES += [
+     "nsCocoaUtils.mm",
+     "nsCocoaWindow.mm",
+     "nsColorPicker.mm",
+-    "nsDeviceContextSpecX.mm",
+     "nsFilePicker.mm",
+     "nsLookAndFeel.mm",
+     "nsMacDockSupport.mm",
+@@ -62,9 +61,6 @@ UNIFIED_SOURCES += [
+     "nsMenuItemX.mm",
+     "nsMenuUtilsX.mm",
+     "nsMenuX.mm",
+-    "nsPrintDialogX.mm",
+-    "nsPrintSettingsServiceX.mm",
+-    "nsPrintSettingsX.mm",
+     "nsSound.mm",
+     "nsStandaloneNativeMenu.mm",
+     "nsSystemStatusBarCocoa.mm",
+@@ -83,6 +79,14 @@ UNIFIED_SOURCES += [
+     "ViewRegion.mm",
+ ]
+ 
++if CONFIG["NS_PRINTING"]:
++    UNIFIED_SOURCES += [
++        "nsDeviceContextSpecX.mm",
++        "nsPrintDialogX.mm",
++        "nsPrintSettingsServiceX.mm",
++        "nsPrintSettingsX.mm",
++    ]
++
+ # These files cannot be built in unified mode because they cause symbol conflicts
+ SOURCES += [
+     "DesktopBackgroundImage.mm",
+diff --git a/widget/cocoa/nsWidgetFactory.mm b/widget/cocoa/nsWidgetFactory.mm
+index 6bb5630..71a5fe6 100644
+--- a/widget/cocoa/nsWidgetFactory.mm
++++ b/widget/cocoa/nsWidgetFactory.mm
+@@ -31,10 +31,12 @@
+ #include "NativeKeyBindings.h"
+ #include "MacOSNotificationCenter.h"
+ 
+-#include "nsDeviceContextSpecX.h"
+-#include "nsPrinterListCUPS.h"
+-#include "nsPrintSettingsServiceX.h"
+-#include "nsPrintDialogX.h"
++#ifdef NS_PRINTING
++#  include "nsDeviceContextSpecX.h"
++#  include "nsPrinterListCUPS.h"
++#  include "nsPrintDialogX.h"
++#  include "nsPrintSettingsServiceX.h"
++#endif
+ #include "nsToolkitCompsCID.h"
+ 
+ #include "mozilla/widget/ScreenManager.h"
+@@ -78,10 +80,12 @@ MAKE_GENERIC_CTOR(nsTransferable, nsITransferable)
+ MAKE_GENERIC_CTOR(nsHTMLFormatConverter, nsIFormatConverter)
+ MAKE_GENERIC_CTOR(nsClipboardHelper, nsIClipboardHelper)
+ MAKE_GENERIC_CTOR(nsDragService, nsIDragService)
++#ifdef NS_PRINTING
+ MAKE_GENERIC_CTOR(nsDeviceContextSpecX, nsIDeviceContextSpec)
+ MAKE_GENERIC_CTOR(nsPrinterListCUPS, nsIPrinterList)
+ MAKE_GENERIC_CTOR_INIT(nsPrintSettingsServiceX, nsIPrintSettingsService, Init)
+ MAKE_GENERIC_CTOR_INIT(nsPrintDialogServiceX, nsIPrintDialogService, Init)
++#endif
+ MAKE_GENERIC_SINGLETON_CTOR(nsUserIdleServiceX, nsUserIdleServiceX::GetInstance)
+ MAKE_GENERIC_SINGLETON_CTOR(ScreenManager, ScreenManager::GetAddRefedSingleton)
+ MAKE_GENERIC_CTOR_INIT(MacOSNotificationCenter, nsIAlertsService, Init)
