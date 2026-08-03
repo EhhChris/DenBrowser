@@ -30,7 +30,7 @@
 #   - Session restore: interval=MAX_INT, max_undo=0, resume_from_crash=false
 #   - Downloads: patch 004 cancels the channel inside CreateListener before
 #     any disk file is opened.
-#   - Cookies: ExpireAtSessionEnd=true (locked) + PBM in-memory store
+#   - Cookies: SanitizeOnShutdown.Cookies=true + PBM in-memory store
 #   - Page thumbnails / shortcut favicons / media cache / service workers:
 #     locked off in mozilla.cfg (added the same day as this decision)
 #

@@ -223,7 +223,10 @@ diff_lines = list(difflib.unified_diff(
     tofile=f'b/{target_rel}',
     n=3,
 ))
-new_diff = ''.join(diff_lines)
+# A blank context line is represented as " \\n" in a unified diff.  An empty
+# line is accepted by git apply as the same context, and avoids making the
+# generated patch itself fail the outer repository's whitespace check.
+new_diff = ''.join('\n' if line == ' \n' else line for line in diff_lines)
 
 # ── Splice into existing patch file (preserve the comment header) ─────────────
 with open(patch_path, encoding='utf-8') as f:

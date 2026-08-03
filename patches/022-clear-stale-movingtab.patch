@@ -1,0 +1,393 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 022-clear-stale-movingtab
+#
+# Prevents incomplete tab drags from leaving browser chrome inert.
+#
+# Firefox intentionally disables pointer events for most of the navigation bar
+# while the navigator toolbox has the movingtab attribute. Patch 003 permits
+# only trusted internal tab transport and routes every blocked drag through
+# Firefox's failure cleanup; this patch adds browser-UI defense in depth for
+# malformed dataTransfer objects and missing terminal drag events.
+#
+# Each drag retains its source independently of dataTransfer so malformed drop
+# and dragend events can use one cancellation path. The toolbox marker is
+# cleared synchronously on drop and dragend, while the tabstrip marker remains
+# until any cosmetic same-window translation completes. Normal reorder state,
+# including currentIndex, is left intact until Firefox finishes using it.
+# The native tab payload keeps Firefox's internal marker with an empty value so
+# permitting tab transport cannot disclose the tab URL.
+#
+# A window-level mouse watchdog can recover even when navbar hit testing is
+# disabled or the drag service retained a zombie session. Transitionend and
+# transitioncancel handling has a bounded one-second fallback. Firefox's
+# navigation-bar drop shielding remains active throughout valid native drags.
+
+
+diff --git a/browser/components/tabbrowser/content/drag-and-drop.js b/browser/components/tabbrowser/content/drag-and-drop.js
+index 603a0ae..45f722a 100644
+--- a/browser/components/tabbrowser/content/drag-and-drop.js
++++ b/browser/components/tabbrowser/content/drag-and-drop.js
+@@ -9,6 +9,7 @@
+   const isTab = element => gBrowser.isTab(element);
+   const isTabGroupLabel = element => gBrowser.isTabGroupLabel(element);
+   const isSplitViewWrapper = element => gBrowser.isSplitViewWrapper(element);
++  const TAB_DROP_TRANSITION_TIMEOUT_MS = 1000;
+ 
+   /**
+    * The elements in the tab strip from `this.dragAndDropElements` that contain
+@@ -46,7 +47,26 @@
+ 
+   window.TabDragAndDrop = class {
+     #dragTime = 0;
++    #dragSource = null;
+     #pinnedDropIndicatorTimeout = null;
++    #finishStaleTabMove = event => {
++      if (
++        !this.#isMovingTab() ||
++        (event.type == "mousemove" && event.buttons !== 0) ||
++        (event.type == "mousedown" && event.button !== 0)
++      ) {
++        return;
++      }
++
++      // Device mouse events are suppressed while a native drag is active. A
++      // button-free move or a new primary press therefore proves that the
++      // native drag ended, even if the drag service retained a zombie session.
++      // Leave a valid same-window drop animation to its bounded fallback.
++      if (this.#hasActiveSameWindowDropTransition()) {
++        return;
++      }
++      this._cancelInterruptedTabDrag();
++    };
+ 
+     constructor(tabbrowserTabs) {
+       this._tabbrowserTabs = tabbrowserTabs;
+@@ -253,6 +273,14 @@
+     // eslint-disable-next-line complexity
+     handle_drop(event) {
++      // A native drop is terminal. Re-enable browser chrome before touching
++      // event data; only the tabstrip needs movingtab for its CSS translation.
++      this.#clearToolbarDragShield();
+       var dt = event.dataTransfer;
++      if (!dt) {
++        this._cancelInterruptedTabDrag();
++        return;
++      }
++
+       var dropEffect = dt.dropEffect;
+       var draggedTab;
+       let movingTabs;
+@@ -265,6 +293,7 @@
+         draggedTab = dt.mozGetDataAt(TAB_DROP_TYPE, 0);
+         // not our drop then
+         if (!draggedTab) {
++          this._cancelInterruptedTabDrag();
+           return;
+         }
+         movingTabs = draggedTab._dragData.movingTabs;
+@@ -473,32 +502,56 @@
+             let translationPromise = new Promise(resolve => {
+               item.toggleAttribute("tabdrop-samewindow", true);
+               item.style.transform = `translate(${newTranslateX}px, ${newTranslateY}px)`;
++              let finished = false;
++              let onTransitionEnd;
++              let transitionTimeout;
+               let postTransitionCleanup = () => {
++                if (finished) {
++                  return;
++                }
++                finished = true;
++                if (transitionTimeout) {
++                  clearTimeout(transitionTimeout);
++                }
++                if (onTransitionEnd) {
++                  item.removeEventListener("transitionend", onTransitionEnd);
++                  item.removeEventListener("transitioncancel", onTransitionEnd);
++                }
+                 item.removeAttribute("tabdrop-samewindow");
+                 resolve();
+               };
+               if (gReduceMotion) {
+                 postTransitionCleanup();
+               } else {
+-                let onTransitionEnd = transitionendEvent => {
++                onTransitionEnd = transitionendEvent => {
+                   if (
+                     transitionendEvent.propertyName != "transform" ||
+                     transitionendEvent.originalTarget != item
+                   ) {
+                     return;
+                   }
+-                  item.removeEventListener("transitionend", onTransitionEnd);
+-
+                   postTransitionCleanup();
+                 };
+                 item.addEventListener("transitionend", onTransitionEnd);
++                item.addEventListener("transitioncancel", onTransitionEnd);
++                // A missing transition event must not leave movingtab set and
++                // browser chrome inert indefinitely.
++                transitionTimeout = setTimeout(
++                  postTransitionCleanup,
++                  TAB_DROP_TRANSITION_TIMEOUT_MS
++                );
+               }
+             });
+             translationPromises.push(translationPromise);
+           }
+           Promise.all(translationPromises).then(() => {
+-            this.finishAnimateTabMove();
+-            moveTabs();
++            try {
++              this.finishAnimateTabMove();
++              moveTabs();
++            } finally {
++              delete draggedTab._dragData;
++              this.#clearDragSource(draggedTab);
++            }
+           });
+         } else {
+           this.finishAnimateTabMove();
+@@ -625,6 +678,7 @@
+         } catch (ex) {}
+ 
+         if (!links || links.length === 0) {
++          this.finishAnimateTabMove();
+           return;
+         }
+ 
+@@ -682,25 +736,42 @@
+         delete tab.currentIndex;
+       }
+ 
+-      if (draggedTab) {
++      if (draggedTab && !this.#hasActiveSameWindowDropTransition()) {
+         delete draggedTab._dragData;
++        this.#clearDragSource(draggedTab);
+       }
+     }
+ 
+     handle_dragend(event) {
++      // Do this before reading dataTransfer or waiting for a same-window tab
++      // transition: neither can be allowed to keep browser chrome inert.
++      this.#clearToolbarDragShield();
+       var dt = event.dataTransfer;
+-      var draggedTab = dt.mozGetDataAt(TAB_DROP_TYPE, 0);
++      var draggedTab;
++      var recoveredDragSource = false;
++      try {
++        draggedTab = dt?.mozGetDataAt(TAB_DROP_TYPE, 0);
++      } catch (ex) {}
++
++      if (!draggedTab) {
++        draggedTab = this.#dragSource;
++        recoveredDragSource = !!draggedTab;
++      }
++
++      // Do not cancel a valid same-window drop animation. Its bounded fallback
++      // guarantees cleanup even if transitionend is lost.
++      if (this.#hasActiveSameWindowDropTransition()) {
++        return;
++      }
+
+-      // Prevent this code from running if a tabdrop animation is
+-      // running since calling finishAnimateTabMove would clear
+-      // any CSS transition that is running.
+-      if (draggedTab.hasAttribute("tabdrop-samewindow")) {
++      if (!draggedTab || recoveredDragSource || !dt) {
++        this._cancelInterruptedTabDrag(draggedTab);
+         return;
+       }
+ 
+       this.finishMoveTogetherSelectedTabs(draggedTab);
+       this.finishAnimateTabMove();
+-      if (isTabGroupLabel(draggedTab)) {
++      if (draggedTab && isTabGroupLabel(draggedTab)) {
+         this._setIsDraggingTabGroup(draggedTab.group, false);
+         this._expandGroupOnDrop(draggedTab);
+       }
+@@ -713,6 +784,7 @@
+         this._tabbrowserTabs._isCustomizing
+       ) {
+         delete draggedTab._dragData;
++        this.#clearDragSource(draggedTab);
+         return;
+       }
+ 
+@@ -750,6 +822,8 @@
+           crossAxisEnd = window.mozInnerScreenY + rect.top + 1.5 * rect.height;
+         }
+         if (crossAxisPos > crossAxisStart && crossAxisPos < crossAxisEnd) {
++          delete draggedTab._dragData;
++          this.#clearDragSource(draggedTab);
+           return;
+         }
+       }
+@@ -815,6 +889,7 @@
+       top /= ourCssToDesktopScale;
+ 
+       delete draggedTab._dragData;
++      this.#clearDragSource(draggedTab);
+ 
+       if (gBrowser.tabs.length == 1) {
+         // resize _before_ move to ensure the window fits the new screen.  if
+@@ -865,9 +940,94 @@
+       return !this._tabbrowserTabs.verticalMode && RTL_UI;
+     }
+ 
++    #hasActiveSameWindowDropTransition() {
++      return !!this._tabbrowserTabs.querySelector("[tabdrop-samewindow]");
++    }
++
++    #clearDragSource(draggedTab) {
++      if (!draggedTab || this.#dragSource == draggedTab) {
++        this.#dragSource = null;
++      }
++    }
++
++    _cancelInterruptedTabDrag(draggedTab = this.#dragSource) {
++      // Clear the pointer-event shield before any routing or cleanup that may
++      // touch a disconnected or cross-window source.
++      this.#clearToolbarDragShield();
++      let sourceTabDragAndDrop = draggedTab?.container?.tabDragAndDrop;
++      // After cross-window adoption, the tab's container points at the target
++      // even though the source instance still owns its drag state.
++      if (
++        sourceTabDragAndDrop &&
++        sourceTabDragAndDrop != this &&
++        this.#dragSource != draggedTab
++      ) {
++        sourceTabDragAndDrop._cancelInterruptedTabDrag(draggedTab);
++        return;
++      }
++
++      // The remaining repair is best effort and must never be able to leave
++      // browser chrome disabled.
++      try {
++        this._tabDropIndicator.hidden = true;
++        try {
++          if (draggedTab) {
++            this.finishMoveTogetherSelectedTabs(draggedTab);
++          }
++        } finally {
++          this.finishAnimateTabMove(true);
++        }
++        if (draggedTab && isTabGroupLabel(draggedTab)) {
++          this._setIsDraggingTabGroup(draggedTab.group, false);
++          this._expandGroupOnDrop(draggedTab);
++        }
++      } finally {
++        this._tabbrowserTabs.removeAttribute("movingtab");
++        this.#removeTabDragRecoveryListeners();
++        if (draggedTab) {
++          delete draggedTab._dragData;
++        }
++        this.#clearDragSource(draggedTab);
++        try {
++          for (let item of this._tabbrowserTabs.dragAndDropElements) {
++            delete item.currentIndex;
++            delete item._moveTogetherSelectedTabsData;
++          }
++          for (let item of this._tabbrowserTabs.querySelectorAll(
++            "[multiselected-move-together]"
++          )) {
++            item.removeAttribute("multiselected-move-together");
++          }
++        } catch (ex) {
++          console.error(ex);
++        }
++        try {
++          this._resetTabsAfterDrop(draggedTab?.ownerDocument);
++        } catch (ex) {
++          console.error(ex);
++        }
++      }
++    }
++
++    #clearToolbarDragShield() {
++      gNavToolbox.removeAttribute("movingtab");
++    }
++
++    #removeTabDragRecoveryListeners() {
++      window.removeEventListener("mousemove", this.#finishStaleTabMove, true);
++      window.removeEventListener("mousedown", this.#finishStaleTabMove, true);
++    }
++
+     #setMovingTabMode(movingTab) {
+       this._tabbrowserTabs.toggleAttribute("movingtab", movingTab);
+-      gNavToolbox.toggleAttribute("movingtab", movingTab);
++      if (movingTab) {
++        gNavToolbox.toggleAttribute("movingtab", true);
++        window.addEventListener("mousemove", this.#finishStaleTabMove, true);
++        window.addEventListener("mousedown", this.#finishStaleTabMove, true);
++      } else {
++        this.#clearToolbarDragShield();
++        this.#removeTabDragRecoveryListeners();
++      }
+     }
+ 
+     _getDropIndex(event) {
+@@ -989,7 +1149,10 @@
+     }
+ 
+     #isMovingTab() {
+-      return this._tabbrowserTabs.hasAttribute("movingtab");
++      return (
++        this._tabbrowserTabs.hasAttribute("movingtab") ||
++        gNavToolbox.hasAttribute("movingtab")
++      );
+     }
+ 
+     // Tab groups
+@@ -1146,16 +1309,12 @@
+         let dtTab = dataTransferOrderedTabs[i];
+         dt.mozSetDataAt(TAB_DROP_TYPE, dtTab, i);
+         if (isTab(dtTab)) {
+-          let dtBrowser = dtTab.linkedBrowser;
+-
+           // We must not set text/x-moz-url or text/plain data here,
+           // otherwise trying to detach the tab by dropping it on the desktop
+-          // may result in an "internet shortcut"
+-          dt.mozSetDataAt(
+-            "text/x-moz-text-internal",
+-            dtBrowser.currentURI.spec,
+-            i
+-          );
++          // may result in an "internet shortcut". DenBrowser retains the
++          // internal flavor with an empty value so native tab transport cannot
++          // expose the tab URL.
++          dt.mozSetDataAt("text/x-moz-text-internal", "", i);
+         }
+       }
+
+@@ -1284,6 +1443,7 @@
+         tabGroupCreationColor: gBrowser.tabGroupMenu.nextUnusedColor,
+         expandGroupOnDrop: collapseTabGroupDuringDrag,
+       };
++      this.#dragSource = tab;
+       if (this._rtlMode) {
+         // Reverse order to handle positioning in `_updateTabStylesOnDrag`
+         // and animation in `_animateTabMove`
+@@ -2554,8 +2714,8 @@
+       this._pinnedDropIndicator.removeAttribute("interactive");
+     }
+ 
+-    finishAnimateTabMove() {
+-      if (!this.#isMovingTab()) {
++    finishAnimateTabMove(forceCleanup = false) {
++      if (!forceCleanup && !this.#isMovingTab()) {
+         return;
+       }
+ 
+@@ -2669,6 +2829,9 @@
+      */
+     getDropEffectForTabDrag(event) {
+       var dt = event.dataTransfer;
++      if (!dt) {
++        return "none";
++      }
+ 
+       let isMovingTab = dt.mozItemCount > 0;
+       for (let i = 0; i < dt.mozItemCount; i++) {
