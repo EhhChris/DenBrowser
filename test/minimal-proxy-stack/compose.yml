@@ -1,0 +1,88 @@
+name: denbrowser-minimal-proxy-stack
+
+services:
+  proxy:
+    image: denbrowser/proxy:dev
+    build:
+      context: ../../proxy
+    command:
+      - --config
+      - /etc/denbrowser/config.toml
+      # The test upstream uses the proxy's self-signed development certificate.
+      - --insecure-upstream
+    configs:
+      - source: proxy_config
+        target: /etc/denbrowser/config.toml
+    secrets:
+      - proxy_tls_cert
+      - proxy_tls_key
+      - proxy_attestation_key
+      - user_ca
+    ports:
+      - "127.0.0.1:8081:8081"
+    networks:
+      - ingress
+      - upstream
+    depends_on:
+      upstream:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  upstream:
+    image: nginx:alpine
+    configs:
+      - source: nginx_config
+        target: /etc/nginx/conf.d/default.conf
+      - source: site_index
+        target: /usr/share/nginx/html/index.html
+    secrets:
+      # This remains a self-contained development stack by reusing the local
+      # development certificate for upstream TLS. The proxy deliberately skips
+      # upstream verification above; production must use a separately issued
+      # upstream identity and enable verification.
+      - proxy_tls_cert
+      - proxy_tls_key
+    expose:
+      - "443"
+    networks:
+      - upstream
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider --no-check-certificate https://127.0.0.1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+configs:
+  proxy_config:
+    file: ./config.toml
+  nginx_config:
+    file: ./nginx.conf
+  site_index:
+    file: ./index.html
+
+secrets:
+  proxy_tls_cert:
+    file: ../../build/proxy-tls.crt
+  proxy_tls_key:
+    file: ../../build/proxy-tls.key
+  proxy_attestation_key:
+    file: ../../build/proxy-private.pem
+  user_ca:
+    file: ../../build/user-ca.crt
+
+networks:
+  ingress:
+  upstream:
+    internal: true
