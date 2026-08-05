@@ -51,15 +51,10 @@ scripts/gen-attest-key.sh
 scripts/gen-proxy-tls.sh
 scripts/gen-user-cert.sh      # only if testing with [mtls] enabled
 
-# Start an upstream and the proxy (example — see test/target-server/):
-docker compose -f test/target-server/compose.yml up -d
-# The proxy requires a config file (defaults to ./proxy.toml). If you don't have
-# one, start from proxy/proxy.example.toml (leave [mtls] disabled for plain
-# load testing).  [attestation] private_key is REQUIRED and must point at
-# build/proxy-private.pem (the example config already does).
-# The proxy speaks TLS to its upstream, so target the target's TLS port (8443).
-# The target reuses build/proxy-tls.* (self-signed), so pass --insecure-upstream.
-(cd proxy && cargo run --release -- --insecure-upstream)
+# Build and start the containerized proxy and its private nginx upstream (see
+# test/minimal-proxy-stack/). The stack's config enables mTLS and mounts the
+# generated build/user-ca.crt into the proxy.
+docker compose -f test/minimal-proxy-stack/compose.yml up --build -d
 ```
 
 If the proxy is run with `[mtls]` enabled (client_ca = `build/user-ca.crt`), the

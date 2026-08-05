@@ -1,0 +1,27 @@
+# Compose mounts the referenced files as read-only secrets sourced from build/.
+[proxy]
+listen = "0.0.0.0:8081"
+upstream = "upstream:443"
+tls_cert = "/run/secrets/proxy_tls_cert"
+tls_key = "/run/secrets/proxy_tls_key"
+
+[attestation]
+private_key = "/run/secrets/proxy_attestation_key"
+
+[rate_limiting]
+enabled = true
+window_secs = 1
+max_requests = 100
+
+[mtls]
+enabled = true
+client_ca = "/run/secrets/user_ca"
+
+[proxy_bypass]
+enabled = false
+
+# Container logs go to stderr for collection by the container runtime.
+[logging]
+dir = ""
+level = "info"
+stderr = true

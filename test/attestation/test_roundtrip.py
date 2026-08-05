@@ -11,20 +11,14 @@ Requirements:
 Usage (from repo root):
     scripts/gen-attest-key.sh
     scripts/gen-proxy-tls.sh
-    docker compose -f test/target-server/compose.yml up -d
-    # The proxy requires a config file (defaults to ./proxy.toml). If you don't
-    # have one, start from proxy/proxy.example.toml. Leave [mtls] disabled for
-    # plain attestation testing.  [attestation] private_key is REQUIRED and must
-    # point at build/proxy-private.pem (the example config already does); the
-    # proxy exits at startup without it.
-    # Proxy dials its upstream over TLS; use the target's TLS port (8443).
-    # The target's cert is self-signed, so run with --insecure-upstream.
-    (cd proxy && cargo run -- --insecure-upstream)
+    scripts/gen-user-cert.sh
+    docker compose -f test/minimal-proxy-stack/compose.yml up --build -d
     python3 test/attestation/test_roundtrip.py
 
 mTLS:
     If the proxy is run with [mtls] enabled, it requires a client certificate.
-    Generate one and point the proxy's client_ca at the CA:
+    Generate one and point the proxy's client_ca at the CA (the minimal proxy
+    Compose stack already does this):
         scripts/gen-user-cert.sh
         # proxy config: [mtls] enabled = true, client_ca = "build/user-ca.crt"
     This test auto-presents build/user-cert.{crt,key} when they exist (override
