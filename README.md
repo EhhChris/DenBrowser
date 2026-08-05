@@ -46,6 +46,12 @@ cd ../..
 ./build.sh # Attempts the full build process on the last esr version pulled by fetch-esr.sh
 ```
 
+`build.sh` stops at a built, configured application in the object directory.  To
+turn that into a distributable **signed Windows MSI** — `mach package`, the NSIS
+installer, WiX (`candle`/`light`), and Authenticode signing, including which
+tools have to be carried onto an air-gapped build host — follow
+[`docs/windows-msi-build.md`](docs/windows-msi-build.md).
+
 ---
 
 ## Project structure
@@ -61,6 +67,9 @@ DenBrowser/
 │   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
 │   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites /
 │                               #   attestation proxies / bookmarks
+├── docs/
+│   ├── patch-workflow.md       # Maintaining the patch series across ESR bumps
+│   └── windows-msi-build.md    # Packaging + code-signing a Windows MSI (air-gapped)
 ├── patches/
 │   ├── README.md               # Patch development guide
 │   └── NNN-*.patch             # See "Patches" table below
