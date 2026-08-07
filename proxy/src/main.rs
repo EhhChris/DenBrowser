@@ -15,11 +15,13 @@ use tracing::{error, info, warn};
 mod attest;
 mod config;
 mod logging;
+mod machine;
 mod mtls;
 mod passthrough;
 mod ratelimit;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
+use machine::MachineIdentity;
 use mtls::ClientCert;
 use passthrough::BypassPolicy;
 use ratelimit::RateLimiter;
@@ -38,6 +40,13 @@ use ratelimit::RateLimiter;
 /// TODO: Revisit this... inspection before streaming should be possible per: https://github.com/cloudflare/pingora/issues/67
 /// Likely to do with how we're holding back headers before streaming as well though.
 const BOUND_BODY_MAX: usize = 64 * 1024;
+
+/// Request header carrying the workstation's machine certificate, base64 DER.
+///
+/// Named once so the read in `request_filter` and the strip in
+/// `upstream_request_filter` cannot drift — a strip that misses its header
+/// leaks the certificate to the backend.
+const MACHINE_CERT_HEADER: &str = "x-denbrowser-machine-cert";
 
 #[derive(Parser, Debug)]
 #[command(about = "DenBrowser attestation proxy — verifies ECIES tokens, strips headers, forwards")]
@@ -68,6 +77,9 @@ struct DenBrowserProxy {
     /// when bypass is disabled.  The client certificate it matches against is
     /// verified by baseline mTLS at the TLS layer and read here from the digest.
     bypass: Option<BypassPolicy>,
+    /// Machine-identity verifier (workstation certificate + hostname); `None`
+    /// when `[machine_identity]` is disabled.
+    machine: Option<MachineIdentity>,
 }
 
 impl DenBrowserProxy {
@@ -77,6 +89,7 @@ impl DenBrowserProxy {
         insecure_upstream: bool,
         rate_limiter: Option<RateLimiter>,
         bypass: Option<BypassPolicy>,
+        machine: Option<MachineIdentity>,
     ) -> anyhow::Result<Self> {
         let (host, port_str) = upstream
             .rsplit_once(':')
@@ -89,6 +102,7 @@ impl DenBrowserProxy {
             insecure_upstream,
             rate_limiter,
             bypass,
+            machine,
         })
     }
 }
@@ -186,9 +200,44 @@ impl ProxyHttp for DenBrowserProxy {
             && let Some(cert) = client_cert(session)
             && let Some(subject) = policy.authorizes(&ip, cert)
         {
-            info!("attestation bypass — ip={ip} cert_subject={subject}");
+            info!("attestation bypass — ip={ip} cert_subject={subject} machine=(bypass)");
             return Ok(false);
         }
+
+        // Machine identity: which workstation this came from.  Runs after bypass
+        // (trusted infrastructure that cannot run the attestation client has no
+        // machine certificate either, so gating it would break those callers)
+        // and before attestation, so a request that cannot name its machine is
+        // shed before the crypto path.
+        //
+        // The verified hostname is carried into the accept log below; it grants
+        // nothing on its own.  See `machine` for what this does and does not
+        // prove.
+        let machine_host = match &self.machine {
+            None => None,
+            Some(verifier) => {
+                let presented = header_str(&session.req_header().headers, MACHINE_CERT_HEADER);
+                match presented {
+                    Some(cert_b64) => match verifier.verify_cert(&cert_b64) {
+                        Ok(hostname) => Some(hostname),
+                        Err(e) => {
+                            warn!("rejected — {e}");
+                            let _ = session.respond_error(403).await;
+                            return Ok(true);
+                        }
+                    },
+                    // Absent.  Rejected unless the operator is mid-rollout and
+                    // has deliberately relaxed `required`.
+                    None if verifier.required() => {
+                        warn!("rejected — {}", machine::MachineError::Missing);
+                        let _ = session.respond_error(403).await;
+                        return Ok(true);
+                    }
+                    None => None,
+                }
+            }
+        };
+        let machine_log = machine_host.as_deref().unwrap_or("-");
 
         let req = session.req_header();
 
@@ -244,7 +293,7 @@ impl ProxyHttp for DenBrowserProxy {
                 return Ok(true);
             }
             info!(
-                "accepted — {method} {host}{} (unbound upload)",
+                "accepted — {method} {host}{} machine={machine_log} (unbound upload)",
                 path_without_query(&path)
             );
             return Ok(false);
@@ -291,7 +340,7 @@ impl ProxyHttp for DenBrowserProxy {
         // Fully verified.  Pingora's retry buffer holds the body and replays it
         // to the upstream on its own.
         info!(
-            "accepted — {method} {host}{} ({total} byte body)",
+            "accepted — {method} {host}{} machine={machine_log} ({total} byte body)",
             path_without_query(&path)
         );
         Ok(false)
@@ -307,6 +356,7 @@ impl ProxyHttp for DenBrowserProxy {
         upstream_request.remove_header("x-denbrowser-ts");
         upstream_request.remove_header("x-denbrowser-nonce");
         upstream_request.remove_header("x-denbrowser-token");
+        upstream_request.remove_header(MACHINE_CERT_HEADER);
         Ok(())
     }
 }
@@ -414,6 +464,45 @@ fn main() {
         None => info!("mTLS disabled"),
     }
 
+    // Machine identity: a separate CA and a per-request header naming the
+    // workstation.  Independent of mTLS — it identifies the *machine*, where
+    // mTLS identifies the *user* — so it is not gated on mTLS being enabled.
+    let machine = MachineIdentity::from_config(&config.machine_identity)
+        .unwrap_or_else(|e| fatal(format!("invalid machine_identity config: {e}")));
+    match &machine {
+        Some(m) if m.required() => {
+            info!("machine identity enabled — machine certificates required")
+        }
+        Some(_) => info!("machine identity enabled — machine certificates verified when present"),
+        None => info!("machine identity disabled"),
+    }
+
+    // The two client-identity CAs must be distinct.  The browser tells the user
+    // certificate apart from the machine certificate by its issuer — that is
+    // what the CertificateRequest CA list below relies on — and the proxy tells
+    // the two layers apart the same way.  A shared CA would make client-cert
+    // selection a coin flip and let a machine certificate satisfy mTLS (or vice
+    // versa), so refuse to start rather than fail intermittently in the field.
+    if let (Some(m), Some(mi)) = (&mtls, &machine) {
+        for user_ca in m.ca_certs() {
+            for machine_ca in mi.ca_certs() {
+                if user_ca.subject_name().try_cmp(machine_ca.subject_name()).ok()
+                    == Some(std::cmp::Ordering::Equal)
+                    && user_ca
+                        .public_key()
+                        .and_then(|a| machine_ca.public_key().map(|b| a.public_eq(&b)))
+                        .unwrap_or(false)
+                {
+                    fatal(
+                        "[mtls].client_ca and [machine_identity].machine_ca share a certificate — \
+                         the user and machine identities must be issued by different CAs so they \
+                         can be told apart",
+                    );
+                }
+            }
+        }
+    }
+
     // Attestation bypass builds on baseline mTLS and matches the mTLS-verified
     // identity against a subject allowlist plus a source-IP range.
     let bypass = passthrough::from_config(&config.proxy_bypass, mtls.is_some())
@@ -429,6 +518,7 @@ fn main() {
         args.insecure_upstream,
         rate_limiter,
         bypass,
+        machine,
     )
     .unwrap_or_else(|e| fatal(e));
 

@@ -57,8 +57,14 @@ impl ClientCert {
             .map(String::as_str)
     }
 
-    /// Extract the identity from a verified peer certificate.
-    fn from_cert(cert: &X509Ref) -> Self {
+    /// Extract the identity from a certificate.
+    ///
+    /// Shared with [`crate::machine`], which needs the same Common Name and
+    /// SubjectAltName semantics for the machine certificate — keeping one
+    /// implementation stops the two identity paths from drifting apart.  Note
+    /// this only *reads* the subject; the caller is responsible for having
+    /// established that the certificate is trusted.
+    pub fn from_cert(cert: &X509Ref) -> Self {
         let common_name = cert
             .subject_name()
             .entries_by_nid(Nid::COMMONNAME)
