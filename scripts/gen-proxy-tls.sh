@@ -21,13 +21,16 @@
 #       --cert /path/to/server.crt --key /path/to/server.key
 #
 # Usage:
-#   ./scripts/gen-proxy-tls.sh [--name NAME] [--host HOST]
+#   ./scripts/gen-proxy-tls.sh [--name NAME] [--host HOST] [--san HOST]
 #                              [--cert FILE --key FILE] [--force]
 #
 #   --name NAME   Label for this proxy.  Names the output files and should
 #                 match the "name" of the proxy's entry in
 #                 config/site-config.json.  Default: "proxy".
 #   --host HOST   CN/SAN for a generated self-signed cert.  Default: localhost.
+#   --san HOST    Additional DNS SAN for a generated certificate. Repeatable;
+#                 useful when the same development proxy is reached by both a
+#                 host name and a Compose service name.
 #   --cert/--key  Import an existing cert+key instead of generating one.
 #   --force       Overwrite existing cert/key files for this name.
 #
@@ -67,17 +70,19 @@ NAME="proxy"
 PROXY_HOST="localhost"
 CERT_IN=""
 KEY_IN=""
+EXTRA_SANS=()
 FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --name)  NAME="$2";       shift 2 ;;
         --host)  PROXY_HOST="$2"; shift 2 ;;
+        --san)   EXTRA_SANS+=("$2"); shift 2 ;;
         --cert)  CERT_IN="$2";    shift 2 ;;
         --key)   KEY_IN="$2";     shift 2 ;;
         --force) FORCE=1;         shift ;;
         -h|--help)
-            echo "Usage: $0 [--name NAME] [--host HOST] [--cert FILE --key FILE] [--force]"
+            echo "Usage: $0 [--name NAME] [--host HOST] [--san HOST] [--cert FILE --key FILE] [--force]"
             exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -134,9 +139,13 @@ else
     # followed by an unknown "/CN" attribute, warns, and silently drops the CN —
     # producing a cert with no subject at all.  MSYS_NO_PATHCONV (set at the top)
     # is what makes the plain "/CN=..." form safe under Git Bash.
+    SAN_LIST="DNS:$PROXY_HOST"
+    for san in "${EXTRA_SANS[@]}"; do
+        SAN_LIST+=",DNS:$san"
+    done
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -subj "/CN=$PROXY_HOST" \
-        -addext "subjectAltName=DNS:$PROXY_HOST" \
+        -addext "subjectAltName=$SAN_LIST" \
         -keyout "$KEY_FILE" -out "$CERT_FILE"
     chmod 600 "$KEY_FILE"
 fi

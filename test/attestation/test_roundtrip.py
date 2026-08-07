@@ -10,10 +10,11 @@ Requirements:
 
 Usage (from repo root):
     scripts/gen-attest-key.sh
-    scripts/gen-proxy-tls.sh
+    scripts/gen-proxy-tls.sh --name compose-proxy --host proxy --san localhost
     scripts/gen-user-cert.sh
+    scripts/gen-machine-cert.sh --cn machine-client
     docker compose -f test/minimal-proxy-stack/compose.yml up --build -d
-    python3 test/attestation/test_roundtrip.py
+    docker compose -f test/minimal-proxy-stack/compose.yml run --build --use-aliases --rm machine-client
 
 mTLS:
     If the proxy is run with [mtls] enabled, it requires a client certificate.
@@ -28,13 +29,16 @@ mTLS:
 Machine identity:
     If the proxy is run with [machine_identity] enabled, every request must also
     carry X-DenBrowser-Machine-Cert (base64 DER) naming the workstation:
+        # Direct host run:
         scripts/gen-machine-cert.sh --cn localhost
+        # Compose service run:
+        scripts/gen-machine-cert.sh --cn machine-client
         # proxy config: [machine_identity] enabled = true,
         #               machine_ca = "build/machine-ca.crt"
-    This test auto-sends build/machine-cert.crt when it exists (override with
-    DENBROWSER_MACHINE_CERT).  Use --cn localhost: the proxy requires the name to
-    forward-resolve to the connecting address, and these requests arrive from
-    127.0.0.1.  With the layer disabled the header is simply ignored.
+    Set DENBROWSER_MACHINE_IDENTITY_ENABLED=1 to send the certificate and run
+    the machine-identity cases.  Certificate-file existence alone is not used
+    as a proxy for server configuration: a disabled proxy deliberately ignores
+    this header, so negative cases expecting 403 would otherwise be misleading.
 """
 
 import base64
@@ -59,6 +63,17 @@ PROXY_URL = os.environ.get("DENBROWSER_PROXY_URL", "https://localhost:8081")
 PUBLIC_KEY_PATH = os.environ.get("PUBLIC_KEY_PATH", "build/proxy-public.pem")
 TLS_CERT_PATH = os.environ.get("DENBROWSER_TLS_CERT", "build/proxy-tls.crt")
 
+
+def _env_flag(name):
+    """Read a strict opt-in boolean from the environment."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+MACHINE_IDENTITY_ENABLED = _env_flag("DENBROWSER_MACHINE_IDENTITY_ENABLED")
+MACHINE_MISMATCH_CN = os.environ.get(
+    "DENBROWSER_MACHINE_MISMATCH_CN", "ws-4417.corp.example.com"
+)
+
 # When the proxy uses a self-signed dev cert, `requests` needs to be told to
 # trust it.  Set VERIFY=False to skip TLS verification entirely (CI-only).
 if TLS_CERT_PATH and os.path.exists(TLS_CERT_PATH):
@@ -80,8 +95,9 @@ else:
 # Machine certificate for the proxy's [machine_identity] layer
 # (scripts/gen-machine-cert.sh).  Unlike the client cert this never enters the
 # TLS handshake — a handshake carries one client chain and the user cert already
-# holds it — so it rides a header instead.  Sent only if present; a proxy with
-# the layer disabled ignores it.
+# holds it — so it rides a header instead.  It is sent only when the explicit
+# feature flag above is set; merely having test material on disk says nothing
+# about whether the target proxy enabled the layer.
 MACHINE_CERT_PATH = os.environ.get("DENBROWSER_MACHINE_CERT", "build/machine-cert.crt")
 MACHINE_CA_PATH = os.environ.get("DENBROWSER_MACHINE_CA", "build/machine-ca.crt")
 MACHINE_CA_KEY_PATH = os.environ.get("DENBROWSER_MACHINE_CA_KEY", "build/machine-ca.key")
@@ -100,7 +116,11 @@ def _der_b64(pem_path):
     return base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()
 
 
-MACHINE_CERT = _der_b64(MACHINE_CERT_PATH) if os.path.exists(MACHINE_CERT_PATH) else None
+MACHINE_CERT = (
+    _der_b64(MACHINE_CERT_PATH)
+    if MACHINE_IDENTITY_ENABLED and os.path.exists(MACHINE_CERT_PATH)
+    else None
+)
 
 
 def _load_public_key(path):
@@ -189,7 +209,10 @@ def _run(pub_key):
         # Every request carries the machine certificate unless a case is
         # deliberately testing its absence or a bad value, so the existing
         # attestation cases keep passing with [machine_identity] enabled.
-        cert = MACHINE_CERT if machine is _DEFAULT else machine
+        if machine is _DEFAULT:
+            cert = MACHINE_CERT if MACHINE_IDENTITY_ENABLED else None
+        else:
+            cert = machine
         if cert is not None:
             full["X-DenBrowser-Machine-Cert"] = cert
         try:
@@ -318,10 +341,10 @@ def _run(pub_key):
           method="GET", path="/", body=None, headers=h, expect=200)
 
     # ── Machine identity ────────────────────────────────────────────────────
-    # Skipped entirely when no machine cert is available, so this file still
-    # runs against a proxy with the layer switched off.
-    if MACHINE_CERT is None:
-        print("  SKIP  machine-identity cases (no build/machine-cert.crt)")
+    # Server configuration is explicit. A certificate may be present for a
+    # different stack while this target has the layer disabled.
+    if not MACHINE_IDENTITY_ENABLED:
+        print("  SKIP  machine-identity cases (feature flag is off)")
     else:
         def machine_check(label, *, machine, expect):
             ts = str(int(time.time()))
@@ -353,7 +376,7 @@ def _run(pub_key):
 
         # Issued by the *right* CA, but naming a machine this request did not
         # come from — the check that stands in for proof of possession.
-        elsewhere = _mint_machine_cert("ws-4417.corp.example.com")
+        elsewhere = _mint_machine_cert(MACHINE_MISMATCH_CN)
         if elsewhere is None:
             print("  SKIP  wrong-host case (no build/machine-ca.key)")
         else:
@@ -371,11 +394,22 @@ if __name__ == "__main__":
         print("Run scripts/gen-attest-key.sh first.")
         sys.exit(1)
 
+    if MACHINE_IDENTITY_ENABLED and MACHINE_CERT is None:
+        print(
+            "ERROR: machine identity is enabled but no certificate exists at "
+            f"{MACHINE_CERT_PATH}"
+        )
+        sys.exit(1)
+
     pub_key = _load_public_key(PUBLIC_KEY_PATH)
     print(f"Public key  : {PUBLIC_KEY_PATH}")
     print(f"Proxy URL   : {PROXY_URL}")
     print(f"TLS verify  : {VERIFY!r}")
     print(f"Client cert : {CLIENT_CERT[0] if CLIENT_CERT else '(none)'}")
-    print(f"Machine cert: {MACHINE_CERT_PATH if MACHINE_CERT else '(none)'}\n")
+    print(f"Machine cert: {MACHINE_CERT_PATH if MACHINE_CERT else '(none)'}")
+    print(
+        "Machine identity tests: "
+        f"{'enabled' if MACHINE_IDENTITY_ENABLED else 'disabled'}\n"
+    )
 
     sys.exit(0 if _run(pub_key) else 1)

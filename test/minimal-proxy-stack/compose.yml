@@ -65,6 +65,53 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  # One-shot integration client. It joins the proxy's ingress bridge directly,
+  # so the proxy sees this container's address rather than a published-port NAT
+  # gateway. Docker DNS resolves the service name "machine-client" to the same
+  # address when `docker compose run --use-aliases` is used, satisfying the
+  # positive machine-identity check without static IPs.
+  machine-client:
+    profiles: ["test"]
+    image: denbrowser/roundtrip-client:dev
+    build:
+      context: ..
+      dockerfile: minimal-proxy-stack/Dockerfile.client
+    environment:
+      DENBROWSER_WAIT_HOST: proxy
+      DENBROWSER_WAIT_PORT: "8081"
+      DENBROWSER_PROXY_URL: https://proxy:8081
+      PUBLIC_KEY_PATH: /run/secrets/proxy_attestation_public_key
+      DENBROWSER_TLS_CERT: /run/secrets/proxy_tls_cert
+      DENBROWSER_CLIENT_CERT: /run/secrets/user_cert
+      DENBROWSER_CLIENT_KEY: /run/secrets/user_key
+      DENBROWSER_MACHINE_IDENTITY_ENABLED: "1"
+      DENBROWSER_MACHINE_CERT: /run/secrets/machine_cert
+      DENBROWSER_MACHINE_CA: /run/secrets/machine_ca
+      DENBROWSER_MACHINE_CA_KEY: /run/secrets/machine_ca_key
+      # The proxy resolves this name on its separate upstream network. A cert
+      # naming it is validly issued but cannot match this client's source IP.
+      DENBROWSER_MACHINE_MISMATCH_CN: upstream
+      PYTHONDONTWRITEBYTECODE: "1"
+    secrets:
+      - proxy_tls_cert
+      - proxy_attestation_public_key
+      - user_cert
+      - user_key
+      - machine_cert
+      - machine_ca
+      - machine_ca_key
+    networks:
+      - ingress
+    depends_on:
+      proxy:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
 configs:
   proxy_config:
     file: ./config.toml
@@ -75,15 +122,25 @@ configs:
 
 secrets:
   proxy_tls_cert:
-    file: ../../build/proxy-tls.crt
+    file: ../../build/compose-proxy-tls.crt
   proxy_tls_key:
-    file: ../../build/proxy-tls.key
+    file: ../../build/compose-proxy-tls.key
   proxy_attestation_key:
     file: ../../build/proxy-private.pem
+  proxy_attestation_public_key:
+    file: ../../build/proxy-public.pem
   user_ca:
     file: ../../build/user-ca.crt
+  user_cert:
+    file: ../../build/user-cert.crt
+  user_key:
+    file: ../../build/user-cert.key
   machine_ca:
     file: ../../build/machine-ca.crt
+  machine_ca_key:
+    file: ../../build/machine-ca.key
+  machine_cert:
+    file: ../../build/machine-cert.crt
 
 networks:
   ingress:

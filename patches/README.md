@@ -43,3 +43,4 @@ that line once the patch contains real diff content.
 | Preferences/policies | `browser/components/enterprisepolicies/` |
 | New-tab page routing | `browser/components/about/AboutRedirector.cpp` + `components.conf` (registers `about:denbrowserhome`), `browser/modules/AboutNewTab.sys.mjs` (pins `newTabURL`), `browser/base/content/denbrowser-newtab.{html,css}` |
 | Bookmarks (read-only) | `toolkit/components/places/Bookmarks.sys.mjs` |
+| Windows machine-certificate header | `netwerk/base/DenBrowserAttest.cpp` |

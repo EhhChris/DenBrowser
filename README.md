@@ -362,8 +362,38 @@ none of the others:
 
 **Machine identity** (`[machine_identity]`) records *which workstation* a
 request came from.  The browser sends its machine certificate as base64 DER in
-`X-DenBrowser-Machine-Cert` on every request; the proxy verifies it and writes
-the hostname into the audit trail.
+`X-DenBrowser-Machine-Cert` on every request claimed by the configured
+attestation proxy table; the proxy verifies it and writes the hostname into the
+audit trail.
+
+On Windows, patch 024 obtains that certificate directly from the operating
+system certificate manager. It searches the managed and ordinary
+`LocalMachine\MY` and `CurrentUser\MY` (Personal) stores for a currently valid
+certificate whose Common Name exactly matches the workstation's FQDN, DNS
+hostname, or NetBIOS name. Managed stores and machine scope take precedence;
+during enrollment overlap, the matching certificate with the latest expiry is
+used. The selected public DER is cached until DenBrowser restarts. No private
+key is opened or used. Non-Windows builds omit the header.
+
+Provisioning should leave only the intended issuer's certificate with a
+matching workstation CN in the highest-priority populated store. If unrelated
+issuers provide multiple matching certificates there, the browser cannot know
+which CA the proxy trusts; it chooses the latest-expiring certificate and the
+proxy safely rejects it if it chains to the wrong CA.
+
+For a local Windows test, generate the certificate with the machine's real DNS
+name and import the public certificate into either Personal store:
+
+```powershell
+# Current user (no elevation):
+certutil -user -addstore My build\machine-cert.crt
+
+# Or, from an elevated shell, local machine:
+certutil -addstore My build\machine-cert.crt
+```
+
+Production certificates should normally be enrolled through enterprise policy.
+Restart DenBrowser after enrollment or renewal so it refreshes the cached DER.
 
 It rides a header rather than the TLS handshake because a handshake carries
 exactly one client certificate chain and the user certificate already occupies
@@ -389,9 +419,9 @@ Three checks, cheapest first, so a bad certificate never reaches the resolver:
   **Deployment prerequisite:** because the forward-DNS check is unconditional,
   clients must reach the proxy on their own addresses.  Behind NAT, a VPN
   concentrator, or any shared egress the proxy sees the gateway address — which
-  is in no workstation's A record — and **every request is rejected**.  (This is
-  also why the Compose stack under `test/minimal-proxy-stack/` leaves the layer
-  off: Docker's port mapping is itself a NAT.)
+  is in no workstation's A record — and **every request is rejected**. The
+  Compose integration stack avoids its published-port NAT by running its test
+  client directly on the proxy's ingress bridge with a Docker DNS alias.
 
   Lookups are cached per hostname, so the check costs roughly one query per
   workstation per TTL — about 3 queries/s for a 1,000-machine fleet at the
@@ -513,5 +543,6 @@ for navigation.
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox. Also stamps the build id next to the version — `153.0esr (64-bit) (build a1b2c3d)` — from the DenBrowser repo commit, injected into `aboutDialog.js` by `build.sh` Step 2.8 (`-dirty` suffix when the tree had uncommitted changes; hidden entirely when the build came from a non-git source tree). |
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
 | 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
+| 024 | `windows-machine-certificate-header` | Read the current workstation certificate's public DER from the Windows managed/ordinary Personal stores, require its CN to match the local Windows hostname, and attach it as `X-DenBrowser-Machine-Cert` only on requests claimed by the attestation proxy table. Caller-supplied values are stripped to prevent spoofing and redirect leakage; no private key is opened. |
 
 ---

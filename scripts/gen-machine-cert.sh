@@ -130,7 +130,8 @@ cat <<EOF
     #   enabled    = true
     #   machine_ca = "build/machine-ca.crt"
 
-    # roundtrip test:
+    # direct-host roundtrip test (generate with --cn localhost):
+    DENBROWSER_MACHINE_IDENTITY_ENABLED=1 \\
     DENBROWSER_MACHINE_CERT=build/machine-cert.crt \\
       python3 test/attestation/test_roundtrip.py
 
@@ -142,7 +143,17 @@ cat <<EOF
   start if [mtls].client_ca and [machine_identity].machine_ca share a cert.
 
   IMPORTANT — the proxy also requires "$CN" to resolve to the address the client
-  connects from.  For the local test stack that means generating this with
-  --cn localhost (or adding "$CN" to /etc/hosts), since requests arrive from
-  127.0.0.1.
+  connects from. Use --cn localhost for a client running directly on the host,
+  or --cn machine-client for test/minimal-proxy-stack's in-network Compose
+  client.
+
+  Windows browser integration (patch 024): generate with the workstation's
+  real FQDN, DNS hostname, or NetBIOS name, then import the public certificate
+  into a Personal store and restart DenBrowser:
+
+    certutil -user -addstore My build\\machine-cert.crt   # CurrentUser\\MY
+    certutil       -addstore My build\\machine-cert.crt   # LocalMachine\\MY (admin)
+
+  The browser reads only the public DER; this protocol does not use or prove
+  possession of the machine private key.
 EOF
