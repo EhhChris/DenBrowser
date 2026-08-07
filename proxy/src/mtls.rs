@@ -14,10 +14,11 @@
 //! callback does not re-verify — it only extracts the identity so the request
 //! path can read it (for logging, and for the bypass subject allowlist).
 //!
-//! mTLS is one orthogonal layer among three: it authenticates the *user/device*
-//! (client → proxy), TLS SPKI pinning authenticates the *proxy* to the browser
-//! (proxy → client), and attestation proves the request came from a genuine
-//! DenBrowser build and binds it against replay/tampering.  None replaces
+//! mTLS is one orthogonal layer among four: it authenticates the *user* (client
+//! → proxy), TLS SPKI pinning authenticates the *proxy* to the browser (proxy →
+//! client), attestation proves the request came from a genuine DenBrowser build
+//! and binds it against replay/tampering, and machine identity
+//! ([`crate::machine`]) names the *workstation* it came from.  None replaces
 //! another.
 
 use std::any::Any;

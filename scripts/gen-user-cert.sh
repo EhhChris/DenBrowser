@@ -15,7 +15,8 @@
 #   Unlike the attestation public key (gen-attest-key.sh) and the TLS SPKI pin
 #   (gen-proxy-tls.sh), nothing here is baked into the browser build — this is
 #   test/deployment material only.  mTLS authenticates the *user* to the proxy;
-#   it is a separate, orthogonal layer from those two.
+#   it is a separate, orthogonal layer from those two, and from the machine
+#   certificate (gen-machine-cert.sh) that names the workstation.
 #
 # Usage:
 #   ./scripts/gen-user-cert.sh                 # CN=denbrowser-user, 10y
