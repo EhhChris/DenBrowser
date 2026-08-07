@@ -462,6 +462,18 @@ fn main() {
                 });
             tls.set_ca_file(m.ca_path())
                 .unwrap_or_else(|e| fatal(format!("mTLS CA load failed ({}): {e}", m.ca_path())));
+            // Advertise the acceptable issuer(s) in the CertificateRequest.  The
+            // call above populates only the *verification* store
+            // (SSL_CTX_load_verify_locations) and leaves `certificate_authorities`
+            // empty, which tells the client "any certificate will do".  A browser
+            // whose store holds more than one client certificate then either
+            // prompts with a picker or offers the wrong one — and the wrong one
+            // fails the verification below, surfacing as a bare TLS error with no
+            // diagnostic.  Naming the CA lets the client filter to one identity.
+            for ca in m.ca_certs() {
+                tls.add_client_ca(ca)
+                    .unwrap_or_else(|e| fatal(format!("mTLS client CA list setup failed: {e}")));
+            }
             tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
             tls
         }
