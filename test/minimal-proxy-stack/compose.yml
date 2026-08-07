@@ -18,6 +18,7 @@ services:
       - proxy_tls_key
       - proxy_attestation_key
       - user_ca
+      - machine_ca
     ports:
       - "127.0.0.1:8081:8081"
     networks:
@@ -81,6 +82,8 @@ secrets:
     file: ../../build/proxy-private.pem
   user_ca:
     file: ../../build/user-ca.crt
+  machine_ca:
+    file: ../../build/machine-ca.crt
 
 networks:
   ingress:

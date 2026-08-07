@@ -24,6 +24,17 @@ mTLS:
     This test auto-presents build/user-cert.{crt,key} when they exist (override
     with DENBROWSER_CLIENT_CERT / DENBROWSER_CLIENT_KEY).  With no mTLS on the
     proxy, presenting the cert is harmless — the server never asks for it.
+
+Machine identity:
+    If the proxy is run with [machine_identity] enabled, every request must also
+    carry X-DenBrowser-Machine-Cert (base64 DER) naming the workstation:
+        scripts/gen-machine-cert.sh --cn localhost
+        # proxy config: [machine_identity] enabled = true,
+        #               machine_ca = "build/machine-ca.crt"
+    This test auto-sends build/machine-cert.crt when it exists (override with
+    DENBROWSER_MACHINE_CERT).  Use --cn localhost: the proxy requires the name to
+    forward-resolve to the connecting address, and these requests arrive from
+    127.0.0.1.  With the layer disabled the header is simply ignored.
 """
 
 import base64
@@ -66,6 +77,31 @@ if os.path.exists(CLIENT_CERT_PATH) and os.path.exists(CLIENT_KEY_PATH):
 else:
     CLIENT_CERT = None
 
+# Machine certificate for the proxy's [machine_identity] layer
+# (scripts/gen-machine-cert.sh).  Unlike the client cert this never enters the
+# TLS handshake — a handshake carries one client chain and the user cert already
+# holds it — so it rides a header instead.  Sent only if present; a proxy with
+# the layer disabled ignores it.
+MACHINE_CERT_PATH = os.environ.get("DENBROWSER_MACHINE_CERT", "build/machine-cert.crt")
+MACHINE_CA_PATH = os.environ.get("DENBROWSER_MACHINE_CA", "build/machine-ca.crt")
+MACHINE_CA_KEY_PATH = os.environ.get("DENBROWSER_MACHINE_CA_KEY", "build/machine-ca.key")
+
+# Sentinel distinguishing "caller said nothing, use the default cert" from
+# "caller explicitly wants no machine header".
+_DEFAULT = object()
+
+
+def _der_b64(pem_path):
+    """Load a PEM certificate and return its DER, base64 — the header format."""
+    from cryptography.x509 import load_pem_x509_certificate
+
+    with open(pem_path, "rb") as f:
+        cert = load_pem_x509_certificate(f.read())
+    return base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()
+
+
+MACHINE_CERT = _der_b64(MACHINE_CERT_PATH) if os.path.exists(MACHINE_CERT_PATH) else None
+
 
 def _load_public_key(path):
     with open(path, "rb") as f:
@@ -106,13 +142,56 @@ def _fresh_nonce_b64():
     return base64.b64encode(os.urandom(16)).decode()
 
 
+def _mint_machine_cert(cn):
+    """Mint a cert with the given CN, signed by the real machine CA.
+
+    Lets the negative cases exercise a *validly issued* certificate that still
+    must be refused — a name the proxy will not resolve to this client — which
+    is the check standing in for proof of possession.  Returns None when the CA
+    key is not available (a deployment-style run rather than a local one).
+    """
+    if not (os.path.exists(MACHINE_CA_PATH) and os.path.exists(MACHINE_CA_KEY_PATH)):
+        return None
+
+    import datetime
+
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    with open(MACHINE_CA_PATH, "rb") as f:
+        ca_cert = x509.load_pem_x509_certificate(f.read())
+    with open(MACHINE_CA_KEY_PATH, "rb") as f:
+        ca_key = serialization.load_pem_private_key(f.read(), password=None)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(generate_private_key(SECP256R1()).public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    return base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()
+
+
 def _run(pub_key):
     host = "localhost"
     passed = failed = 0
 
-    def check(label, *, method, path, body, headers, expect):
+    def check(label, *, method, path, body, headers, expect, machine=_DEFAULT):
         nonlocal passed, failed
         full = {**headers, "Host": host}
+        # Every request carries the machine certificate unless a case is
+        # deliberately testing its absence or a bad value, so the existing
+        # attestation cases keep passing with [machine_identity] enabled.
+        cert = MACHINE_CERT if machine is _DEFAULT else machine
+        if cert is not None:
+            full["X-DenBrowser-Machine-Cert"] = cert
         try:
             r = requests.request(method, f"{PROXY_URL}{path}", data=body,
                                  headers=full, timeout=5, verify=VERIFY,
@@ -238,6 +317,50 @@ def _run(pub_key):
     check("Future timestamp within 30s window",
           method="GET", path="/", body=None, headers=h, expect=200)
 
+    # ── Machine identity ────────────────────────────────────────────────────
+    # Skipped entirely when no machine cert is available, so this file still
+    # runs against a proxy with the layer switched off.
+    if MACHINE_CERT is None:
+        print("  SKIP  machine-identity cases (no build/machine-cert.crt)")
+    else:
+        def machine_check(label, *, machine, expect):
+            ts = str(int(time.time()))
+            nonce = _fresh_nonce_b64()
+            h = _make_attest(pub_key, nonce_b64=nonce, ts=ts, host=host,
+                             method="GET", path="/", body=b"")
+            check(label, method="GET", path="/", body=None, headers=h,
+                  expect=expect, machine=machine)
+
+        # A fully valid request — attestation *and* machine identity.
+        machine_check("Valid machine certificate accepted",
+                      machine=MACHINE_CERT, expect=200)
+
+        machine_check("Missing machine certificate rejected",
+                      machine=None, expect=403)
+
+        machine_check("Malformed machine certificate header rejected",
+                      machine="not-base64!!", expect=403)
+
+        # Well-formed base64 that is not a certificate.
+        machine_check("Non-certificate machine header rejected",
+                      machine=base64.b64encode(b"hello").decode(), expect=403)
+
+        # The user certificate is validly signed — by the wrong CA for this
+        # layer.  This is what stops the two identities being interchangeable.
+        if CLIENT_CERT:
+            machine_check("Machine certificate from the wrong CA rejected",
+                          machine=_der_b64(CLIENT_CERT_PATH), expect=403)
+
+        # Issued by the *right* CA, but naming a machine this request did not
+        # come from — the check that stands in for proof of possession.
+        elsewhere = _mint_machine_cert("ws-4417.corp.example.com")
+        if elsewhere is None:
+            print("  SKIP  wrong-host case (no build/machine-ca.key)")
+        else:
+            machine_check(
+                "Valid machine certificate for another host rejected",
+                machine=elsewhere, expect=403)
+
     print(f"\n  {passed} passed, {failed} failed")
     return failed == 0
 
@@ -252,6 +375,7 @@ if __name__ == "__main__":
     print(f"Public key  : {PUBLIC_KEY_PATH}")
     print(f"Proxy URL   : {PROXY_URL}")
     print(f"TLS verify  : {VERIFY!r}")
-    print(f"Client cert : {CLIENT_CERT[0] if CLIENT_CERT else '(none)'}\n")
+    print(f"Client cert : {CLIENT_CERT[0] if CLIENT_CERT else '(none)'}")
+    print(f"Machine cert: {MACHINE_CERT_PATH if MACHINE_CERT else '(none)'}\n")
 
     sys.exit(0 if _run(pub_key) else 1)

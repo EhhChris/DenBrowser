@@ -17,6 +17,33 @@ max_requests = 100
 enabled = true
 client_ca = "/run/secrets/user_ca"
 
+[machine_identity]
+# Off in this stack, and it cannot sensibly be switched on here.
+#
+# The layer requires the certificate's Common Name to forward-resolve to the
+# address the client connected from.  Compose publishes the listener through
+# Docker's port mapping, which is a NAT: every request arrives from the bridge
+# gateway (172.x.x.x), not from the client's own address, so no workstation
+# hostname can ever resolve to it.  That is the same shared-egress limitation
+# the layer has behind any NAT or VPN concentrator — it is a real deployment
+# constraint, not an artefact of this stack.
+#
+# To exercise the layer, run the proxy directly on the host instead, where the
+# client's address is preserved:
+#
+#   scripts/gen-machine-cert.sh --cn localhost
+#   # add to your proxy.toml:
+#   #   [machine_identity]
+#   #   enabled    = true
+#   #   machine_ca = "build/machine-ca.crt"
+#   DENBROWSER_MACHINE_CERT=build/machine-cert.crt \
+#     python3 test/attestation/test_roundtrip.py
+#
+# The machine_ca secret is wired up below so enabling this is a one-line change
+# once the deployment preserves client addresses.
+enabled = false
+machine_ca = "/run/secrets/machine_ca"
+
 [proxy_bypass]
 enabled = false
 
