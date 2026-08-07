@@ -42,6 +42,12 @@
 //! Step 4 sits before step 5 deliberately: an allowlist miss is rejected without
 //! a lookup, so a flood of bogus names cannot be turned into resolver load.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use openssl::stack::Stack;
 use openssl::x509::store::{X509Store, X509StoreBuilder};
@@ -69,6 +75,15 @@ pub enum MachineError {
     UnsafeCommonName,
     /// The Common Name matched no `allowed_hostnames` pattern.
     HostnameNotAllowed(String),
+    /// The Common Name does not resolve to the address the client connected
+    /// from, so the certificate is being presented from somewhere else.
+    HostnameAddressMismatch { cn: String, ip: IpAddr },
+    /// The name could not be resolved at all, and no usable cached answer was
+    /// available to fall back on.
+    HostnameUnresolvable(String),
+    /// The connection has no peer address to check the name against.  Should
+    /// not happen for a TCP/TLS client; rejected rather than waved through.
+    NoClientAddress,
 }
 
 impl std::fmt::Display for MachineError {
@@ -87,7 +102,54 @@ impl std::fmt::Display for MachineError {
             Self::HostnameNotAllowed(cn) => {
                 write!(f, "machine hostname {cn:?} matches no allowed_hostnames pattern")
             }
+            Self::HostnameAddressMismatch { cn, ip } => write!(
+                f,
+                "machine hostname {cn:?} does not resolve to the connecting address {ip}"
+            ),
+            Self::HostnameUnresolvable(cn) => {
+                write!(f, "machine hostname {cn:?} could not be resolved")
+            }
+            Self::NoClientAddress => {
+                write!(f, "connection has no peer address to verify the machine hostname against")
+            }
         }
+    }
+}
+
+/// Resolves a hostname to its addresses.
+///
+/// Behind a trait so the cache can be exercised without a network, and so the
+/// resolver can be swapped without touching the policy around it.
+#[async_trait]
+pub trait Resolver: Send + Sync {
+    async fn resolve(&self, host: &str) -> std::io::Result<Vec<IpAddr>>;
+}
+
+/// The real resolver: the system one, via `getaddrinfo` on tokio's blocking
+/// pool.  Going through the system resolver means `/etc/resolv.conf`,
+/// `/etc/hosts`, and any local caching daemon all behave as an operator
+/// expects.  `lookup_host` needs a port to form a socket address; it is
+/// discarded, only the addresses matter.
+pub struct SystemResolver;
+
+#[async_trait]
+impl Resolver for SystemResolver {
+    async fn resolve(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
+        let addrs = tokio::net::lookup_host((host, 0)).await?;
+        Ok(addrs.map(|sa| sa.ip()).collect())
+    }
+}
+
+/// One cached lookup.  A resolved-but-empty `addrs` is how a negative answer is
+/// represented, so both outcomes share the expiry and stale-fallback logic.
+struct CacheEntry {
+    addrs: Vec<IpAddr>,
+    fetched: Instant,
+}
+
+impl CacheEntry {
+    fn is_negative(&self) -> bool {
+        self.addrs.is_empty()
     }
 }
 
@@ -102,6 +164,14 @@ pub struct MachineIdentity {
     /// The parsed CA certificates, kept so `main` can check they do not overlap
     /// the mTLS user CA.
     ca_certs: Vec<X509>,
+    /// Hostname → addresses, so the forward check costs one query per
+    /// workstation per TTL rather than one per request.  Same shape as the
+    /// attestation nonce cache: a `Mutex<HashMap<..>>` swept on insert.
+    dns_cache: Mutex<HashMap<String, CacheEntry>>,
+    resolver: Box<dyn Resolver>,
+    dns_ttl: Duration,
+    dns_negative_ttl: Duration,
+    dns_stale_grace: Duration,
 }
 
 impl MachineIdentity {
@@ -110,6 +180,15 @@ impl MachineIdentity {
     /// would reject every request (or, worse, accept unverifiable ones).
     /// Mirrors [`crate::mtls::Mtls::from_config`].
     pub fn from_config(cfg: &MachineIdentityConfig) -> anyhow::Result<Option<Self>> {
+        Self::from_config_with_resolver(cfg, Box::new(SystemResolver))
+    }
+
+    /// As [`Self::from_config`], with the resolver supplied — the seam the
+    /// cache tests use to run offline and to drive resolver failures.
+    pub fn from_config_with_resolver(
+        cfg: &MachineIdentityConfig,
+        resolver: Box<dyn Resolver>,
+    ) -> anyhow::Result<Option<Self>> {
         if !cfg.enabled {
             return Ok(None);
         }
@@ -178,6 +257,11 @@ impl MachineIdentity {
             allowed,
             required: cfg.required,
             ca_certs: cas,
+            dns_cache: Mutex::new(HashMap::new()),
+            resolver,
+            dns_ttl: Duration::from_secs(cfg.dns_ttl_secs),
+            dns_negative_ttl: Duration::from_secs(cfg.dns_negative_ttl_secs),
+            dns_stale_grace: Duration::from_secs(cfg.dns_stale_grace_secs),
         }))
     }
 
@@ -245,6 +329,85 @@ impl MachineIdentity {
         }
 
         Ok(cn)
+    }
+
+    /// The whole check: verify the certificate, then confirm the name it claims
+    /// forward-resolves to the address the client actually connected from.
+    /// Returns the verified hostname for the audit trail.
+    pub async fn verify(
+        &self,
+        cert_b64: &str,
+        client_ip: Option<IpAddr>,
+    ) -> Result<String, MachineError> {
+        let cn = self.verify_cert(cert_b64)?;
+        let ip = client_ip.ok_or(MachineError::NoClientAddress)?;
+
+        let addrs = self.resolve_cached(&cn).await;
+        match addrs {
+            Some(addrs) if addrs.contains(&ip) => Ok(cn),
+            Some(addrs) if addrs.is_empty() => Err(MachineError::HostnameUnresolvable(cn)),
+            Some(_) => Err(MachineError::HostnameAddressMismatch { cn, ip }),
+            None => Err(MachineError::HostnameUnresolvable(cn)),
+        }
+    }
+
+    /// Addresses for `host`, from cache when fresh.  `None` means the resolver
+    /// failed and nothing usable was cached — the caller rejects.  An empty
+    /// vector is a cached *negative* answer (the name genuinely resolves to
+    /// nothing).
+    async fn resolve_cached(&self, host: &str) -> Option<Vec<IpAddr>> {
+        // Fast path: a fresh entry, positive or negative.
+        {
+            let cache = self.dns_cache.lock().unwrap();
+            if let Some(entry) = cache.get(host) {
+                let ttl = if entry.is_negative() {
+                    self.dns_negative_ttl
+                } else {
+                    self.dns_ttl
+                };
+                if entry.fetched.elapsed() < ttl {
+                    return Some(entry.addrs.clone());
+                }
+            }
+        }
+
+        match self.resolver.resolve(host).await {
+            Ok(addrs) => {
+                self.store(host.to_owned(), addrs.clone());
+                Some(addrs)
+            }
+            Err(_) => {
+                // The resolver is failing.  Rather than let that become a proxy
+                // outage, keep using the last good answer for a bounded grace
+                // period.  A *cold* cache still rejects, so this widens no hole
+                // — it only refuses to forget what we already proved.
+                let cache = self.dns_cache.lock().unwrap();
+                match cache.get(host) {
+                    Some(entry)
+                        if !entry.is_negative()
+                            && entry.fetched.elapsed() < self.dns_ttl + self.dns_stale_grace =>
+                    {
+                        Some(entry.addrs.clone())
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Insert an answer, sweeping expired entries on the way through so the map
+    /// stays bounded by the live fleet rather than by every name ever seen.
+    fn store(&self, host: String, addrs: Vec<IpAddr>) {
+        let mut cache = self.dns_cache.lock().unwrap();
+        let keep = self.dns_ttl + self.dns_stale_grace;
+        cache.retain(|_, e| e.fetched.elapsed() < keep);
+        cache.insert(
+            host,
+            CacheEntry {
+                addrs,
+                fetched: Instant::now(),
+            },
+        );
     }
 }
 
@@ -519,6 +682,269 @@ mod tests {
         .err()
         .expect("an unparseable glob must abort startup, not silently never match");
         assert!(err.to_string().contains("allowed_hostnames pattern"), "got: {err}");
+    }
+
+    // ── Forward-DNS check and its cache ──────────────────────────────────────
+
+    /// A scripted resolver: counts calls, and can be flipped to fail so the
+    /// stale-fallback path is exercised without a network.
+    struct FakeResolver {
+        addrs: Mutex<Vec<IpAddr>>,
+        failing: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeResolver {
+        fn new(addrs: &[&str]) -> Self {
+            Self {
+                addrs: Mutex::new(addrs.iter().map(|a| a.parse().unwrap()).collect()),
+                failing: std::sync::atomic::AtomicBool::new(false),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn set_failing(&self, v: bool) {
+            self.failing.store(v, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn set_addrs(&self, addrs: &[&str]) {
+            *self.addrs.lock().unwrap() = addrs.iter().map(|a| a.parse().unwrap()).collect();
+        }
+    }
+
+    #[async_trait]
+    impl Resolver for std::sync::Arc<FakeResolver> {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<IpAddr>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(std::io::Error::other("resolver down"));
+            }
+            Ok(self.addrs.lock().unwrap().clone())
+        }
+    }
+
+    /// A verifier trusting `ca` and using `resolver`, with the given TTLs.
+    fn verifier_with(
+        ca: &(X509, PKey<Private>),
+        resolver: std::sync::Arc<FakeResolver>,
+        ttl: u64,
+        negative_ttl: u64,
+        grace: u64,
+    ) -> MachineIdentity {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine-ca.pem");
+        std::fs::write(&path, ca.0.to_pem().unwrap()).unwrap();
+        MachineIdentity::from_config_with_resolver(
+            &MachineIdentityConfig {
+                dns_ttl_secs: ttl,
+                dns_negative_ttl_secs: negative_ttl,
+                dns_stale_grace_secs: grace,
+                ..cfg(path.to_str().unwrap())
+            },
+            Box::new(resolver),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn ip(s: &str) -> Option<IpAddr> {
+        Some(s.parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn accepts_when_the_name_resolves_to_the_client_address() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        let leaf = make_leaf("ws-4417.corp.example.com", &ca);
+        assert_eq!(
+            v.verify(&b64(&leaf), ip("10.4.2.17")).await.unwrap(),
+            "ws-4417.corp.example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_valid_cert_presented_from_another_address() {
+        // This is the check that carries the weight in place of proof of
+        // possession: a copied certificate only works from an address the name
+        // actually points at.
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        let leaf = make_leaf("ws-4417.corp.example.com", &ca);
+        let err = v.verify(&b64(&leaf), ip("192.0.2.99")).await.unwrap_err();
+        assert!(
+            matches!(&err, MachineError::HostnameAddressMismatch { cn, ip }
+                     if cn == "ws-4417.corp.example.com" && ip.to_string() == "192.0.2.99"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_when_there_is_no_client_address() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        let leaf = make_leaf("ws-4417.corp.example.com", &ca);
+        assert!(matches!(
+            v.verify(&b64(&leaf), None).await,
+            Err(MachineError::NoClientAddress)
+        ));
+        // Rejected before any lookup — nothing to look up against.
+        assert_eq!(r.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_requests_hit_the_cache_not_the_resolver() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+        for _ in 0..25 {
+            v.verify(&cert, ip("10.4.2.17")).await.unwrap();
+        }
+        assert_eq!(r.calls(), 1, "25 requests should cost exactly one lookup");
+    }
+
+    #[tokio::test]
+    async fn an_expired_entry_is_refetched() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        // Zero TTL: every request re-resolves.
+        let v = verifier_with(&ca, r.clone(), 0, 0, 3600);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+        v.verify(&cert, ip("10.4.2.17")).await.unwrap();
+        // A machine that moved is picked up rather than pinned by a stale entry.
+        r.set_addrs(&["10.4.2.18"]);
+        assert!(matches!(
+            v.verify(&cert, ip("10.4.2.17")).await,
+            Err(MachineError::HostnameAddressMismatch { .. })
+        ));
+        assert_eq!(r.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_resolver_outage_is_covered_by_a_stale_entry() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        // TTL 0 forces a refetch attempt on every call; the grace window is what
+        // keeps the last good answer usable once the resolver starts failing.
+        let v = verifier_with(&ca, r.clone(), 0, 0, 3600);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+
+        v.verify(&cert, ip("10.4.2.17")).await.expect("warms the cache");
+        r.set_failing(true);
+        v.verify(&cert, ip("10.4.2.17"))
+            .await
+            .expect("a resolver outage must not become a proxy outage");
+    }
+
+    #[tokio::test]
+    async fn a_resolver_outage_with_a_cold_cache_still_rejects() {
+        // The other half of the stale-fallback bargain: it only refuses to
+        // forget what was already proved, it never waves through the unproven.
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        r.set_failing(true);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+        assert!(matches!(
+            v.verify(&cert, ip("10.4.2.17")).await,
+            Err(MachineError::HostnameUnresolvable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_past_the_grace_window_stops_covering() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        // No grace at all: a failing resolver rejects immediately.
+        let v = verifier_with(&ca, r.clone(), 0, 0, 0);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+        v.verify(&cert, ip("10.4.2.17")).await.expect("warms the cache");
+        r.set_failing(true);
+        assert!(matches!(
+            v.verify(&cert, ip("10.4.2.17")).await,
+            Err(MachineError::HostnameUnresolvable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_name_resolving_to_nothing_is_rejected_and_negatively_cached() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&[]));
+        let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &ca));
+        for _ in 0..5 {
+            assert!(matches!(
+                v.verify(&cert, ip("10.4.2.17")).await,
+                Err(MachineError::HostnameUnresolvable(_))
+            ));
+        }
+        assert_eq!(
+            r.calls(),
+            1,
+            "an unprovisioned machine must not query on every request"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowlist_miss_never_reaches_the_resolver() {
+        // Ordering matters: a flood of bogus names must not be convertible into
+        // resolver load.
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine-ca.pem");
+        std::fs::write(&path, ca.0.to_pem().unwrap()).unwrap();
+        let v = MachineIdentity::from_config_with_resolver(
+            &MachineIdentityConfig {
+                allowed_hostnames: vec!["ws-*.corp.example.com".into()],
+                ..cfg(path.to_str().unwrap())
+            },
+            Box::new(r.clone()),
+        )
+        .unwrap()
+        .unwrap();
+
+        let cert = b64(&make_leaf("laptop-1.corp.example.com", &ca));
+        assert!(matches!(
+            v.verify(&cert, ip("10.4.2.17")).await,
+            Err(MachineError::HostnameNotAllowed(_))
+        ));
+        assert_eq!(r.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_cert_never_reaches_the_resolver() {
+        let ours = make_ca("Test Machine CA");
+        let theirs = make_ca("Someone Else CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        let v = verifier_with(&ours, r.clone(), 300, 30, 3600);
+        let cert = b64(&make_leaf("ws-4417.corp.example.com", &theirs));
+        assert!(matches!(
+            v.verify(&cert, ip("10.4.2.17")).await,
+            Err(MachineError::UntrustedChain(_))
+        ));
+        assert_eq!(r.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_swept_rather_than_growing_without_bound() {
+        let ca = make_ca("Test Machine CA");
+        let r = std::sync::Arc::new(FakeResolver::new(&["10.4.2.17"]));
+        // Everything expires immediately, so each insert sweeps the last.
+        let v = verifier_with(&ca, r.clone(), 0, 0, 0);
+        for i in 0..50 {
+            let cert = b64(&make_leaf(&format!("ws-{i}.corp.example.com"), &ca));
+            let _ = v.verify(&cert, ip("10.4.2.17")).await;
+        }
+        assert!(
+            v.dns_cache.lock().unwrap().len() <= 1,
+            "expired entries should be swept on insert, found {}",
+            v.dns_cache.lock().unwrap().len()
+        );
     }
 
     #[test]

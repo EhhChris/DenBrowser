@@ -60,3 +60,7 @@ tracing-appender   = "0.2"
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }
 tempfile  = "3"
+# `#[tokio::test]` for the machine-identity DNS cache tests.  Named explicitly
+# rather than relying on pingora's tokio features unifying in, so the tests keep
+# building if that ever changes.
+tokio     = { version = "1", features = ["macros", "rt"] }

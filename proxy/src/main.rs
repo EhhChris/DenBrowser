@@ -218,7 +218,7 @@ impl ProxyHttp for DenBrowserProxy {
             Some(verifier) => {
                 let presented = header_str(&session.req_header().headers, MACHINE_CERT_HEADER);
                 match presented {
-                    Some(cert_b64) => match verifier.verify_cert(&cert_b64) {
+                    Some(cert_b64) => match verifier.verify(&cert_b64, client_ip).await {
                         Ok(hostname) => Some(hostname),
                         Err(e) => {
                             warn!("rejected — {e}");
