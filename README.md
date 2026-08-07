@@ -424,14 +424,16 @@ Three checks, cheapest first, so a bad certificate never reaches the resolver:
   client directly on the proxy's ingress bridge with a Docker DNS alias.
 
   Lookups are cached per hostname, so the check costs roughly one query per
-  workstation per TTL — about 3 queries/s for a 1,000-machine fleet at the
-  300s default, not one query per request.  Failures are cached on a shorter
-  TTL, and a stale entry keeps covering a resolver outage for a bounded grace
-  period; a cold cache with a failing resolver still rejects.
+  workstation per TTL — about 0.07 queries/s for a 1,000-machine fleet at the
+  four-hour default, not one query per request.  Failures are cached on a
+  shorter TTL, and a stale entry keeps covering a resolver outage for a bounded
+  grace period; a cold cache with a failing resolver still rejects.
 
-  Disabled by default.  A bad config (missing/unreadable/empty CA bundle,
-  unparseable or uppercase hostname glob, CA overlapping the mTLS CA) aborts
-  startup.
+  Enabled by default.  Omitting `[machine_identity]` therefore fails closed at
+  startup until `machine_ca` is configured; deployments intentionally not using
+  this layer must set `enabled = false` explicitly.  A bad config
+  (missing/unreadable/empty CA bundle, unparseable or uppercase hostname glob,
+  CA overlapping the mTLS CA) aborts startup.
 
   ```toml
   [machine_identity]

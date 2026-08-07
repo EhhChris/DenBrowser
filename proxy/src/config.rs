@@ -184,8 +184,9 @@ pub struct MtlsConfig {
 /// concentrator, or any shared egress the proxy sees the gateway's address,
 /// which is in no workstation's A record, and every request is rejected.
 ///
-/// Disabled by default, so a proxy with no config (or `enabled = false`) ignores
-/// the header entirely and behaves exactly as before.
+/// Enabled by default.  A config that omits this section therefore fails closed
+/// at startup until it supplies `machine_ca`; set `enabled = false` explicitly
+/// only when machine identity is intentionally not deployed.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MachineIdentityConfig {
@@ -242,11 +243,11 @@ pub struct MachineIdentityConfig {
 impl Default for MachineIdentityConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             machine_ca: String::new(),
             required: true,
             allowed_hostnames: Vec::new(),
-            dns_ttl_secs: 300,
+            dns_ttl_secs: 14_400,
             dns_negative_ttl_secs: 30,
             dns_stale_grace_secs: 3600,
             partial_chain: false,
@@ -419,7 +420,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_disables_everything() {
+    fn default_leaves_required_proxy_fields_empty() {
         let c = Config::default();
         assert!(c.proxy.listen.is_empty());
         assert!(c.proxy.upstream.is_empty());
@@ -428,6 +429,7 @@ mod tests {
         assert!(!c.rate_limiting.enabled);
         assert_eq!(c.rate_limiting.max_requests, 0);
         assert!(c.rate_limiting.rules.is_empty());
+        assert!(c.machine_identity.enabled);
     }
 
     #[test]
@@ -501,9 +503,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_config_is_valid_and_off() {
+    fn empty_config_uses_feature_defaults() {
         let c: Config = toml::from_str("").unwrap();
         assert!(!c.rate_limiting.enabled);
+        assert!(c.machine_identity.enabled);
     }
 
     #[test]
@@ -566,14 +569,33 @@ mod tests {
     }
 
     #[test]
-    fn machine_identity_defaults_off() {
+    fn machine_identity_defaults_on() {
         let c = Config::default();
-        assert!(!c.machine_identity.enabled);
+        assert!(c.machine_identity.enabled);
         assert!(c.machine_identity.machine_ca.is_empty());
         assert!(c.machine_identity.allowed_hostnames.is_empty());
-        // Off by default, but *strict* once switched on.
+        // Enabled and strict by default; startup requires the operator to
+        // provide the machine CA unless explicitly disabled.
         assert!(c.machine_identity.required);
+        assert_eq!(c.machine_identity.dns_ttl_secs, 14_400);
         assert!(!c.machine_identity.partial_chain);
+    }
+
+    #[test]
+    fn checked_in_proxy_configs_parse_and_share_machine_defaults() {
+        let operational: Config = toml::from_str(include_str!("../proxy.toml")).unwrap();
+        let example: Config = toml::from_str(include_str!("../proxy.example.toml")).unwrap();
+
+        assert_eq!(operational.machine_identity.dns_ttl_secs, 14_400);
+        assert_eq!(example.machine_identity.dns_ttl_secs, 14_400);
+        assert!(operational.machine_identity.enabled);
+        assert!(example.machine_identity.enabled);
+        assert!(operational.machine_identity.required);
+        assert_eq!(operational.logging.file_prefix, "denbrowser-proxy.log");
+        assert_eq!(operational.logging.level, "info");
+        assert_eq!(operational.logging.rotation, "daily");
+        assert_eq!(operational.logging.max_files, 14);
+        assert!(operational.logging.stderr);
     }
 
     #[test]
@@ -582,6 +604,7 @@ mod tests {
         // this fails loudly if someone reintroduces per-field defaults.
         let parsed: Config = toml::from_str("[machine_identity]\n").unwrap();
         let default = MachineIdentityConfig::default();
+        assert_eq!(parsed.machine_identity.enabled, default.enabled);
         assert_eq!(parsed.machine_identity.required, default.required);
         assert_eq!(parsed.machine_identity.dns_ttl_secs, default.dns_ttl_secs);
         assert_eq!(
@@ -627,15 +650,17 @@ mod tests {
     }
 
     #[test]
-    fn config_without_machine_identity_still_parses() {
-        // A config file written before this section existed must keep working.
+    fn config_without_machine_identity_uses_enabled_default() {
+        // Omitting the section still parses, but now fails closed later during
+        // startup unless a machine CA is configured or the feature is disabled.
         let toml = r#"
             [mtls]
             enabled   = true
             client_ca = "/etc/denbrowser/user-ca.pem"
         "#;
         let c: Config = toml::from_str(toml).unwrap();
-        assert!(!c.machine_identity.enabled);
+        assert!(c.machine_identity.enabled);
+        assert!(c.machine_identity.machine_ca.is_empty());
     }
 
     #[test]

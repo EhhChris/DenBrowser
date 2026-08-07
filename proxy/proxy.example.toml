@@ -3,8 +3,9 @@
 # Copy this file to `proxy.toml` and edit it.  The proxy loads `proxy.toml` from
 # its working directory by default (override with `--config <path>` or the
 # DENBROWSER_CONFIG env var) and is REQUIRED: the proxy exits on startup if the
-# config file is missing or unparseable. Core listener, upstream, TLS, and
-# attestation values are required; optional features are off by default.
+# config file is missing or unparseable. Core listener, upstream, TLS,
+# attestation, and machine-identity values are required; other optional features
+# use the defaults documented below.
 #
 # Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
 # so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
@@ -125,8 +126,9 @@ client_ca = "/etc/denbrowser/user-ca.pem"
 # concentrator, or any shared egress the proxy sees the gateway address, which
 # is in no workstation's A record, and every request is rejected.
 #
-# Disabled by default: with enabled = false the header is ignored entirely.
-enabled = false
+# Enabled by default: set enabled = false explicitly only when machine identity
+# is intentionally not deployed.
+enabled = true
 
 # PEM bundle of CA certificate(s) that presented machine certs must chain to.
 # Required when enabled. MUST be a different CA from [mtls].client_ca — the two
@@ -149,8 +151,8 @@ machine_ca = "/etc/denbrowser/machine-ca.pem"
 
 # Forward-DNS cache. Workstation A records are stable for hours, so this is what
 # keeps the check off the resolver: one query per workstation per window rather
-# than one per request. A 1,000-machine fleet at the default costs ~3 queries/s.
-# dns_ttl_secs = 300
+# than one per request. A 1,000-machine fleet at the default costs ~0.07 queries/s.
+# dns_ttl_secs = 14400
 #
 # Failed lookups are cached too, on a shorter TTL, so one unprovisioned machine
 # cannot query on every request — short enough that a freshly registered machine

@@ -992,7 +992,10 @@ mod tests {
     #[test]
     fn from_config_disabled_is_none() {
         assert!(
-            MachineIdentity::from_config(&MachineIdentityConfig::default())
+            MachineIdentity::from_config(&MachineIdentityConfig {
+                enabled: false,
+                ..MachineIdentityConfig::default()
+            })
                 .unwrap()
                 .is_none()
         );
