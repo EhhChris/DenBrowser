@@ -34,13 +34,14 @@
 //! Cheapest first, so a bad certificate never reaches the resolver:
 //!
 //! 1. base64-decode and parse the DER
-//! 2. chain-verify against `machine_ca`
-//! 3. extract the Common Name, lowercase it, reject control characters
-//! 4. match it against the `allowed_hostnames` globs (in memory)
+//! 2. extract the Common Name, lowercase it, reject control characters
+//! 3. match it against the `allowed_hostnames` globs (in memory)
+//! 4. chain-verify against `machine_ca`
 //! 5. forward-resolve it and require the client IP among the answers
 //!
-//! Step 4 sits before step 5 deliberately: an allowlist miss is rejected without
-//! a lookup, so a flood of bogus names cannot be turned into resolver load.
+//! Steps 2 and 3 inspect an untrusted certificate only to reject it early; its
+//! claimed name is not returned or resolved until step 4 establishes trust.
+//! This means an allowlist miss reaches neither signature verification nor DNS.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -276,9 +277,10 @@ impl MachineIdentity {
         &self.ca_certs
     }
 
-    /// Steps 1–4: decode, chain-verify, extract and sanitize the Common Name,
-    /// and match it against the allowlist.  Returns the normalized (lowercase)
-    /// hostname.  The forward-DNS check is applied separately by the caller.
+    /// Steps 1–4: decode, extract and sanitize the Common Name, match it against
+    /// the allowlist, then chain-verify.  Returns the normalized (lowercase)
+    /// hostname only after trust is established.  The forward-DNS check is
+    /// applied separately by the caller.
     pub fn verify_cert(&self, cert_b64: &str) -> Result<String, MachineError> {
         use base64::Engine as _;
 
@@ -287,24 +289,9 @@ impl MachineIdentity {
             .map_err(|_| MachineError::NotBase64)?;
         let cert = X509::from_der(&der).map_err(|_| MachineError::NotDer)?;
 
-        // Chain-verify against the machine CA.  The presented certificate is a
-        // bare leaf, so the untrusted-chain pool is empty.
-        let empty: Stack<X509> = Stack::new().map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
-        let mut ctx =
-            X509StoreContext::new().map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
-        // `init` installs a guard that calls X509_STORE_CTX_cleanup when the
-        // closure returns, so `error()` has to be read *inside* it — afterwards
-        // the context has already been torn down.
-        let (ok, reason) = ctx
-            .init(&self.store, &cert, &empty, |c| {
-                let ok = c.verify_cert()?;
-                Ok((ok, c.error().to_string()))
-            })
-            .map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
-        if !ok {
-            return Err(MachineError::UntrustedChain(reason));
-        }
-
+        // Inspect the claimed identity before doing signature verification, but
+        // use it only for rejection at this stage.  An untrusted name must never
+        // be returned, logged, or sent to the resolver.
         // Reuse the mTLS layer's subject extraction so CN/SAN semantics cannot
         // drift between the two certificate-identity paths.
         let identity = ClientCert::from_cert(&cert);
@@ -328,6 +315,26 @@ impl MachineIdentity {
             return Err(MachineError::HostnameNotAllowed(cn));
         }
 
+        // The claimed name is structurally acceptable and in policy.  Now
+        // chain-verify against the machine CA.  The presented certificate is a
+        // bare leaf, so the untrusted-chain pool is empty.
+        let empty: Stack<X509> =
+            Stack::new().map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
+        let mut ctx =
+            X509StoreContext::new().map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
+        // `init` installs a guard that calls X509_STORE_CTX_cleanup when the
+        // closure returns, so `error()` has to be read *inside* it — afterwards
+        // the context has already been torn down.
+        let (ok, reason) = ctx
+            .init(&self.store, &cert, &empty, |c| {
+                let ok = c.verify_cert()?;
+                Ok((ok, c.error().to_string()))
+            })
+            .map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
+        if !ok {
+            return Err(MachineError::UntrustedChain(reason));
+        }
+
         Ok(cn)
     }
 
@@ -339,8 +346,8 @@ impl MachineIdentity {
         cert_b64: &str,
         client_ip: Option<IpAddr>,
     ) -> Result<String, MachineError> {
-        let cn = self.verify_cert(cert_b64)?;
         let ip = client_ip.ok_or(MachineError::NoClientAddress)?;
+        let cn = self.verify_cert(cert_b64)?;
 
         let addrs = self.resolve_cached(&cn).await;
         match addrs {
@@ -639,6 +646,24 @@ mod tests {
         // Signed by the right CA, but not a name this proxy accepts.
         let err = v
             .verify_cert(&b64(&make_leaf("laptop-1.corp.example.com", &ca)))
+            .unwrap_err();
+        assert!(
+            matches!(&err, MachineError::HostnameNotAllowed(h) if h == "laptop-1.corp.example.com"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_disallowed_hostname_before_chain_verification() {
+        let ours = make_ca("Test Machine CA");
+        let theirs = make_ca("Someone Else CA");
+        let v = verifier(&ours, &["ws-*.corp.example.com"]);
+
+        // Both checks would fail.  The allowlist result proves that the cheap
+        // rejection happens before the certificate's foreign signature would
+        // reach X.509 chain verification.
+        let err = v
+            .verify_cert(&b64(&make_leaf("laptop-1.corp.example.com", &theirs)))
             .unwrap_err();
         assert!(
             matches!(&err, MachineError::HostnameNotAllowed(h) if h == "laptop-1.corp.example.com"),

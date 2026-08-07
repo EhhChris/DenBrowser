@@ -204,28 +204,17 @@ impl ProxyHttp for DenBrowserProxy {
             return Ok(false);
         }
 
-        // Machine identity: which workstation this came from.  Runs after bypass
-        // (trusted infrastructure that cannot run the attestation client has no
-        // machine certificate either, so gating it would break those callers)
-        // and before attestation, so a request that cannot name its machine is
-        // shed before the crypto path.
-        //
-        // The verified hostname is carried into the accept log below; it grants
-        // nothing on its own.  See `machine` for what this does and does not
-        // prove.
-        let machine_host = match &self.machine {
+        // Machine-identity preflight.  A required missing header is as cheap to
+        // reject as a missing attestation header, but defer all certificate
+        // parsing, chain crypto, and DNS until the attestation token has passed.
+        // This prevents a copied public machine certificate from making bogus
+        // attestation traffic consume the more expensive machine path.
+        let machine_cert = match &self.machine {
             None => None,
             Some(verifier) => {
                 let presented = header_str(&session.req_header().headers, MACHINE_CERT_HEADER);
                 match presented {
-                    Some(cert_b64) => match verifier.verify(&cert_b64, client_ip).await {
-                        Ok(hostname) => Some(hostname),
-                        Err(e) => {
-                            warn!("rejected — {e}");
-                            let _ = session.respond_error(403).await;
-                            return Ok(true);
-                        }
-                    },
+                    Some(cert_b64) => Some(cert_b64),
                     // Absent.  Rejected unless the operator is mid-rollout and
                     // has deliberately relaxed `required`.
                     None if verifier.required() => {
@@ -237,7 +226,6 @@ impl ProxyHttp for DenBrowserProxy {
                 }
             }
         };
-        let machine_log = machine_host.as_deref().unwrap_or("-");
 
         let req = session.req_header();
 
@@ -282,6 +270,28 @@ impl ProxyHttp for DenBrowserProxy {
                 }
             }
         };
+
+        // Machine identity: which workstation this came from.  Attestation has
+        // now passed, but no request body has been read and no upstream has been
+        // contacted.  A machine failure therefore still fails closed without
+        // paying the body-buffering cost, while malformed attestation never
+        // reaches certificate chain verification or DNS.
+        //
+        // The verified hostname is carried into the accept log below; it grants
+        // nothing on its own.  See `machine` for what this does and does not
+        // prove.
+        let machine_host = match (&self.machine, machine_cert.as_deref()) {
+            (Some(verifier), Some(cert_b64)) => match verifier.verify(cert_b64, client_ip).await {
+                Ok(hostname) => Some(hostname),
+                Err(e) => {
+                    warn!("rejected — {e}");
+                    let _ = session.respond_error(403).await;
+                    return Ok(true);
+                }
+            },
+            _ => None,
+        };
+        let machine_log = machine_host.as_deref().unwrap_or("-");
 
         // Unbound upload: no body hash to verify.  Commit the nonce now (there is
         // no phase 2 to defer it to) and return without draining the body so
