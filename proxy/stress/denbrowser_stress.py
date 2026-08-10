@@ -153,6 +153,20 @@ class Config:
     timeout: float
     pub_key: object
     client_cert: object = None     # requests `cert` arg: (crt, key) tuple, or None
+    machine_cert: object = None    # base64 DER for X-DenBrowser-Machine-Cert, or None
+
+    def base_headers(self) -> dict:
+        """Per-request headers every generator shares.
+
+        The machine certificate rides here rather than in `make_headers`
+        because it is independent of the attestation token — the invalid-token
+        generators must still present a *valid* machine identity, so that what
+        they measure is the attestation reject path and not this one.
+        """
+        h = {"Host": self.host}
+        if self.machine_cert:
+            h["X-DenBrowser-Machine-Cert"] = self.machine_cert
+        return h
 
 
 # ── Token / header construction (mirrors DenBrowserAttest.cpp AddAttestHeaders)
@@ -335,7 +349,7 @@ class ReplayGen:
         try:
             r = sess.request(
                 spec.method, self.cfg.url + spec.path, data=spec.body,
-                headers={**spec.headers, "Host": self.cfg.host},
+                headers={**spec.headers, **self.cfg.base_headers()},
                 timeout=self.cfg.timeout, verify=self.cfg.verify,
                 cert=self.cfg.client_cert,
             )
@@ -547,7 +561,7 @@ def run_stage(cfg: Config, gen: Generator, session_factory, *, concurrency: int,
         sess = session_factory()
         while take_slot():
             spec = gen.next()
-            headers = {**spec.headers, "Host": cfg.host}
+            headers = {**spec.headers, **cfg.base_headers()}
             t0 = time.monotonic()
             try:
                 r = sess.request(spec.method, cfg.url + spec.path, data=spec.body,
@@ -724,6 +738,12 @@ def parse_args(argv):
     p.add_argument("--client-key", default=os.environ.get("DENBROWSER_CLIENT_KEY",
                    "build/user-cert.key"),
                    help="private key for --client-cert")
+    p.add_argument("--machine-cert", default=os.environ.get("DENBROWSER_MACHINE_CERT",
+                   "build/machine-cert.crt"),
+                   help="machine cert for the proxy's [machine_identity] layer "
+                        "(scripts/gen-machine-cert.sh); sent only if it exists. "
+                        "Its CN must resolve to this host's address, so generate "
+                        "it with --cn matching where the load is driven from")
 
     p.add_argument("-m", "--mode", default="mixed", choices=ALL_MODES,
                    help="traffic mode (default: mixed). Single-category modes "
@@ -805,6 +825,21 @@ def resolve_client_cert(args):
     return None
 
 
+def resolve_machine_cert(args):
+    """Machine cert for [machine_identity], as base64 DER for the header.
+
+    Only the public certificate is needed — this layer carries no proof of
+    possession, so there is no key to load.  Sent only when the file exists; a
+    proxy with the layer disabled ignores the header."""
+    if not (args.machine_cert and os.path.exists(args.machine_cert)):
+        return None
+    from cryptography.x509 import load_pem_x509_certificate
+
+    with open(args.machine_cert, "rb") as f:
+        cert = load_pem_x509_certificate(f.read())
+    return base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()
+
+
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if args.seed is not None:
@@ -825,6 +860,7 @@ def main(argv=None):
         timeout=args.timeout,
         pub_key=pub_key,
         client_cert=resolve_client_cert(args),
+        machine_cert=resolve_machine_cert(args),
     )
     thresholds = Thresholds(args.max_error_rate, args.max_p99_ms, args.valid_fail_rate)
     weights = weights_for_mode(args.mode, None)
@@ -834,6 +870,7 @@ def main(argv=None):
     print(f"  public key  : {args.public_key}")
     print(f"  TLS verify  : {cfg.verify!r}")
     print(f"  client cert : {cfg.client_cert[0] if cfg.client_cert else '(none)'}")
+    print(f"  machine cert: {args.machine_cert if cfg.machine_cert else '(none)'}")
     print(f"  mode        : {args.mode}")
     print()
     print_category_expectations(args.mode, weights)

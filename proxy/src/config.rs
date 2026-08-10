@@ -24,6 +24,9 @@ pub struct Config {
     pub mtls: MtlsConfig,
 
     #[serde(default)]
+    pub machine_identity: MachineIdentityConfig,
+
+    #[serde(default)]
     pub proxy_bypass: ProxyBypassConfig,
 
     #[serde(default)]
@@ -157,6 +160,99 @@ pub struct MtlsConfig {
     /// certificates must chain to.  Required when `enabled`.
     #[serde(default)]
     pub client_ca: String,
+}
+
+/// `[machine_identity]` — a fourth orthogonal layer that identifies the
+/// *workstation* a request came from.
+///
+/// The DenBrowser build sends its machine certificate as a base64 DER header on
+/// every request (the TLS handshake already carries the user certificate, and a
+/// handshake carries exactly one client chain, so this identity cannot ride it).
+/// The proxy verifies that the certificate chains to `machine_ca`, that its
+/// Common Name is on `allowed_hostnames`, and that the name **forward-resolves
+/// to the connecting IP** — then records that hostname in the audit trail.
+///
+/// This layer is an *identity claim validated against the CA and the network
+/// origin*, **not** a proof that the endpoint holds the machine private key: a
+/// certificate is a public document, so anyone able to copy it could present it
+/// from a host the name resolves to.  It is therefore strictly weaker than
+/// attestation against a compromised endpoint, and complements rather than
+/// replaces it.
+///
+/// Because the forward-DNS check is unconditional, **enabling this requires
+/// clients to reach the proxy on their own addresses**.  Behind NAT, a VPN
+/// concentrator, or any shared egress the proxy sees the gateway's address,
+/// which is in no workstation's A record, and every request is rejected.
+///
+/// Enabled by default.  A config that omits this section therefore fails closed
+/// at startup until it supplies `machine_ca`; set `enabled = false` explicitly
+/// only when machine identity is intentionally not deployed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MachineIdentityConfig {
+    /// Master on/off switch for machine identity.
+    pub enabled: bool,
+
+    /// Path to a PEM bundle of CA certificate(s) that presented machine
+    /// certificates must chain to.  Required when `enabled`.  This must be a
+    /// *different* CA from `[mtls].client_ca` — startup rejects an overlap,
+    /// because the two identities are told apart by their issuer.
+    pub machine_ca: String,
+
+    /// Reject a request whose machine certificate is missing or invalid.  On by
+    /// default: a layer that silently passes unidentified requests through is
+    /// not an identity layer.  Set false only while rolling the browser side
+    /// out, so a fleet mid-upgrade is not locked out.
+    pub required: bool,
+
+    /// Glob patterns the certificate's Common Name must match, e.g.
+    /// `"ws-*.corp.example.com"`.  Empty (the default) accepts any name the CA
+    /// signed — the forward-DNS check is still applied either way.
+    ///
+    /// As in [`RuleConfig::pattern`], `*` matches any run of characters
+    /// *including dots*, so `*.corp.example.com` also matches
+    /// `a.b.corp.example.com`.  Patterns must be written lowercase: the CN is
+    /// lowercased before matching, since DNS names are case-insensitive.
+    pub allowed_hostnames: Vec<String>,
+
+    /// How long a successful hostname→addresses lookup is reused.  Workstation
+    /// A records are stable for hours, so this is what keeps the check off the
+    /// resolver: one query per workstation per window rather than one per
+    /// request.
+    pub dns_ttl_secs: u64,
+
+    /// How long a *failed* lookup is remembered.  Deliberately shorter than
+    /// `dns_ttl_secs` — it stops one unprovisioned machine from querying on
+    /// every request, without locking a freshly-registered one out for the full
+    /// positive window.
+    pub dns_negative_ttl_secs: u64,
+
+    /// How far past its TTL an entry may still be used when the resolver itself
+    /// is failing.  This keeps a resolver outage from becoming a proxy outage
+    /// without opening a fail-open hole: a *cold* cache plus a dead resolver
+    /// still rejects.  Zero disables serving stale.
+    pub dns_stale_grace_secs: u64,
+
+    /// Treat any certificate in `machine_ca` as a trust anchor, rather than
+    /// requiring the chain to reach a self-signed root.  Enterprises routinely
+    /// distribute an *issuing* CA rather than the root; without this, verifying
+    /// against such a bundle fails.
+    pub partial_chain: bool,
+}
+
+impl Default for MachineIdentityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            machine_ca: String::new(),
+            required: true,
+            allowed_hostnames: Vec::new(),
+            dns_ttl_secs: 14_400,
+            dns_negative_ttl_secs: 30,
+            dns_stale_grace_secs: 3600,
+            partial_chain: false,
+        }
+    }
 }
 
 /// `[proxy_bypass]` — an *escape hatch* that lets specific, strongly
@@ -324,7 +420,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_disables_everything() {
+    fn default_leaves_required_proxy_fields_empty() {
         let c = Config::default();
         assert!(c.proxy.listen.is_empty());
         assert!(c.proxy.upstream.is_empty());
@@ -333,6 +429,7 @@ mod tests {
         assert!(!c.rate_limiting.enabled);
         assert_eq!(c.rate_limiting.max_requests, 0);
         assert!(c.rate_limiting.rules.is_empty());
+        assert!(c.machine_identity.enabled);
     }
 
     #[test]
@@ -406,9 +503,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_config_is_valid_and_off() {
+    fn empty_config_uses_feature_defaults() {
         let c: Config = toml::from_str("").unwrap();
         assert!(!c.rate_limiting.enabled);
+        assert!(c.machine_identity.enabled);
     }
 
     #[test]
@@ -468,6 +566,101 @@ mod tests {
         let c: Config = toml::from_str(toml).unwrap();
         assert!(c.mtls.enabled);
         assert_eq!(c.mtls.client_ca, "/etc/denbrowser/user-ca.pem");
+    }
+
+    #[test]
+    fn machine_identity_defaults_on() {
+        let c = Config::default();
+        assert!(c.machine_identity.enabled);
+        assert!(c.machine_identity.machine_ca.is_empty());
+        assert!(c.machine_identity.allowed_hostnames.is_empty());
+        // Enabled and strict by default; startup requires the operator to
+        // provide the machine CA unless explicitly disabled.
+        assert!(c.machine_identity.required);
+        assert_eq!(c.machine_identity.dns_ttl_secs, 14_400);
+        assert!(!c.machine_identity.partial_chain);
+    }
+
+    #[test]
+    fn checked_in_proxy_configs_parse_and_share_machine_defaults() {
+        let operational: Config = toml::from_str(include_str!("../proxy.toml")).unwrap();
+        let example: Config = toml::from_str(include_str!("../proxy.example.toml")).unwrap();
+
+        assert_eq!(operational.machine_identity.dns_ttl_secs, 14_400);
+        assert_eq!(example.machine_identity.dns_ttl_secs, 14_400);
+        assert!(operational.machine_identity.enabled);
+        assert!(example.machine_identity.enabled);
+        assert!(operational.machine_identity.required);
+        assert_eq!(operational.logging.file_prefix, "denbrowser-proxy.log");
+        assert_eq!(operational.logging.level, "info");
+        assert_eq!(operational.logging.rotation, "daily");
+        assert_eq!(operational.logging.max_files, 14);
+        assert!(operational.logging.stderr);
+    }
+
+    #[test]
+    fn machine_identity_serde_defaults_match_the_default_impl() {
+        // The container-level `#[serde(default)]` is what keeps these in step;
+        // this fails loudly if someone reintroduces per-field defaults.
+        let parsed: Config = toml::from_str("[machine_identity]\n").unwrap();
+        let default = MachineIdentityConfig::default();
+        assert_eq!(parsed.machine_identity.enabled, default.enabled);
+        assert_eq!(parsed.machine_identity.required, default.required);
+        assert_eq!(parsed.machine_identity.dns_ttl_secs, default.dns_ttl_secs);
+        assert_eq!(
+            parsed.machine_identity.dns_negative_ttl_secs,
+            default.dns_negative_ttl_secs
+        );
+        assert_eq!(
+            parsed.machine_identity.dns_stale_grace_secs,
+            default.dns_stale_grace_secs
+        );
+        assert_eq!(parsed.machine_identity.partial_chain, default.partial_chain);
+    }
+
+    #[test]
+    fn parses_machine_identity() {
+        let toml = r#"
+            [machine_identity]
+            enabled           = true
+            machine_ca        = "/etc/denbrowser/machine-ca.pem"
+            allowed_hostnames = ["ws-*.corp.example.com", "kiosk-*.corp.example.com"]
+            dns_ttl_secs      = 600
+            partial_chain     = true
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.machine_identity.enabled);
+        assert_eq!(c.machine_identity.machine_ca, "/etc/denbrowser/machine-ca.pem");
+        assert_eq!(c.machine_identity.allowed_hostnames.len(), 2);
+        assert_eq!(c.machine_identity.dns_ttl_secs, 600);
+        assert!(c.machine_identity.partial_chain);
+        // Unspecified fields keep their non-zero defaults.
+        assert!(c.machine_identity.required);
+        assert_eq!(c.machine_identity.dns_negative_ttl_secs, 30);
+    }
+
+    #[test]
+    fn machine_identity_unknown_key_is_rejected() {
+        let toml = r#"
+            [machine_identity]
+            enabled       = true
+            hostname_check = "reverse"
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn config_without_machine_identity_uses_enabled_default() {
+        // Omitting the section still parses, but now fails closed later during
+        // startup unless a machine CA is configured or the feature is disabled.
+        let toml = r#"
+            [mtls]
+            enabled   = true
+            client_ca = "/etc/denbrowser/user-ca.pem"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.machine_identity.enabled);
+        assert!(c.machine_identity.machine_ca.is_empty());
     }
 
     #[test]

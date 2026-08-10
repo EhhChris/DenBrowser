@@ -73,6 +73,7 @@ DenBrowser/
 │       ├── config.rs           # Operational TOML config loader
 │       ├── ratelimit.rs        # Per-origin-IP request rate limiting
 │       ├── mtls.rs             # Baseline mutual-TLS client authentication
+│       ├── machine.rs          # Machine identity (workstation cert + forward-DNS check)
 │       └── passthrough.rs      # Attestation bypass (IP + cert-subject allowlist)
 └── scripts/
     ├── fetch-esr.sh            # Download + verify latest Firefox ESR source
@@ -80,6 +81,7 @@ DenBrowser/
     ├── gen-attest-key.sh       # Generate a proxy's ECDSA P-256 attestation keypair
     ├── gen-proxy-tls.sh        # Generate a proxy's TLS cert + report its SPKI pin
     ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
+    ├── gen-machine-cert.sh     # Generate machine (workstation) cert + CA
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
@@ -325,10 +327,10 @@ touched, so floods are shed cheaply.
   size caps for the deployment's real per-IP concurrency.
 
 **Baseline mTLS** (`[mtls]`) requires every client to authenticate with a
-certificate at the TLS handshake — a third orthogonal layer alongside the
-existing two, replacing neither:
+certificate at the TLS handshake — one of four orthogonal layers, replacing
+none of the others:
 
-- **mTLS** authenticates the *user/device* to the proxy (client → proxy).
+- **mTLS** authenticates the *user* to the proxy (client → proxy).
 - **TLS SPKI pinning** (patch 012) authenticates the *proxy* to the browser
   (proxy → client); the browser pins the proxy's cert, defeating MITM even by a
   validly-CA-issued cert. mTLS is the opposite direction and does not replace it.
@@ -336,6 +338,8 @@ existing two, replacing neither:
   DenBrowser build and binds it against replay/tampering — properties a client
   cert doesn't provide. mTLS proves *who* holds a key but not *what software*
   produced the request, so the two are complementary.
+- **Machine identity** (`[machine_identity]`, below) names the *workstation* the
+  request came from — which none of the other three establish.
 
   When `[mtls] enabled = true`, the listener is configured with
   `SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT` against `client_ca`, so a
@@ -344,10 +348,98 @@ existing two, replacing neither:
   client certificate requested; behaviour identical to before).  A bad config
   (missing/unreadable/empty CA bundle) aborts startup.
 
+  The listener also advertises `client_ca` in the TLS `CertificateRequest`, so a
+  browser holding more than one client certificate can filter its store to the
+  one identity this proxy accepts, rather than prompting with a picker or
+  offering the wrong certificate (which would then fail the handshake with
+  nothing to diagnose it by).
+
   ```toml
   [mtls]
   enabled = true
   client_ca = "/etc/denbrowser/user-ca.pem"
+  ```
+
+**Machine identity** (`[machine_identity]`) records *which workstation* a
+request came from.  The browser sends its machine certificate as base64 DER in
+`X-DenBrowser-Machine-Cert` on every request claimed by the configured
+attestation proxy table; the proxy verifies it and writes the hostname into the
+audit trail.
+
+On Windows, patch 024 obtains that certificate directly from the operating
+system certificate manager. It searches the managed and ordinary
+`LocalMachine\MY` and `CurrentUser\MY` (Personal) stores for a currently valid
+certificate whose Common Name exactly matches the workstation's FQDN, DNS
+hostname, or NetBIOS name. Managed stores and machine scope take precedence;
+during enrollment overlap, the matching certificate with the latest expiry is
+used. The selected public DER is cached until DenBrowser restarts. No private
+key is opened or used. Non-Windows builds omit the header.
+
+Provisioning should leave only the intended issuer's certificate with a
+matching workstation CN in the highest-priority populated store. If unrelated
+issuers provide multiple matching certificates there, the browser cannot know
+which CA the proxy trusts; it chooses the latest-expiring certificate and the
+proxy safely rejects it if it chains to the wrong CA.
+
+For a local Windows test, generate the certificate with the machine's real DNS
+name and import the public certificate into either Personal store:
+
+```powershell
+# Current user (no elevation):
+certutil -user -addstore My build\machine-cert.crt
+
+# Or, from an elevated shell, local machine:
+certutil -addstore My build\machine-cert.crt
+```
+
+Production certificates should normally be enrolled through enterprise policy.
+Restart DenBrowser after enrollment or renewal so it refreshes the cached DER.
+
+It rides a header rather than the TLS handshake because a handshake carries
+exactly one client certificate chain and the user certificate already occupies
+it.  There is no second handshake to use either — the proxy is a reverse proxy,
+so the browser opens one ordinary HTTPS connection to the origin.
+
+Three checks, cheapest first, so a bad certificate never reaches the resolver:
+
+- the certificate chains to `machine_ca` (which **must differ** from
+  `[mtls].client_ca` — the two identities are told apart by issuer, and startup
+  rejects an overlap);
+- its Common Name matches an `allowed_hostnames` glob (empty accepts any name
+  the CA signed);
+- **the name forward-resolves to the connecting address.**
+
+- **What this proves:** the name was issued by your CA and is being presented
+  from an address that name points at.
+- **What it does not prove:** possession of the machine private key.  A
+  certificate is a public document and this layer performs no proof of
+  possession, so it is weaker than attestation against a compromised endpoint.
+  The hostname is therefore recorded, not used to grant anything.
+
+  **Deployment prerequisite:** because the forward-DNS check is unconditional,
+  clients must reach the proxy on their own addresses.  Behind NAT, a VPN
+  concentrator, or any shared egress the proxy sees the gateway address — which
+  is in no workstation's A record — and **every request is rejected**. The
+  Compose integration stack avoids its published-port NAT by running its test
+  client directly on the proxy's ingress bridge with a Docker DNS alias.
+
+  Lookups are cached per hostname, so the check costs roughly one query per
+  workstation per TTL — about 0.07 queries/s for a 1,000-machine fleet at the
+  four-hour default, not one query per request.  Failures are cached on a
+  shorter TTL, and a stale entry keeps covering a resolver outage for a bounded
+  grace period; a cold cache with a failing resolver still rejects.
+
+  Enabled by default.  Omitting `[machine_identity]` therefore fails closed at
+  startup until `machine_ca` is configured; deployments intentionally not using
+  this layer must set `enabled = false` explicitly.  A bad config
+  (missing/unreadable/empty CA bundle, unparseable or uppercase hostname glob,
+  CA overlapping the mTLS CA) aborts startup.
+
+  ```toml
+  [machine_identity]
+  enabled           = true
+  machine_ca        = "/etc/denbrowser/machine-ca.pem"
+  allowed_hostnames = ["ws-*.corp.example.com"]
   ```
 
 **Attestation bypass** (`[proxy_bypass]`) is an opt-in escape hatch that lets
@@ -453,5 +545,6 @@ for navigation.
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox. Also stamps the build id next to the version — `153.0esr (64-bit) (build a1b2c3d)` — from the DenBrowser repo commit, injected into `aboutDialog.js` by `build.sh` Step 2.8 (`-dirty` suffix when the tree had uncommitted changes; hidden entirely when the build came from a non-git source tree). |
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
 | 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
+| 024 | `windows-machine-certificate-header` | Read the current workstation certificate's public DER from the Windows managed/ordinary Personal stores, require its CN to match the local Windows hostname, and attach it as `X-DenBrowser-Machine-Cert` only on requests claimed by the attestation proxy table. Caller-supplied values are stripped to prevent spoofing and redirect leakage; no private key is opened. |
 
 ---

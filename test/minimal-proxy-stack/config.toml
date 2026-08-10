@@ -17,6 +17,27 @@ max_requests = 100
 enabled = true
 client_ca = "/run/secrets/user_ca"
 
+[machine_identity]
+# Enabled here because the roundtrip client runs as a service on the same
+# user-defined ingress bridge as the proxy. Docker DNS resolves the stable
+# service name "machine-client" to that container's current bridge address,
+# and the proxy observes that same address as the TCP peer.
+#
+enabled = true
+machine_ca = "/run/secrets/machine_ca"
+required = true
+
+# The test CA is dedicated to this stack, so the integration suite leaves the
+# allowlist open in order to mint a second, valid certificate for "upstream" and
+# exercise the address-mismatch path. Production should constrain this.
+allowed_hostnames = []
+
+# Keep integration runs responsive to container recreation and never serve a
+# stale address. Production defaults are intentionally longer-lived.
+dns_ttl_secs = 5
+dns_negative_ttl_secs = 1
+dns_stale_grace_secs = 0
+
 [proxy_bypass]
 enabled = false
 

@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "denbrowser-proxy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -554,6 +554,7 @@ dependencies = [
  "http",
  "ipnet",
  "log",
+ "openssl",
  "p256",
  "pingora-core",
  "pingora-http",
@@ -563,6 +564,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
+ "tokio",
  "toml",
  "tracing",
  "tracing-appender",

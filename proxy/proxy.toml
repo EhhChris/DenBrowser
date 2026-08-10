@@ -65,6 +65,31 @@ client_ca = "/etc/denbrowser/user-ca.pem"
 
 # ---------------------------------------------------------------------------
 
+[machine_identity]
+# Workstation identity is enabled by default. The browser must present a machine
+# certificate whose CN resolves to the connecting address.
+enabled = true
+
+# Required when enabled and must use a different CA from [mtls].client_ca.
+machine_ca = "/etc/denbrowser/machine-ca.pem"
+
+# Reject missing or invalid machine certificates. Relax only during rollout.
+required = true
+
+# Empty accepts any hostname signed by machine_ca; DNS matching still applies.
+allowed_hostnames = []
+
+# Cache successful DNS answers for four hours, negative answers briefly, and
+# permit bounded stale use only while the resolver itself is unavailable.
+dns_ttl_secs = 14400
+dns_negative_ttl_secs = 30
+dns_stale_grace_secs = 3600
+
+# Set true when machine_ca contains an issuing CA rather than a self-signed root.
+partial_chain = false
+
+# ---------------------------------------------------------------------------
+
 [proxy_bypass]
 # Attestation bypass: let specific, strongly authenticated callers skip
 # attestation and be forwarded straight upstream.  Intended for trusted
@@ -94,3 +119,8 @@ allowed_subjects = ["health-checker", "ops.internal", "denbrowser-user"]
 #
 # `build/` is gitignored, so dev logs stay out of version control.
 dir = "../build/logs"
+file_prefix = "denbrowser-proxy.log"
+level = "info"
+rotation = "daily"
+max_files = 14
+stderr = true

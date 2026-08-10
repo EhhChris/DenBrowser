@@ -14,10 +14,11 @@
 //! callback does not re-verify — it only extracts the identity so the request
 //! path can read it (for logging, and for the bypass subject allowlist).
 //!
-//! mTLS is one orthogonal layer among three: it authenticates the *user/device*
-//! (client → proxy), TLS SPKI pinning authenticates the *proxy* to the browser
-//! (proxy → client), and attestation proves the request came from a genuine
-//! DenBrowser build and binds it against replay/tampering.  None replaces
+//! mTLS is one orthogonal layer among four: it authenticates the *user* (client
+//! → proxy), TLS SPKI pinning authenticates the *proxy* to the browser (proxy →
+//! client), attestation proves the request came from a genuine DenBrowser build
+//! and binds it against replay/tampering, and machine identity
+//! ([`crate::machine`]) names the *workstation* it came from.  None replaces
 //! another.
 
 use std::any::Any;
@@ -57,8 +58,14 @@ impl ClientCert {
             .map(String::as_str)
     }
 
-    /// Extract the identity from a verified peer certificate.
-    fn from_cert(cert: &X509Ref) -> Self {
+    /// Extract the identity from a certificate.
+    ///
+    /// Shared with [`crate::machine`], which needs the same Common Name and
+    /// SubjectAltName semantics for the machine certificate — keeping one
+    /// implementation stops the two identity paths from drifting apart.  Note
+    /// this only *reads* the subject; the caller is responsible for having
+    /// established that the certificate is trusted.
+    pub fn from_cert(cert: &X509Ref) -> Self {
         let common_name = cert
             .subject_name()
             .entries_by_nid(Nid::COMMONNAME)
@@ -102,10 +109,12 @@ impl TlsAccept for Recorder {
 }
 
 /// Baseline mTLS settings, built once at startup.  Holds the CA path so `main`
-/// can load it into the acceptor's trust store, and produces the [`TlsAccept`]
-/// callbacks that record client identity.
+/// can load it into the acceptor's trust store, the parsed CA certificates so
+/// `main` can advertise them as acceptable issuers, and produces the
+/// [`TlsAccept`] callbacks that record client identity.
 pub struct Mtls {
     ca_path: String,
+    ca_certs: Vec<X509>,
 }
 
 impl Mtls {
@@ -119,8 +128,9 @@ impl Mtls {
         if cfg.client_ca.is_empty() {
             anyhow::bail!("mtls is enabled but client_ca is not set");
         }
-        // Validate up front for a clear error; `main` loads the same file into
-        // the acceptor via set_ca_file.
+        // Parsed up front for a clear error, and kept: `main` loads the same
+        // file into the acceptor's verification store via set_ca_file, and
+        // advertises these certificates as acceptable issuers via add_client_ca.
         let pem = std::fs::read(&cfg.client_ca)
             .map_err(|e| anyhow::anyhow!("cannot read mtls client_ca {}: {e}", cfg.client_ca))?;
         let cas = X509::stack_from_pem(&pem)
@@ -130,12 +140,19 @@ impl Mtls {
         }
         Ok(Some(Self {
             ca_path: cfg.client_ca.clone(),
+            ca_certs: cas,
         }))
     }
 
     /// Path to the CA bundle to install as the client-cert trust store.
     pub fn ca_path(&self) -> &str {
         &self.ca_path
+    }
+
+    /// The parsed CA certificates, for advertising as acceptable issuers in the
+    /// TLS `CertificateRequest` (see `main`).
+    pub fn ca_certs(&self) -> &[X509] {
+        &self.ca_certs
     }
 
     /// TLS accept callbacks that record the verified client identity.

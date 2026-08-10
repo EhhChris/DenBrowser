@@ -21,13 +21,16 @@
 #       --cert /path/to/server.crt --key /path/to/server.key
 #
 # Usage:
-#   ./scripts/gen-proxy-tls.sh [--name NAME] [--host HOST]
+#   ./scripts/gen-proxy-tls.sh [--name NAME] [--host HOST] [--san HOST]
 #                              [--cert FILE --key FILE] [--force]
 #
 #   --name NAME   Label for this proxy.  Names the output files and should
 #                 match the "name" of the proxy's entry in
 #                 config/site-config.json.  Default: "proxy".
 #   --host HOST   CN/SAN for a generated self-signed cert.  Default: localhost.
+#   --san HOST    Additional DNS SAN for a generated certificate. Repeatable;
+#                 useful when the same development proxy is reached by both a
+#                 host name and a Compose service name.
 #   --cert/--key  Import an existing cert+key instead of generating one.
 #   --force       Overwrite existing cert/key files for this name.
 #
@@ -50,6 +53,15 @@
 
 set -euo pipefail
 
+# Stop Git Bash / MSYS2 on Windows from rewriting a leading-"/" subject DN into a
+# Windows path; a no-op on Linux/macOS.  Lets us use a plain "/CN=..." subject,
+# which OpenSSL 3 parses correctly (a "//CN=..." guard silently drops the CN).
+# NB: this also disables path translation for file arguments, so every openssl
+# file path below is a *bare relative filename* run from inside build/ — bare
+# names need no translation on any platform (a POSIX "/c/Users/..." path handed
+# to a native-Windows openssl would otherwise fail to open).
+export MSYS_NO_PATHCONV=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build"
@@ -58,17 +70,19 @@ NAME="proxy"
 PROXY_HOST="localhost"
 CERT_IN=""
 KEY_IN=""
+EXTRA_SANS=()
 FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --name)  NAME="$2";       shift 2 ;;
         --host)  PROXY_HOST="$2"; shift 2 ;;
+        --san)   EXTRA_SANS+=("$2"); shift 2 ;;
         --cert)  CERT_IN="$2";    shift 2 ;;
         --key)   KEY_IN="$2";     shift 2 ;;
         --force) FORCE=1;         shift ;;
         -h|--help)
-            echo "Usage: $0 [--name NAME] [--host HOST] [--cert FILE --key FILE] [--force]"
+            echo "Usage: $0 [--name NAME] [--host HOST] [--san HOST] [--cert FILE --key FILE] [--force]"
             exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
     esac
@@ -84,6 +98,17 @@ fi
 mkdir -p "$BUILD_DIR"
 CERT_OUT="$BUILD_DIR/$NAME-tls.crt"
 KEY_OUT="$BUILD_DIR/$NAME-tls.key"
+# Bare filenames for the openssl calls below, which run from inside build/ (see
+# the MSYS_NO_PATHCONV note above).  The absolute forms stay for messages and
+# for `cp`, which is an MSYS program and handles POSIX paths on its own.
+CERT_FILE="$NAME-tls.crt"
+KEY_FILE="$NAME-tls.key"
+
+# Resolve any supplied import paths before changing directory, so a relative
+# --cert/--key still refers to where the user ran this from.  Left untouched
+# when the file is missing, so `cp` reports it rather than a `cd` failure.
+[[ -f "$CERT_IN" ]] && CERT_IN="$(cd "$(dirname "$CERT_IN")" && pwd)/$(basename "$CERT_IN")"
+[[ -f "$KEY_IN"  ]] && KEY_IN="$(cd "$(dirname "$KEY_IN")" && pwd)/$(basename "$KEY_IN")"
 
 if [[ ( -f "$CERT_OUT" || -f "$KEY_OUT" ) && $FORCE -eq 0 ]]; then
     echo "[gen-proxy-tls] ERROR: $NAME-tls.{crt,key} already exist in build/." >&2
@@ -93,6 +118,10 @@ if [[ ( -f "$CERT_OUT" || -f "$KEY_OUT" ) && $FORCE -eq 0 ]]; then
     echo "[gen-proxy-tls]        Re-run with --force, or pick another --name." >&2
     exit 1
 fi
+
+# Operate from inside build/ so every openssl file argument is a bare filename
+# (see the MSYS_NO_PATHCONV note above).
+cd "$BUILD_DIR"
 
 # ── 1. Either generate a fresh self-signed cert or import the supplied one ──
 if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
@@ -106,23 +135,42 @@ if [[ -n "$CERT_IN" || -n "$KEY_IN" ]]; then
     chmod 600    "$KEY_OUT"
 else
     echo "[gen-proxy-tls] Generating self-signed cert for \"$NAME\" (CN=$PROXY_HOST, 10y)..."
-    # The "//CN=..." double-slash stops Git Bash on Windows from mangling the
-    # subject DN into a Windows path. OpenSSL tolerates the empty leading
-    # component, and Linux/macOS treat // identically to /.
+    # Single-slash subject: OpenSSL 3 reads "//CN=..." as an empty leading RDN
+    # followed by an unknown "/CN" attribute, warns, and silently drops the CN —
+    # producing a cert with no subject at all.  MSYS_NO_PATHCONV (set at the top)
+    # is what makes the plain "/CN=..." form safe under Git Bash.
+    SAN_LIST="DNS:$PROXY_HOST"
+    for san in "${EXTRA_SANS[@]}"; do
+        SAN_LIST+=",DNS:$san"
+    done
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-        -subj "//CN=$PROXY_HOST" \
-        -addext "subjectAltName=DNS:$PROXY_HOST" \
-        -keyout "$KEY_OUT" -out "$CERT_OUT"
-    chmod 600 "$KEY_OUT"
+        -subj "/CN=$PROXY_HOST" \
+        -addext "subjectAltName=$SAN_LIST" \
+        -keyout "$KEY_FILE" -out "$CERT_FILE"
+    chmod 600 "$KEY_FILE"
+fi
+
+# Guard against silently shipping a subject-less cert again: the pin would still
+# be computed and the proxy would still serve, but clients could not use the
+# cert as a CA file and the identity it is supposed to assert would be missing.
+if ! openssl x509 -in "$CERT_FILE" -noout -subject | grep -q 'CN *='; then
+    echo "[gen-proxy-tls] ERROR: $CERT_FILE has no Common Name in its subject." >&2
+    echo "[gen-proxy-tls]        Refusing to report a pin for an unusable cert." >&2
+    exit 1
 fi
 
 # ── 2. Extract SPKI sha256 (RFC 7469 style) ───────────────────────────────────
-SPKI_HASH_HEX=$(openssl x509 -in "$CERT_OUT" -pubkey -noout \
+# `od` rather than `xxd`: xxd ships with vim, not coreutils, so it is absent on
+# plenty of minimal Linux images and on a stock macOS without developer tools.
+# Under `set -euo pipefail` that killed this script *after* writing the cert and
+# key but *before* printing the pin, leaving a usable cert and no way to pin it.
+# `-v` stops od from collapsing repeated bytes into a "*" line.
+SPKI_HASH_HEX=$(openssl x509 -in "$CERT_FILE" -pubkey -noout \
                 | openssl pkey -pubin -outform DER 2>/dev/null \
                 | openssl dgst -sha256 -binary \
-                | xxd -p -c 256)
+                | od -An -v -tx1 | tr -d ' \n')
 
-SPKI_HASH_B64=$(openssl x509 -in "$CERT_OUT" -pubkey -noout \
+SPKI_HASH_B64=$(openssl x509 -in "$CERT_FILE" -pubkey -noout \
                 | openssl pkey -pubin -outform DER 2>/dev/null \
                 | openssl dgst -sha256 -binary \
                 | openssl base64)

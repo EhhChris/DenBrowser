@@ -3,8 +3,9 @@
 # Copy this file to `proxy.toml` and edit it.  The proxy loads `proxy.toml` from
 # its working directory by default (override with `--config <path>` or the
 # DENBROWSER_CONFIG env var) and is REQUIRED: the proxy exits on startup if the
-# config file is missing or unparseable. Core listener, upstream, TLS, and
-# attestation values are required; optional features are off by default.
+# config file is missing or unparseable. Core listener, upstream, TLS,
+# attestation, and machine-identity values are required; other optional features
+# use the defaults documented below.
 #
 # Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
 # so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
@@ -85,10 +86,11 @@ max_requests = 50
 # client with no certificate or an untrusted one is rejected before it reaches
 # the request path.
 #
-# This is one of three orthogonal layers and replaces none of them: mTLS
-# authenticates the user/device (client -> proxy), TLS SPKI pinning authenticates
-# the proxy to the browser (proxy -> client), and attestation proves the request
-# came from a genuine DenBrowser build and binds it against replay/tampering.
+# This is one of four orthogonal layers and replaces none of them: mTLS
+# authenticates the user (client -> proxy), TLS SPKI pinning authenticates
+# the proxy to the browser (proxy -> client), attestation proves the request
+# came from a genuine DenBrowser build and binds it against replay/tampering,
+# and machine identity ([machine_identity] below) names the workstation.
 #
 # Disabled by default: with enabled = false, no client certificate is requested
 # and the listener behaves exactly as before.
@@ -97,6 +99,75 @@ enabled = false
 # PEM bundle of CA certificate(s) that presented client certs must chain to.
 # Required when enabled.
 client_ca = "/etc/denbrowser/user-ca.pem"
+
+# ---------------------------------------------------------------------------
+
+[machine_identity]
+# Identifies the *workstation* a request came from — the fourth orthogonal
+# layer, alongside mTLS (the user), TLS pinning (the proxy), and attestation
+# (the software).
+#
+# The browser sends its machine certificate as base64 DER in
+# X-DenBrowser-Machine-Cert on every request. It travels in a header rather than
+# the TLS handshake because a handshake carries exactly one client certificate
+# chain and the user certificate already occupies it. The proxy verifies the
+# certificate chains to machine_ca, that its Common Name is on
+# allowed_hostnames, and that the name forward-resolves to the connecting
+# address — then records that hostname in the audit trail. It grants nothing.
+#
+# WHAT THIS PROVES: that the name was issued by your CA and is being presented
+# from an address that name points at. NOT that the sender holds the private
+# key — a certificate is a public document and this layer performs no proof of
+# possession. It is therefore weaker than attestation against a compromised
+# endpoint, and complements rather than replaces it.
+#
+# DEPLOYMENT PREREQUISITE: because the forward-DNS check is unconditional,
+# clients must reach the proxy on their own addresses. Behind NAT, a VPN
+# concentrator, or any shared egress the proxy sees the gateway address, which
+# is in no workstation's A record, and every request is rejected.
+#
+# Enabled by default: set enabled = false explicitly only when machine identity
+# is intentionally not deployed.
+enabled = true
+
+# PEM bundle of CA certificate(s) that presented machine certs must chain to.
+# Required when enabled. MUST be a different CA from [mtls].client_ca — the two
+# identities are told apart by their issuer, and startup rejects an overlap.
+machine_ca = "/etc/denbrowser/machine-ca.pem"
+
+# Reject a request whose machine certificate is missing or invalid. On by
+# default; set false only while rolling the browser side out, so a fleet
+# mid-upgrade is not locked out.
+# required = true
+
+# Glob patterns the Common Name must match. Empty (the default) accepts any name
+# the CA signed; the forward-DNS check still applies either way. As in
+# [[rate_limiting.rules]], "*" matches any run of characters INCLUDING dots, so
+# "*.corp.example.com" also matches "a.b.corp.example.com". Patterns must be
+# lowercase — the CN is lowercased before matching, since DNS is
+# case-insensitive — and an uppercase pattern aborts startup rather than
+# silently matching nothing.
+# allowed_hostnames = ["ws-*.corp.example.com"]
+
+# Forward-DNS cache. Workstation A records are stable for hours, so this is what
+# keeps the check off the resolver: one query per workstation per window rather
+# than one per request. A 1,000-machine fleet at the default costs ~0.07 queries/s.
+# dns_ttl_secs = 14400
+#
+# Failed lookups are cached too, on a shorter TTL, so one unprovisioned machine
+# cannot query on every request — short enough that a freshly registered machine
+# is not locked out for the full positive window.
+# dns_negative_ttl_secs = 30
+#
+# How far past its TTL an entry may still be used while the resolver itself is
+# failing, so a DNS outage does not become a proxy outage. This opens no hole: a
+# cold cache with a failing resolver still rejects. 0 disables serving stale.
+# dns_stale_grace_secs = 3600
+
+# Treat any certificate in machine_ca as a trust anchor rather than requiring
+# the chain to reach a self-signed root. Enterprises routinely distribute an
+# issuing CA rather than the root; without this, such a bundle fails to verify.
+# partial_chain = false
 
 # ---------------------------------------------------------------------------
 
