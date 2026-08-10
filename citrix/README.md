@@ -158,9 +158,28 @@ Patch 021 checks Windows' session protocol first, then uses the VDA
 session. Validate that export and the WFAPI install registry values during the
 VDA pilot; they are part of the browser-side deployment gate.
 
-## Build the SDK-neutral components
+## Build
 
-From a Visual Studio Developer PowerShell:
+Two separate things happen here, on very different cadences. Keeping them
+apart is the main thing to understand before starting:
+
+| | Produces | How often |
+|---|---|---|
+| **Build** (this section) | a signed `dencap_vd.dll` | once per Workspace generation × architecture |
+| **Install** ([below](#client-registration-and-rollout)) | that DLL plus its module registration on an endpoint | once per endpoint, scriptable |
+
+Only the build needs the Citrix SDK and a Visual Studio toolchain. Once a
+signed DLL exists for a given Workspace generation it is a fixed artifact;
+endpoints thereafter receive only the file and the registration.
+
+Everything below runs from a Visual Studio Developer PowerShell, from the
+repository root. Do the steps in order: **step 2 can rule out the whole
+approach for a given Workspace build**, so run it before spending time on
+steps 3 and 4.
+
+### Step 1 — Build and test the SDK-neutral components
+
+No Citrix SDK required.
 
 ```powershell
 cmake -S citrix -B out\citrix -A x64
@@ -174,6 +193,10 @@ This builds:
 - `dencap_lease_engine_tests`: dependency-free state-machine tests;
 - `dencap_hwnd_probe`: a diagnostic ownership/read-back tool.
 
+Use `-A Win32` instead of `-A x64` for the 32-bit variant.
+
+### Step 2 — Run the ownership pre-check
+
 The probe is read-only unless `--apply` is explicitly supplied:
 
 ```powershell
@@ -184,8 +207,7 @@ out\citrix\RelWithDebInfo\dencap_hwnd_probe.exe --self-test
 The standalone tool will correctly report `NO-GO` for a window owned by a
 different process, while still attempting the read-only affinity query.
 `--self-test` creates an owned hidden top-level window and performs an
-apply/read-back/restore cycle. Use the in-driver Phase-0 result for the real
-Citrix decision.
+apply/read-back/restore cycle.
 
 ## Build the Workspace package
 
