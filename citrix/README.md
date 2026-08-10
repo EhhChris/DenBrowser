@@ -158,9 +158,28 @@ Patch 021 checks Windows' session protocol first, then uses the VDA
 session. Validate that export and the WFAPI install registry values during the
 VDA pilot; they are part of the browser-side deployment gate.
 
-## Build the SDK-neutral components
+## Build
 
-From a Visual Studio Developer PowerShell:
+Two separate things happen here, on very different cadences. Keeping them
+apart is the main thing to understand before starting:
+
+| | Produces | How often |
+|---|---|---|
+| **Build** (this section) | a signed `dencap_vd.dll` | once per Workspace generation × architecture |
+| **Install** ([below](#client-registration-and-rollout)) | that DLL plus its module registration on an endpoint | once per endpoint, scriptable |
+
+Only the build needs the Citrix SDK and a Visual Studio toolchain. Once a
+signed DLL exists for a given Workspace generation it is a fixed artifact;
+endpoints thereafter receive only the file and the registration.
+
+Everything below runs from a Visual Studio Developer PowerShell, from the
+repository root. Do the steps in order: **step 2 can rule out the whole
+approach for a given Workspace build**, so run it before spending time on
+steps 3 and 4.
+
+### Step 1 — Build and test the SDK-neutral components
+
+No Citrix SDK required.
 
 ```powershell
 cmake -S citrix -B out\citrix -A x64
@@ -174,6 +193,10 @@ This builds:
 - `dencap_lease_engine_tests`: dependency-free state-machine tests;
 - `dencap_hwnd_probe`: a diagnostic ownership/read-back tool.
 
+Use `-A Win32` instead of `-A x64` for the 32-bit variant.
+
+### Step 2 — Run the ownership pre-check
+
 The probe is read-only unless `--apply` is explicitly supplied:
 
 ```powershell
@@ -184,28 +207,72 @@ out\citrix\RelWithDebInfo\dencap_hwnd_probe.exe --self-test
 The standalone tool will correctly report `NO-GO` for a window owned by a
 different process, while still attempting the read-only affinity query.
 `--self-test` creates an owned hidden top-level window and performs an
-apply/read-back/restore cycle. Use the in-driver Phase-0 result for the real
-Citrix decision.
+apply/read-back/restore cycle.
 
-## Build the Citrix adapter
+This tool is an early indicator, not the verdict: the authoritative result is
+the in-driver Phase-0 probe from step 4, because only it has the SDK's `PVD`
+context. See [The non-negotiable Phase-0 test](#the-non-negotiable-phase-0-test)
+for what a `NO-GO` means — for a real owner-PID mismatch, no packaging or
+installer work can rescue that Workspace build.
 
-Download the official Virtual Channel SDK that matches the deployed Citrix
-Workspace release and architecture. Do not copy Citrix headers or libraries
-from another CWA generation. Then configure:
+### Step 3 — Build the adapter against the Citrix SDK
+
+Download the official Virtual Channel SDK matching the deployed Citrix
+Workspace release and architecture, unpack it anywhere, and point
+`CITRIX_VCSDK_ROOT` at that directory. Do not mix headers or libraries from
+another CWA generation.
 
 ```powershell
 cmake -S citrix -B out\citrix-sdk -A x64 `
   -DDENCAP_BUILD_CITRIX_ADAPTER=ON `
-  -DCITRIX_VC_INCLUDE_DIR='C:\path\to\matching-vcsdk\include' `
-  -DCITRIX_VDAPI_LIBRARY='C:\path\to\matching-vcsdk\lib\x64\Vdapi.lib' `
-  -DCITRIX_WDICA_LIBRARY='C:\path\to\matching-vcsdk\lib\x64\wdica30.lib'
+  -DCITRIX_VCSDK_ROOT='C:\citrix\vcsdk-2402'
 cmake --build out\citrix-sdk --config Release
 ```
 
-The result is a static adapter library, not a guessed standalone DLL. Citrix's
+Headers and import libraries are located under that root automatically, for
+the architecture selected by `-A`. Configure prints what it resolved:
+
+```text
+-- DENCAP Citrix adapter:
+--   SDK version:     unspecified (set CITRIX_VCSDK_VERSION to record it)
+--   SDK root:        C:/citrix/vcsdk-2402
+--   Target arch:     x64
+--   Headers:         C:/citrix/vcsdk-2402/inc
+--   Vdapi.lib:       C:/citrix/vcsdk-2402/lib/x64/Vdapi.lib
+--   wdica30.lib:     C:/citrix/vcsdk-2402/lib/x64/wdica30.lib
+--   Window callback: ON
+```
+
+Check that summary before building — it is the cheapest place to catch a
+mismatched SDK or architecture. If a path is wrong, configure fails with the
+list of directories it searched rather than a link error later.
+
+Configuration variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CITRIX_VCSDK_ROOT` | — | Unpacked SDK root. Normally the only variable you set. |
+| `CITRIX_VCSDK_VERSION` | empty | Free-text label for the SDK/Workspace generation, echoed in the summary so a build tree records which SDK produced it. |
+| `CITRIX_VC_INCLUDE_DIR` | derived | Override when `vdapi.h`/`wdapi.h` are not under `<root>\inc` or `<root>\include`. |
+| `CITRIX_VDAPI_LIBRARY` | derived | Override for a library layout the lookup does not recognise. |
+| `CITRIX_WDICA_LIBRARY` | derived | Optional; only some SDK generations ship `wdica30.lib` separately. |
+| `DENCAP_CITRIX_HAS_WINDOW_CALLBACK` | `ON` | Set `OFF` for an SDK that does not declare `WdRegisterWindowChangeCallback` or its information classes. The one-second polling fallback remains active. |
+
+An override, when set, is used verbatim and still validated, so a typo fails at
+configure time. Layout detection lives in
+[`cmake/DenCapCitrixSdk.cmake`](cmake/DenCapCitrixSdk.cmake); add a candidate
+directory there rather than carrying local overrides if a new SDK generation
+needs one.
+
+### Step 4 — Produce the DLL from the SDK sample driver
+
+Step 3 produces a **static adapter library, not a standalone DLL**. Citrix's
 `DriverOpen`, virtual-write hook, DLL exports, `.def` file, library set, and
-configuration format vary across SDK releases. Start with the official sample
-virtual-driver project shipped in the selected SDK and add:
+configuration format vary across SDK releases, so the DLL shell comes from
+Citrix's own sample rather than being guessed here.
+
+Start with the official sample virtual-driver project shipped in the selected
+SDK and add:
 
 - `client/dencap_citrix_adapter.cpp`;
 - `client/dencap_lease_engine.cpp`;
@@ -218,10 +285,15 @@ rather than reproducing SDK types. Citrix's public documentation currently
 shows both three- and four-argument `VdCallWd` calls; the adapter selects at
 compile time the signature declared by the actual header.
 
-If an older matching SDK does not declare the window-change callback types or
-information classes, configure with
-`-DDENCAP_CITRIX_HAS_WINDOW_CALLBACK=OFF`. The one-second polling fallback
-remains active.
+Wire the adapter into the sample's driver shell as described in
+[Official-sample integration boundary](#official-sample-integration-boundary)
+below, then sign the resulting DLL. Log the complete `OwnershipProbeResult`
+from `CitrixAdapter::Initialize` on first run: that is the authoritative
+Phase-0 verdict.
+
+Repeat steps 3 and 4 per architecture if both x86 and x64 Workspace builds are
+present. Citrix Workspace 2603 and later can be native x64, and an x86 DLL
+cannot load into that process.
 
 ### Official-sample integration boundary
 
@@ -272,9 +344,14 @@ Native x64 CWA uses native configuration paths; x86 CWA on x64 Windows uses
 location, and editing `Module.ini` after Workspace installation does not
 retroactively register a module.
 
-For that reason this prototype does not contain a fabricated `.reg` file.
-Use the selected SDK sample's installer/configuration entry as the source of
-truth:
+For that reason this prototype does not contain a fabricated `.reg` file: it
+cannot know which Workspace release you run. That is an argument against
+shipping a *generic* one, not evidence that your fleet needs something
+complicated. Capture the registration once against your pinned Workspace
+build, and it becomes a fixed artifact like the DLL.
+
+Do this once per Workspace generation, using the selected SDK sample's
+installer/configuration entry as the source of truth:
 
 1. Pick a unique module name such as `DENCAPVD` (the module name need not equal
    the `DENCAP` channel).
@@ -287,6 +364,12 @@ truth:
 6. Pilot Phase 0, lease expiry, Workspace reconnect, multi-monitor changes,
    Desktop Viewer mode changes, and browser crash recovery before broad
    deployment.
+
+After that capture, the per-endpoint install is the DLL plus those recorded
+configuration-storage values — one package, or a golden-image bake-in. Note
+that copying the DLL alone does nothing: CWA reads its module list from
+configuration storage seeded at Workspace install time, so a file drop with no
+registration is never loaded.
 
 The scripts in [deploy](deploy) copy and remove a validated binary using
 `SupportsShouldProcess`; they intentionally do **not** edit the registry.
