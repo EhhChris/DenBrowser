@@ -45,24 +45,49 @@ if(DENCAP_BUILD_TESTS)
 endif()
 
 if(DENCAP_BUILD_CITRIX_ADAPTER)
-  set(CITRIX_VC_INCLUDE_DIR "" CACHE PATH
-      "Directory containing the matching Citrix SDK vdapi.h and wdapi.h")
-  set(CITRIX_VDAPI_LIBRARY "" CACHE FILEPATH
-      "Full path to the matching architecture's Citrix Vdapi.lib")
-  set(CITRIX_WDICA_LIBRARY "" CACHE FILEPATH
-      "Optional full path to the matching Citrix wdica30.lib")
+  # Normally the only variable an integrator sets. Everything below is derived
+  # from it; see cmake/DenCapCitrixSdk.cmake for the per-generation overrides.
+  set(CITRIX_VCSDK_ROOT "" CACHE PATH
+      "Root of the unpacked Citrix Virtual Channel SDK matching the target \
+Citrix Workspace generation and architecture")
+  set(CITRIX_VCSDK_VERSION "" CACHE STRING
+      "Optional label for the SDK/Workspace generation, recorded in the \
+configure summary so a build tree states which SDK produced it")
 
-  if(NOT EXISTS "${CITRIX_VC_INCLUDE_DIR}/vdapi.h" OR
-     NOT EXISTS "${CITRIX_VC_INCLUDE_DIR}/wdapi.h")
-    message(FATAL_ERROR
-      "Set CITRIX_VC_INCLUDE_DIR to the include directory from the Citrix "
-      "Virtual Channel SDK that matches the target Workspace release.")
+  set(CITRIX_VC_INCLUDE_DIR "" CACHE PATH
+      "Override: directory containing the matching Citrix SDK vdapi.h and \
+wdapi.h")
+  set(CITRIX_VDAPI_LIBRARY "" CACHE FILEPATH
+      "Override: full path to the matching architecture's Citrix Vdapi.lib")
+  set(CITRIX_WDICA_LIBRARY "" CACHE FILEPATH
+      "Override: full path to the matching Citrix wdica30.lib")
+
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/DenCapCitrixSdk.cmake")
+  dencap_resolve_citrix_sdk(${CMAKE_SIZEOF_VOID_P})
+
+  if(CITRIX_VCSDK_VERSION)
+    set(_dencap_sdk_label "${CITRIX_VCSDK_VERSION}")
+  else()
+    set(_dencap_sdk_label "unspecified (set CITRIX_VCSDK_VERSION to record it)")
   endif()
-  if(NOT EXISTS "${CITRIX_VDAPI_LIBRARY}")
-    message(FATAL_ERROR
-      "Set CITRIX_VDAPI_LIBRARY to the exact Vdapi.lib for the target "
-      "Workspace architecture.")
+  if(CITRIX_WDICA_LIBRARY)
+    set(_dencap_wdica_label "${CITRIX_WDICA_LIBRARY}")
+  else()
+    set(_dencap_wdica_label "not found (optional)")
   endif()
+  if(DENCAP_CITRIX_SDK_ROOT)
+    set(_dencap_root_label "${DENCAP_CITRIX_SDK_ROOT}")
+  else()
+    set(_dencap_root_label "not set (using explicit path overrides)")
+  endif()
+  message(STATUS "DENCAP Citrix adapter:")
+  message(STATUS "  SDK version:     ${_dencap_sdk_label}")
+  message(STATUS "  SDK root:        ${_dencap_root_label}")
+  message(STATUS "  Target arch:     ${DENCAP_CITRIX_TARGET_ARCH}")
+  message(STATUS "  Headers:         ${CITRIX_VC_INCLUDE_DIR}")
+  message(STATUS "  Vdapi.lib:       ${CITRIX_VDAPI_LIBRARY}")
+  message(STATUS "  wdica30.lib:     ${_dencap_wdica_label}")
+  message(STATUS "  Window callback: ${DENCAP_CITRIX_HAS_WINDOW_CALLBACK}")
 
   add_library(dencap_citrix_adapter STATIC
     client/dencap_citrix_adapter.cpp
@@ -79,10 +104,9 @@ if(DENCAP_BUILD_CITRIX_ADAPTER)
     dencap_core
     "${CITRIX_VDAPI_LIBRARY}"
   )
+  # Existence was validated during resolution; only some SDK generations ship
+  # wdica30.lib as a separate import library.
   if(CITRIX_WDICA_LIBRARY)
-    if(NOT EXISTS "${CITRIX_WDICA_LIBRARY}")
-      message(FATAL_ERROR "CITRIX_WDICA_LIBRARY does not exist")
-    endif()
     target_link_libraries(dencap_citrix_adapter PUBLIC
       "${CITRIX_WDICA_LIBRARY}"
     )
