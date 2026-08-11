@@ -54,7 +54,7 @@ diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
 index 6e2b95ff7f93..d0b21b63c483 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3888,6 +3888,536 @@
+@@ -3888,6 +3888,545 @@
 
  #endif  // MOZ_WIDGET_ANDROID
 
@@ -67,7 +67,7 @@ index 6e2b95ff7f93..d0b21b63c483 100644
 +// on-disk mozilla.cfg cannot win — even one with the SAME pref names but
 +// different values is overwritten here.
 +//
-+// 172 prefs locked.
++// 175 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
@@ -142,6 +142,15 @@ index 6e2b95ff7f93..d0b21b63c483 100644
 +  Preferences::SetBool("media.getusermedia.window.focus_source.enabled", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("media.getusermedia.window.focus_source.enabled");
++  Preferences::SetBool("media.cubeb.force_null_context", true,
++                       PrefValueKind::Default);
++  Preferences::Lock("media.cubeb.force_null_context");
++  Preferences::SetCString("media.volume_scale", "0.0",
++                          PrefValueKind::Default);
++  Preferences::Lock("media.volume_scale");
++  Preferences::SetInt("media.wmf.media-engine.enabled", 0,
++                      PrefValueKind::Default);
++  Preferences::Lock("media.wmf.media-engine.enabled");
 +  Preferences::SetBool("devtools.policy.disabled", true,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("devtools.policy.disabled");
@@ -591,7 +600,7 @@ index 6e2b95ff7f93..d0b21b63c483 100644
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -3938,6 +4468,11 @@
+@@ -3938,6 +4477,11 @@
            static_cast<nsISupports*>(static_cast<void*>(sPreferences)),
            "pref-config-startup");
      }
