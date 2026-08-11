@@ -54,7 +54,7 @@ diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
 index 6e2b95ff7f93..d0b21b63c483 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3888,6 +3888,545 @@
+@@ -3888,6 +3888,554 @@
 
  #endif  // MOZ_WIDGET_ANDROID
 
@@ -67,7 +67,7 @@ index 6e2b95ff7f93..d0b21b63c483 100644
 +// on-disk mozilla.cfg cannot win — even one with the SAME pref names but
 +// different values is overwritten here.
 +//
-+// 175 prefs locked.
++// 178 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
@@ -289,6 +289,15 @@ index 6e2b95ff7f93..d0b21b63c483 100644
 +  Preferences::SetBool("network.protocol-handler.external.sms", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("network.protocol-handler.external.sms");
++  Preferences::SetBool("browser.menu.share_url.allow", false,
++                       PrefValueKind::Default);
++  Preferences::Lock("browser.menu.share_url.allow");
++  Preferences::SetBool("browser.toolbars.share-button.enabled", false,
++                       PrefValueKind::Default);
++  Preferences::Lock("browser.toolbars.share-button.enabled");
++  Preferences::SetBool("browser.contentsharing.enabled", false,
++                       PrefValueKind::Default);
++  Preferences::Lock("browser.contentsharing.enabled");
 +  Preferences::SetBool("browser.formfill.enable", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("browser.formfill.enable");
@@ -600,7 +609,7 @@ index 6e2b95ff7f93..d0b21b63c483 100644
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -3938,6 +4477,11 @@
+@@ -3938,6 +4486,11 @@
            static_cast<nsISupports*>(static_cast<void*>(sPreferences)),
            "pref-config-startup");
      }
