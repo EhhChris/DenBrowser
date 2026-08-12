@@ -47,7 +47,6 @@ ac_add_options --disable-profiling            # [dev-reversed] → --enable-prof
 # TODO: This breaks screen-readers such as JAWS. Revisit this.
 ac_add_options --disable-accessibility
 ac_add_options --disable-printing             # Firefox 153+: compile out native printing and print UI
-ac_add_options --disable-audio-backends       # cubeb builds with no backend; WASAPI is never compiled in (patch 025)
 
 # ── macOS-specific ────────────────────────────────────────────────────────────
 # Uncomment and set SDK path for your Xcode version:

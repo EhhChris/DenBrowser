@@ -95,7 +95,7 @@ single bypass still leaves the rest in place:
 1. **Build-time flags** (`config/mozconfig`) — `--disable-crashreporter`,
    `--disable-updater`, `--disable-tests`, `--disable-parental-controls`,
    `--disable-profiling`, `--disable-accessibility`, `--disable-printing`,
-   `--disable-audio-backends`, `--enable-hardening`,
+   `--enable-hardening`,
    `--enable-strip` / `--enable-install-strip`.  Code paths and symbols are
    never compiled in.
 2. **Source patches** — applied to the Firefox source tree before build;
@@ -118,7 +118,6 @@ lives.
 | Profile / on-disk content | — | `SanitizeOnShutdown`, `DisableFormHistory`, `BrowserDataBackup: false` | `browser.privatebrowsing.autostart`, `browser.cache.disk.*`, `media.cache_size`, `media.cache_size.cellular`, `browser.privatebrowsing.forceMediaMemoryCache`, `places.history.enabled`, `signon.rememberSignons`, `browser.formfill.enable`, `browser.sessionstore.*`, `browser.pagethumbnails.capturing_disabled`, `browser.shell.shortcutFavicons`, `dom.serviceWorkers.enabled`, `browser.backup.*`, `browser.profiles.enabled` |
 | Screenshots (built-in + OS capture) | 001 | `DisableFirefoxScreenshots` | `screenshots.browser.component.enabled` |
 | Screen / window / browser capture | 002 | — | `media.getdisplaymedia.enabled`, `media.getusermedia.browser.enabled`, `media.getusermedia.window.focus_source.enabled` |
-| Audio output | 025 | `Autoplay: block-audio-video` | `media.cubeb.force_null_context`, `media.volume_scale`, `media.wmf.media-engine.enabled` |
 | Clipboard + drag-and-drop | 003 | — | `dom.allow_cut_copy`, `dom.event.clipboardevents.enabled` |
 | Downloads / Save As / wallpaper | 004 | — | `browser.download.useDownloadDir`, `browser.download.forbid_open_with`, `browser.download.always_ask_before_handling_new_types`, `browser.download.start_downloads_in_tmp_dir`, `browser.helperApps.deleteTempFileOnExit` |
 | Printing + print-to-PDF | 005 | `PrintingEnabled=false` | `print.enabled` |
@@ -549,6 +548,5 @@ for navigation.
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
 | 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
 | 024 | `windows-machine-certificate-header` | Read the current workstation certificate's public DER from the Windows managed/ordinary Personal stores, require its CN to match the local Windows hostname, and attach it as `X-DenBrowser-Machine-Cert` only on requests claimed by the attestation proxy table. Caller-supplied values are stripped to prevent spoofing and redirect leakage; no private key is opened. |
-| 025 | `disable-audio` | Report every window as muted at `nsPIDOMWindowOuter::GetAudioMuted`, so `AudioChannelService` mutes every audio agent at registration and no `AudioSink` — and therefore no cubeb stream — is ever created. Playback stays silent but otherwise normal: `timeupdate`/`ended` still fire, no `error` event, and no tab sound indicator (`AudibilityMonitor` reads decoded samples inside `AudioSink`, so anything silencing at or below cubeb would leave the speaker icon lit). Backstopped by `CubebUtils::GetVolumeScale` returning `0.0`. Scoped to web content: chrome event sounds (`nsSound` → winmm) are left audible, since every caller is chrome-initiated or needs a user gesture on browser UI — content prompts already have their sound suppressed upstream — and silencing them would remove the `accessibility.typeaheadfind.enablesound` find-bar cues for no containment gain. |
 
 ---
