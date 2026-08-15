@@ -12,6 +12,7 @@ SKIP_FETCH=0
 SKIP_PATCHES=0
 SKIP_PATCH_ARGS=()
 DEV_MODE=0
+REFRESH_WINDOWS_APP_RESOURCES=0
 FF_VERSION=""
 TARBALL_PATH=""
 JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
@@ -29,10 +30,10 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev] [--ffversion X.Y.Z] [--tarball PATH]"
             echo "  --skip-patch N    Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
             echo "                    Repeatable: --skip-patch 6 --skip-patch 8"
-            echo "  --dev             Enable DevTools + testing features: skips patch 008, strips"
-            echo "                    devtools locks from policies.json and mozilla.cfg, and adjusts"
-            echo "                    mozconfig to enable marionette, crashreporter, profiling, and"
-            echo "                    preserve debug symbols (no strip)."
+            echo "  --dev             Enable DevTools + testing features and use DEMO branding:"
+            echo "                    skips patches 8, 15, 17, strips devtools locks from policies.json and"
+            echo "                    mozilla.cfg, and adjusts mozconfig to enable marionette,"
+            echo "                    crashreporter, profiling, and preserve debug symbols (no strip)."
             echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
             echo "                    fetching the latest from Mozilla's product-details API."
             echo "  --tarball PATH    Use a specific source tarball (firefox-X.Y.Zesr.source.tar.xz)."
@@ -56,8 +57,11 @@ if [[ -n "$TARBALL_PATH" && ! -f "$TARBALL_PATH" ]]; then
 fi
 
 if [[ $DEV_MODE -eq 1 ]]; then
-    echo "[build] DEV MODE: DevTools enabled, marionette/crashreporter/profiling enabled, strip disabled"
+    echo "[build] DEV MODE: DEMO branding, DevTools, marionette/crashreporter/profiling enabled; strip disabled"
     SKIP_PATCH_ARGS+=(--skip-patch 8)
+    # Patch 015 blocks starting the browser with things like marionette for
+    # testing automations. Disable in dev mode.
+    SKIP_PATCH_ARGS+=(--skip-patch 15)
     # Patch 017 compiles every mozilla.cfg lockPref into libxul, including the
     # devtools.* locks. Skipping it in dev mode lets the sed-stripped on-disk
     # mozilla.cfg govern devtools state and keeps the compiled binary clean of
@@ -562,8 +566,28 @@ fi
 # ── Step 2.9: Copy DenBrowser branding assets ───────────────────────────────────
 BRANDING_DIR="$FIREFOX_SRC/browser/branding/denbrowser"
 if [[ -d "$BRANDING_DIR" ]]; then
-    ICONSET="$ROOT_DIR/branding/DenBrowser.iconset"
-    echo "[build] Copying DenBrowser branding icons..."
+    if [[ $DEV_MODE -eq 1 ]]; then
+        ICONSET="$ROOT_DIR/branding/DenBrowserDev.iconset"
+        BRANDING_ASSETS="$ROOT_DIR/branding/denbrowser-dev"
+        BRANDING_VARIANT="development (DEMO)"
+    else
+        ICONSET="$ROOT_DIR/branding/DenBrowser.iconset"
+        BRANDING_ASSETS="$ROOT_DIR/branding/denbrowser"
+        BRANDING_VARIANT="production"
+    fi
+
+    if [[ ! -d "$ICONSET" || ! -d "$BRANDING_ASSETS" ]]; then
+        echo "[build] ERROR: $BRANDING_VARIANT branding assets are missing." >&2
+        echo "[build]        Expected $ICONSET and $BRANDING_ASSETS" >&2
+        exit 1
+    fi
+
+    echo "[build] Copying DenBrowser $BRANDING_VARIANT branding icons..."
+
+    # Reinstall the selected variant every run. This prevents --skip-patches from
+    # leaving DEMO assets in a later production build (or vice versa) when both
+    # builds reuse the same extracted Firefox source tree.
+    cp -R "$BRANDING_ASSETS/." "$BRANDING_DIR/"
 
     cp "$ICONSET/icon_16x16.png"    "$BRANDING_DIR/default16.png"
     cp "$ICONSET/icon_32x32.png"    "$BRANDING_DIR/default32.png"
@@ -572,6 +596,24 @@ if [[ -d "$BRANDING_DIR" ]]; then
     cp "$ICONSET/icon_256x256.png"  "$BRANDING_DIR/default256.png"
 
     cp "$ICONSET/icon_48x48.png"   "$BRANDING_DIR/default48.png"
+
+    # Firefox's generated Windows .res targets depend on the generated .rc file,
+    # but not on the .ico files referenced through FIREFOX_ICO/PBMODE_ICO defines.
+    # An incremental build therefore leaves the old icon embedded in the EXEs even
+    # after the selected branding assets change. Remove only those generated
+    # resource outputs so mach recompiles and relinks them with the current icons.
+    if [[ -f "$OBJDIR/browser/app/denbrowser.exe.rc" || -f "$OBJDIR/dist/bin/denbrowser.exe" ]]; then
+        REFRESH_WINDOWS_APP_RESOURCES=1
+        WINDOWS_RESOURCES=(
+            "$OBJDIR/browser/app/denbrowser.exe.res"
+            "$OBJDIR/browser/app/desktop-launcher/desktop-launcher.exe.res"
+            "$OBJDIR/browser/app/pbproxy/private_browsing.exe.res"
+        )
+        for resource in "${WINDOWS_RESOURCES[@]}"; do
+            rm -f -- "$resource"
+        done
+        echo "[build] Invalidated Windows executable resources so embedded icons are refreshed."
+    fi
 
     # Generate macOS .icns (macOS only)
     if command -v iconutil &>/dev/null; then
@@ -583,7 +625,7 @@ if [[ -d "$BRANDING_DIR" ]]; then
         echo "[build] Generated firefox.icns, document.icns, disk.icns"
     fi
 
-    echo "[build] Branding assets installed."
+    echo "[build] $BRANDING_VARIANT branding assets installed."
 else
     echo "[build] Branding directory not found — skipping branding asset copy."
 fi
@@ -652,6 +694,15 @@ fi
 echo "[build] Starting Firefox build (this will take 30–90 minutes)..."
 cd "$FIREFOX_SRC"
 ./mach build
+
+# The top-level incremental scheduler does not revisit browser/app merely because
+# a generated .res file is missing. Explicitly run that supported subdirectory
+# target after the main build so the refreshed resources are compiled and linked
+# into denbrowser.exe and its launcher helpers.
+if [[ $REFRESH_WINDOWS_APP_RESOURCES -eq 1 ]]; then
+    echo "[build] Relinking Windows launchers with refreshed branding icons..."
+    ./mach build --allow-subdirectory-build browser/app
+fi
 
 # Record the source version this objdir is now built against, so the next run
 # can detect a mismatch (see the clobber guard above) instead of silently
