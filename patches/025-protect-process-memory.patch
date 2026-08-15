@@ -29,10 +29,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #              in-process, and physical-display observation are out of scope.
 
 diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
-index 8337336dc894b44ea696bb780e448dfbdd8b6357..5ee9106cf3ea232e559b4616c3961a3a4750260e 100644
+index 64ab5f306a62fd1d1f55c450d7fab6faa4c8ef6a..4fd44878c192cf90e89cccebbd0643a46e2c7fec 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.cpp
 +++ b/browser/app/winlauncher/LauncherProcessWin.cpp
-@@ -6,6 +6,7 @@
+@@ -7,6 +7,7 @@
  
  #include "mozilla/CmdLineAndEnvUtils.h"
  #include "mozilla/DebugOnly.h"
@@ -40,38 +40,33 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..5ee9106cf3ea232e559b4616c3961a3a
  #include "mozilla/glue/Debug.h"
  #include "mozilla/GeckoArgs.h"
  #include "mozilla/Maybe.h"
-@@ -528,18 +529,24 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
-     siex.StartupInfo.lpTitle = currentStartupInfo.lpTitle;
+@@ -735,15 +736,21 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+     return Some(127);
    }
  
 +  mozilla::denbrowser::ProcessSecurityAttributes processSecurity;
 +  if (!processSecurity) {
 +    HandleLauncherError(LAUNCHER_ERROR_FROM_WIN32(processSecurity.LastError()));
-+    return Nothing();
++    return Some(127);
 +  }
 +
-   PROCESS_INFORMATION pi = {};
-   BOOL createOk;
- 
    if (mediumIlToken.get()) {
--    createOk =
--        ::CreateProcessAsUserW(mediumIlToken.get(), argv[0], cmdLine.get(),
--                               nullptr, nullptr, inheritHandles, creationFlags,
--                               nullptr, nullptr, &siex.StartupInfo, &pi);
-+    createOk = ::CreateProcessAsUserW(mediumIlToken.get(), argv[0],
-+                                      cmdLine.get(), processSecurity.Get(),
-+                                      nullptr, inheritHandles, creationFlags,
-+                                      nullptr, nullptr, &siex.StartupInfo, &pi);
+     createOk = ::CreateProcessAsUserW(
+-        mediumIlToken.get(), argv[0], cmdLine.get(), nullptr, nullptr, FALSE,
+-        creationFlags, environmentBlock.get(), applicationDirectory.c_str(),
+-        &siex.StartupInfo, &pi);
++        mediumIlToken.get(), argv[0], cmdLine.get(), processSecurity.Get(),
++        nullptr, FALSE, creationFlags, environmentBlock.get(),
++        applicationDirectory.c_str(), &siex.StartupInfo, &pi);
    } else {
--    createOk = ::CreateProcessW(argv[0], cmdLine.get(), nullptr, nullptr,
--                                inheritHandles, creationFlags, nullptr, nullptr,
--                                &siex.StartupInfo, &pi);
-+    createOk = ::CreateProcessW(argv[0], cmdLine.get(), processSecurity.Get(),
-+                                nullptr, inheritHandles, creationFlags, nullptr,
-+                                nullptr, &siex.StartupInfo, &pi);
+     createOk =
+-        ::CreateProcessW(argv[0], cmdLine.get(), nullptr, nullptr, FALSE,
+-                         creationFlags, environmentBlock.get(),
++        ::CreateProcessW(argv[0], cmdLine.get(), processSecurity.Get(), nullptr,
++                         FALSE, creationFlags, environmentBlock.get(),
+                          applicationDirectory.c_str(), &siex.StartupInfo, &pi);
    }
  
-   if (!createOk) {
 diff --git a/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp b/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..15576fa514c9a1c941db134bcf9c4679167e42a8
@@ -325,18 +320,18 @@ index 0000000000000000000000000000000000000000..15576fa514c9a1c941db134bcf9c4679
 +  return ParentMain(argv[0]);
 +}
 diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
-index a4687d9dc0cdb2a9c9515080fc5ac1f0385a1c1c..c9e5dabbaf533019831f80023c8baeea67e94b24 100644
+index 36b3c6392b1767795d66361b89cf12a9cf280f04..2a93263a102e38e11ed04d98eee5a44d47212d0a 100644
 --- a/browser/app/winlauncher/test/moz.build
 +++ b/browser/app/winlauncher/test/moz.build
-@@ -7,6 +7,7 @@ DisableStlWrapping()
- GeckoCppUnitTests(
+@@ -8,6 +8,7 @@ GeckoCppUnitTests(
      [
          "TestCrossProcessWin",
+         "TestDenBrowserLaunchPolicy",
 +        "TestDenBrowserProcessSecurity",
          "TestSafeThreadLocal",
          "TestSameBinary",
      ],
-@@ -18,6 +19,7 @@ LOCAL_INCLUDES += [
+@@ -19,6 +20,7 @@ LOCAL_INCLUDES += [
  ]
  
  OS_LIBS += [
