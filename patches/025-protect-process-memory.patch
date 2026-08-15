@@ -1,0 +1,547 @@
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 025-protect-process-memory
+#
+# PURPOSE: Give the real browser and Firefox-owned Windows child processes a
+#          protected process DACL from birth so ordinary same-user dump tools
+#          cannot acquire PROCESS_VM_READ or rewrite the descriptor owner/DACL.
+#
+# SECURITY MODEL:
+#   - A single mozglue helper owns the fixed Owner Rights deny mask 0x000C0010.
+#   - The main, sandboxed-child, and unsandboxed-child creation paths pass the
+#     descriptor at process creation and fail closed if it cannot be built.
+#   - SYSTEM retains full access. Enabled SeDebugPrivilege remains a documented
+#     Windows bypass.
+#   - Query, lifecycle, IPC handle duplication, and conventional injection
+#     rights remain available to the ordinary owner.
+#
+# COMPATIBILITY: PROCESS_DUP_HANDLE must remain allowed because Firefox broker
+#                IPC reopens child peers to transfer handles. The stricter
+#                0x000C00FA profile prevents normal browser startup.
+#
+# LIMITATIONS: Existing creator handles are not revoked. A custom same-user
+#              tool can use the allowed PROCESS_DUP_HANDLE right to duplicate
+#              a target pseudohandle and bypass the memory-read denial. This is
+#              a bounded Task Manager/ordinary MiniDumpWriteDump mitigation,
+#              not a determined same-user boundary. Privileged, kernel,
+#              in-process, and physical-display observation are out of scope.
+
+diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
+index 8337336dc894b44ea696bb780e448dfbdd8b6357..5ee9106cf3ea232e559b4616c3961a3a4750260e 100644
+--- a/browser/app/winlauncher/LauncherProcessWin.cpp
++++ b/browser/app/winlauncher/LauncherProcessWin.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "mozilla/CmdLineAndEnvUtils.h"
+ #include "mozilla/DebugOnly.h"
++#include "mozilla/DenBrowserProcessSecurity.h"
+ #include "mozilla/glue/Debug.h"
+ #include "mozilla/GeckoArgs.h"
+ #include "mozilla/Maybe.h"
+@@ -528,18 +529,24 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+     siex.StartupInfo.lpTitle = currentStartupInfo.lpTitle;
+   }
+ 
++  mozilla::denbrowser::ProcessSecurityAttributes processSecurity;
++  if (!processSecurity) {
++    HandleLauncherError(LAUNCHER_ERROR_FROM_WIN32(processSecurity.LastError()));
++    return Nothing();
++  }
++
+   PROCESS_INFORMATION pi = {};
+   BOOL createOk;
+ 
+   if (mediumIlToken.get()) {
+-    createOk =
+-        ::CreateProcessAsUserW(mediumIlToken.get(), argv[0], cmdLine.get(),
+-                               nullptr, nullptr, inheritHandles, creationFlags,
+-                               nullptr, nullptr, &siex.StartupInfo, &pi);
++    createOk = ::CreateProcessAsUserW(mediumIlToken.get(), argv[0],
++                                      cmdLine.get(), processSecurity.Get(),
++                                      nullptr, inheritHandles, creationFlags,
++                                      nullptr, nullptr, &siex.StartupInfo, &pi);
+   } else {
+-    createOk = ::CreateProcessW(argv[0], cmdLine.get(), nullptr, nullptr,
+-                                inheritHandles, creationFlags, nullptr, nullptr,
+-                                &siex.StartupInfo, &pi);
++    createOk = ::CreateProcessW(argv[0], cmdLine.get(), processSecurity.Get(),
++                                nullptr, inheritHandles, creationFlags, nullptr,
++                                nullptr, &siex.StartupInfo, &pi);
+   }
+ 
+   if (!createOk) {
+diff --git a/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp b/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..15576fa514c9a1c941db134bcf9c4679167e42a8
+--- /dev/null
++++ b/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp
+@@ -0,0 +1,246 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#include <windows.h>
++
++#include <stdio.h>
++#include <string.h>
++#include <wchar.h>
++
++#include <string>
++
++#include "mozilla/DenBrowserProcessSecurity.h"
++
++using mozilla::denbrowser::kDeniedProcessAccess;
++using mozilla::denbrowser::ProcessSecurityAttributes;
++
++static constexpr char kTestName[] = "DenBrowserProcessSecurity";
++
++static int Fail(const char* aMessage, DWORD aError = ERROR_SUCCESS) {
++  printf("TEST-FAILED | %s | %s", kTestName, aMessage);
++  if (aError != ERROR_SUCCESS) {
++    printf(" (error=%lu)", aError);
++  }
++  printf("\n");
++  return 1;
++}
++
++static bool DisableDebugPrivilege() {
++  HANDLE token = nullptr;
++  if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES,
++                          &token)) {
++    return false;
++  }
++
++  LUID luid = {};
++  if (!::LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &luid)) {
++    ::CloseHandle(token);
++    return false;
++  }
++
++  TOKEN_PRIVILEGES privileges = {};
++  privileges.PrivilegeCount = 1;
++  privileges.Privileges[0].Luid = luid;
++  privileges.Privileges[0].Attributes = 0;
++  ::SetLastError(ERROR_SUCCESS);
++  BOOL adjusted =
++      ::AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr);
++  DWORD error = ::GetLastError();
++  ::CloseHandle(token);
++  return adjusted &&
++         (error == ERROR_SUCCESS || error == ERROR_NOT_ALL_ASSIGNED);
++}
++
++static bool IsAceFor(ACE_HEADER* aHeader, WELL_KNOWN_SID_TYPE aSidType,
++                     ACCESS_MASK aMask) {
++  if (aHeader->AceType == ACCESS_DENIED_ACE_TYPE) {
++    auto* ace = reinterpret_cast<ACCESS_DENIED_ACE*>(aHeader);
++    return ace->Mask == aMask && ::IsWellKnownSid(&ace->SidStart, aSidType);
++  }
++  if (aHeader->AceType == ACCESS_ALLOWED_ACE_TYPE) {
++    auto* ace = reinterpret_cast<ACCESS_ALLOWED_ACE*>(aHeader);
++    return ace->Mask == aMask && ::IsWellKnownSid(&ace->SidStart, aSidType);
++  }
++  return false;
++}
++
++static bool ValidateDescriptor(ProcessSecurityAttributes& aSecurity) {
++  SECURITY_ATTRIBUTES* attributes = aSecurity.Get();
++  if (!attributes || attributes->nLength != sizeof(SECURITY_ATTRIBUTES) ||
++      attributes->bInheritHandle ||
++      !::IsValidSecurityDescriptor(attributes->lpSecurityDescriptor)) {
++    return false;
++  }
++
++  SECURITY_DESCRIPTOR_CONTROL control = 0;
++  DWORD revision = 0;
++  if (!::GetSecurityDescriptorControl(attributes->lpSecurityDescriptor,
++                                      &control, &revision) ||
++      !(control & SE_DACL_PROTECTED)) {
++    return false;
++  }
++
++  BOOL present = FALSE;
++  BOOL defaulted = FALSE;
++  PACL dacl = nullptr;
++  if (!::GetSecurityDescriptorDacl(attributes->lpSecurityDescriptor, &present,
++                                   &dacl, &defaulted) ||
++      !present || !dacl || dacl->AceCount != 3) {
++    return false;
++  }
++
++  ACE_HEADER* denyOwner = nullptr;
++  ACE_HEADER* allowSystem = nullptr;
++  ACE_HEADER* allowOwner = nullptr;
++  return ::GetAce(dacl, 0, reinterpret_cast<void**>(&denyOwner)) &&
++         ::GetAce(dacl, 1, reinterpret_cast<void**>(&allowSystem)) &&
++         ::GetAce(dacl, 2, reinterpret_cast<void**>(&allowOwner)) &&
++         denyOwner->AceType == ACCESS_DENIED_ACE_TYPE &&
++         IsAceFor(denyOwner, WinCreatorOwnerRightsSid, kDeniedProcessAccess) &&
++         allowSystem->AceType == ACCESS_ALLOWED_ACE_TYPE &&
++         IsAceFor(allowSystem, WinLocalSystemSid, GENERIC_ALL) &&
++         allowOwner->AceType == ACCESS_ALLOWED_ACE_TYPE &&
++         IsAceFor(allowOwner, WinCreatorOwnerRightsSid, GENERIC_ALL);
++}
++
++static bool ExpectOpen(DWORD aPid, ACCESS_MASK aAccess, bool aAllowed) {
++  ::SetLastError(ERROR_SUCCESS);
++  HANDLE process = ::OpenProcess(aAccess, FALSE, aPid);
++  DWORD error = ::GetLastError();
++  if (process) {
++    ::CloseHandle(process);
++  }
++  return aAllowed ? process != nullptr
++                  : process == nullptr && error == ERROR_ACCESS_DENIED;
++}
++
++static int ChildMain() {
++  char source[] = "denbrowser";
++  char destination[sizeof(source)] = {};
++  SIZE_T read = 0;
++  if (!::ReadProcessMemory(::GetCurrentProcess(), source, destination,
++                           sizeof(source), &read) ||
++      read != sizeof(source) || memcmp(source, destination, sizeof(source))) {
++    return Fail("ReadProcessMemory failed for the self pseudohandle",
++                ::GetLastError());
++  }
++
++  void* allocation = ::VirtualAllocEx(::GetCurrentProcess(), nullptr, 4096,
++                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++  if (!allocation) {
++    return Fail("VirtualAllocEx failed for the self pseudohandle",
++                ::GetLastError());
++  }
++  if (!::VirtualFreeEx(::GetCurrentProcess(), allocation, 0, MEM_RELEASE)) {
++    return Fail("VirtualFreeEx failed for the self pseudohandle",
++                ::GetLastError());
++  }
++
++  HANDLE event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
++  HANDLE duplicate = nullptr;
++  if (!event ||
++      !::DuplicateHandle(::GetCurrentProcess(), event, ::GetCurrentProcess(),
++                         &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
++    DWORD error = ::GetLastError();
++    if (event) {
++      ::CloseHandle(event);
++    }
++    return Fail("DuplicateHandle failed for the self pseudohandle", error);
++  }
++  ::CloseHandle(duplicate);
++  ::CloseHandle(event);
++
++  if (!ExpectOpen(::GetCurrentProcessId(), PROCESS_VM_READ, false)) {
++    return Fail("A real self reopen unexpectedly obtained PROCESS_VM_READ");
++  }
++  return 0;
++}
++
++static int ParentMain(const wchar_t* aExecutable) {
++  if (!DisableDebugPrivilege()) {
++    return Fail("Could not disable SeDebugPrivilege", ::GetLastError());
++  }
++
++  ProcessSecurityAttributes security;
++  if (!security) {
++    return Fail("Could not construct process security attributes",
++                security.LastError());
++  }
++  if (!ValidateDescriptor(security)) {
++    return Fail("Process security descriptor did not match the policy");
++  }
++
++  std::wstring commandLine = L"\"";
++  commandLine += aExecutable;
++  commandLine += L"\" --child";
++  STARTUPINFOW startup = {sizeof(startup)};
++  PROCESS_INFORMATION process = {};
++  if (!::CreateProcessW(aExecutable, commandLine.data(), security.Get(),
++                        nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr,
++                        &startup, &process)) {
++    return Fail("CreateProcessW failed", ::GetLastError());
++  }
++
++  int result = 0;
++  const ACCESS_MASK allowed[] = {
++      PROCESS_QUERY_LIMITED_INFORMATION,
++      PROCESS_QUERY_INFORMATION,
++      PROCESS_CREATE_THREAD,
++      PROCESS_CREATE_PROCESS,
++      PROCESS_DUP_HANDLE,
++      PROCESS_VM_OPERATION,
++      PROCESS_VM_WRITE,
++      SYNCHRONIZE,
++      PROCESS_TERMINATE,
++  };
++  for (ACCESS_MASK access : allowed) {
++    if (!ExpectOpen(process.dwProcessId, access, true)) {
++      result = Fail("An allowed process open failed", ::GetLastError());
++      break;
++    }
++  }
++
++  const ACCESS_MASK denied[] = {PROCESS_VM_READ, WRITE_DAC, WRITE_OWNER,
++                                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
++                                PROCESS_ALL_ACCESS};
++  if (!result) {
++    for (ACCESS_MASK access : denied) {
++      if (!ExpectOpen(process.dwProcessId, access, false)) {
++        result = Fail("A denied process open unexpectedly succeeded");
++        break;
++      }
++    }
++  }
++
++  if (!result && ::ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
++    result = Fail("ResumeThread failed", ::GetLastError());
++  }
++  if (!result &&
++      ::WaitForSingleObject(process.hProcess, 30000) != WAIT_OBJECT_0) {
++    result = Fail("Timed out waiting for the child", ::GetLastError());
++  }
++
++  DWORD exitCode = 1;
++  if (!result &&
++      (!::GetExitCodeProcess(process.hProcess, &exitCode) || exitCode != 0)) {
++    result = Fail("The child self-access checks failed", exitCode);
++  }
++
++  if (result) {
++    ::TerminateProcess(process.hProcess, 1);
++  }
++  ::CloseHandle(process.hThread);
++  ::CloseHandle(process.hProcess);
++  return result;
++}
++
++extern "C" int wmain(int argc, wchar_t* argv[]) {
++  if (argc == 2 && !wcscmp(argv[1], L"--child")) {
++    return ChildMain();
++  }
++  if (argc != 1) {
++    return Fail("Unexpected command line");
++  }
++  return ParentMain(argv[0]);
++}
+diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
+index a4687d9dc0cdb2a9c9515080fc5ac1f0385a1c1c..c9e5dabbaf533019831f80023c8baeea67e94b24 100644
+--- a/browser/app/winlauncher/test/moz.build
++++ b/browser/app/winlauncher/test/moz.build
+@@ -7,6 +7,7 @@ DisableStlWrapping()
+ GeckoCppUnitTests(
+     [
+         "TestCrossProcessWin",
++        "TestDenBrowserProcessSecurity",
+         "TestSafeThreadLocal",
+         "TestSameBinary",
+     ],
+@@ -18,6 +19,7 @@ LOCAL_INCLUDES += [
+ ]
+ 
+ OS_LIBS += [
++    "advapi32",
+     "ntdll",
+ ]
+ 
+diff --git a/ipc/chromium/src/base/process_util_win.cc b/ipc/chromium/src/base/process_util_win.cc
+index c281aeeadbad97faf2be68c2fdeeff84a41d365b..cc148f73f4f1131839ef12bd6e8d23bd8bff1428 100644
+--- a/ipc/chromium/src/base/process_util_win.cc
++++ b/ipc/chromium/src/base/process_util_win.cc
+@@ -17,8 +17,9 @@
+ #include "base/logging.h"
+ #include "base/win_util.h"
+ 
+-#include "mozilla/ipc/LaunchError.h"
++#include "mozilla/DenBrowserProcessSecurity.h"
+ #include "mozilla/Result.h"
++#include "mozilla/ipc/LaunchError.h"
+ 
+ #include <algorithm>
+ #include <stdio.h>
+@@ -303,11 +304,19 @@ Result<Ok, LaunchError> LaunchApp(const std::wstring& cmdline,
+   FreeEnvironmentStrings(original_environment);
+   LPVOID new_env_ptr = (void*)new_environment.data();
+ 
++  mozilla::denbrowser::ProcessSecurityAttributes process_security;
++  if (!process_security) {
++    if (lpAttributeList) FreeThreadAttributeList(lpAttributeList);
++    return Err(LaunchError::FromWin32Error("ProcessSecurityAttributes",
++                                           process_security.LastError()));
++  }
++
+   PROCESS_INFORMATION process_info;
+ 
+-  BOOL createdOK = CreateProcess(
+-      NULL, const_cast<wchar_t*>(cmdline.c_str()), NULL, NULL, bInheritHandles,
+-      dwCreationFlags, new_env_ptr, NULL, &startup_info, &process_info);
++  BOOL createdOK = CreateProcess(NULL, const_cast<wchar_t*>(cmdline.c_str()),
++                                 process_security.Get(), NULL, bInheritHandles,
++                                 dwCreationFlags, new_env_ptr, NULL,
++                                 &startup_info, &process_info);
+   if (lpAttributeList) FreeThreadAttributeList(lpAttributeList);
+   if (!createdOK) {
+     DLOG(WARNING) << "CreateProcess Failed: " << GetLastError();
+diff --git a/mozglue/misc/DenBrowserProcessSecurity.cpp b/mozglue/misc/DenBrowserProcessSecurity.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c441d4ce643f709aed2561b10698eb62f8d0cbc
+--- /dev/null
++++ b/mozglue/misc/DenBrowserProcessSecurity.cpp
+@@ -0,0 +1,60 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#include "mozilla/DenBrowserProcessSecurity.h"
++
++#include <sddl.h>
++
++namespace {
++
++constexpr wchar_t kProcessSecuritySddl[] =
++    L"D:P(D;;0x000C0010;;;OW)(A;;GA;;;SY)(A;;GA;;;OW)";
++
++static_assert(mozilla::denbrowser::kDeniedProcessAccess == 0x000C0010);
++
++}  // namespace
++
++namespace mozilla::denbrowser {
++
++ProcessSecurityAttributes::ProcessSecurityAttributes() {
++  if (!::ConvertStringSecurityDescriptorToSecurityDescriptorW(
++          kProcessSecuritySddl, SDDL_REVISION_1, &mDescriptor, nullptr)) {
++    mLastError = ::GetLastError();
++    return;
++  }
++
++  if (!::IsValidSecurityDescriptor(mDescriptor)) {
++    mLastError = ERROR_INVALID_SECURITY_DESCR;
++    ::LocalFree(mDescriptor);
++    mDescriptor = nullptr;
++    return;
++  }
++
++  SECURITY_DESCRIPTOR_CONTROL control = 0;
++  DWORD revision = 0;
++  if (!::GetSecurityDescriptorControl(mDescriptor, &control, &revision)) {
++    mLastError = ::GetLastError();
++    ::LocalFree(mDescriptor);
++    mDescriptor = nullptr;
++    return;
++  }
++  if (!(control & SE_DACL_PROTECTED)) {
++    mLastError = ERROR_INVALID_SECURITY_DESCR;
++    ::LocalFree(mDescriptor);
++    mDescriptor = nullptr;
++    return;
++  }
++
++  mAttributes.nLength = sizeof(mAttributes);
++  mAttributes.lpSecurityDescriptor = mDescriptor;
++  mAttributes.bInheritHandle = FALSE;
++}
++
++ProcessSecurityAttributes::~ProcessSecurityAttributes() {
++  if (mDescriptor) {
++    ::LocalFree(mDescriptor);
++  }
++}
++
++}  // namespace mozilla::denbrowser
+diff --git a/mozglue/misc/DenBrowserProcessSecurity.h b/mozglue/misc/DenBrowserProcessSecurity.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..31786e048fc0d1c1179f8b372b9ace7ecda71a35
+--- /dev/null
++++ b/mozglue/misc/DenBrowserProcessSecurity.h
+@@ -0,0 +1,42 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_DenBrowserProcessSecurity_h
++#define mozilla_DenBrowserProcessSecurity_h
++
++#include <windows.h>
++
++#include "mozilla/Types.h"
++
++namespace mozilla::denbrowser {
++
++// PROCESS_DUP_HANDLE must remain available to Firefox's broker IPC channels.
++// Denying PROCESS_VM_READ still blocks the access required by an external
++// MiniDumpWriteDump call, while the standard rights prevent the owner from
++// replacing this protected DACL.
++constexpr ACCESS_MASK kDeniedProcessAccess =
++    PROCESS_VM_READ | WRITE_DAC | WRITE_OWNER;
++
++class MFBT_API ProcessSecurityAttributes final {
++ public:
++  ProcessSecurityAttributes();
++  ~ProcessSecurityAttributes();
++
++  explicit operator bool() const { return mDescriptor != nullptr; }
++  DWORD LastError() const { return mLastError; }
++  SECURITY_ATTRIBUTES* Get() { return mDescriptor ? &mAttributes : nullptr; }
++
++  ProcessSecurityAttributes(const ProcessSecurityAttributes&) = delete;
++  ProcessSecurityAttributes& operator=(const ProcessSecurityAttributes&) =
++      delete;
++
++ private:
++  PSECURITY_DESCRIPTOR mDescriptor = nullptr;
++  SECURITY_ATTRIBUTES mAttributes = {};
++  DWORD mLastError = ERROR_SUCCESS;
++};
++
++}  // namespace mozilla::denbrowser
++
++#endif  // mozilla_DenBrowserProcessSecurity_h
+diff --git a/mozglue/misc/moz.build b/mozglue/misc/moz.build
+index 2099a46a24e0350b95ee8a420214714fc38a4ac2..ded5af7402837ecae913e0b92ce83b5b1229ebeb 100644
+--- a/mozglue/misc/moz.build
++++ b/mozglue/misc/moz.build
+@@ -33,6 +33,7 @@ EXPORTS.mozilla.glue += [
+ 
+ if CONFIG["OS_ARCH"] == "WINNT":
+     EXPORTS.mozilla += [
++        "DenBrowserProcessSecurity.h",
+         "GetKnownFolderPath.h",
+         "PreXULSkeletonUI.h",
+         "StackWalk_windows.h",
+@@ -88,6 +89,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
+         "WindowsUnicode.h",
+     ]
+     SOURCES += [
++        "DenBrowserProcessSecurity.cpp",
+         "GetKnownFolderPath.cpp",
+         "WindowsDiagnostics.cpp",
+         "WindowsDllMain.cpp",
+diff --git a/security/sandbox/chromium/sandbox/win/src/target_process.cc b/security/sandbox/chromium/sandbox/win/src/target_process.cc
+index 739372de276545e5d1285b198177b66bb0eed13c..42b87f5a5f5172aec669c93d5f6ca066b857a8a8 100644
+--- a/security/sandbox/chromium/sandbox/win/src/target_process.cc
++++ b/security/sandbox/chromium/sandbox/win/src/target_process.cc
+@@ -25,6 +25,7 @@
+ #include "base/win/scoped_handle.h"
+ #include "base/win/security_util.h"
+ #include "base/win/startup_information.h"
++#include "mozilla/DenBrowserProcessSecurity.h"
+ #include "sandbox/win/src/crosscall_client.h"
+ #include "sandbox/win/src/crosscall_server.h"
+ #include "sandbox/win/src/policy_low_level.h"
+@@ -187,9 +188,15 @@ ResultCode TargetProcess::Create(
+   new_env = base::internal::AlterEnvironment(std::data(new_env), env_changes);
+ 
+   bool inherit_handles = startup_info_helper->ShouldInheritHandles();
++  mozilla::denbrowser::ProcessSecurityAttributes process_security;
++  if (!process_security) {
++    *win_error = process_security.LastError();
++    return SBOX_ERROR_CREATE_PROCESS;
++  }
++
+   PROCESS_INFORMATION temp_process_info = {};
+   if (!::CreateProcessAsUserW(lockdown_token_.get(), exe_path, cmd_line.get(),
+-                              nullptr,  // No security attribute.
++                              process_security.Get(),
+                               nullptr,  // No thread attribute.
+                               inherit_handles, flags,
+                               new_env.empty() ? nullptr : std::data(new_env),
