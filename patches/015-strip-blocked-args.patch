@@ -1,314 +1,948 @@
-This Source Code Form is subject to the terms of the Mozilla Public
-License, v. 2.0. If a copy of the MPL was not distributed with this
-file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# PATCH 015: Enforce a fail-closed Windows launch contract
+#
+# PURPOSE:
+#   Make Firefox's existing same-binary Windows launcher mandatory for every
+#   public DenBrowser start. The launcher accepts only the canonical public
+#   grammar, constructs a clean OS-derived environment for the real browser,
+#   and transfers an in-memory authorization value before resuming it.
+#
+# PUBLIC GRAMMAR:
+#   denbrowser.exe
+#   denbrowser.exe -osint -url http(s)://...
+#   The exact advisory -os-restarted prefix is also accepted for Windows
+#   Restart Manager, but never widens the grammar or environment contract.
+#
+# SECURITY PROPERTIES:
+#   - Unknown, duplicated, reordered, inline, and alternate-spelling arguments
+#     reject the entire invocation with exit code 127; nothing is stripped.
+#   - -app, -xpcshell, logging aliases, automation, debug, profile, and test
+#     entry points are unreachable from a public launch.
+#   - The browser receives only OS-derived SystemRoot/SystemDrive/Path,
+#     LOCALAPPDATA/TEMP/TMP, and ProgramFiles values. No caller-provided MOZ,
+#     XRE, XPCOM, NSS, proxy, logging, debugging, or loader variable survives.
+#   - Genuine Gecko children require canonical -contentproc placement and an
+#     actual same-binary parent. Browser restarts re-enter the same launcher,
+#     but routing markers never authorize MOZ/XRE state projection.
+#   - Launcher errors fail closed; registry crash fallback cannot enter the
+#     browser in-process.
+#
+# WINDOWS SCOPE:
+#   The lightweight first launcher still begins under the caller's loader
+#   environment. The real browser has a clean environment from process birth.
+#   Eliminating the first-process loader residual would require an external
+#   protected launcher, intentionally outside this Firefox-only design.
 
-# PATCH: 015-strip-blocked-args
-#
-# Strips security-sensitive command-line flags AND environment variables from
-# the process startup state before any Firefox processing occurs, making
-# DenBrowser's lockdowns resistant to being bypassed by invoking the binary
-# directly with custom flags or with security-affecting env vars set.
-#
-# Without this patch, a user with shell access can bypass mozilla.cfg lockdowns
-# in several ways:
-#
-#   denbrowser --profile /tmp/mypersistentprofile     # custom prefs+extensions
-#   MOZ_LOG=all:5 MOZ_LOG_FILE=/tmp/dump denbrowser   # log everything to disk
-#   MOZ_DISABLE_CONTENT_SANDBOX=1 denbrowser          # weaken sandbox
-#   SSLKEYLOGFILE=/tmp/k.log denbrowser               # dump TLS keys
-#   MOZ_PROFILER_STARTUP=1 denbrowser                 # write samples to disk
-#
-# Argv flags stripped (representative — full list in DenBrowserStripBlockedArgs):
-#
-#   --profile / -P / --ProfileManager / --CreateProfile / --migration
-#       Profile selection; a persistent profile bypasses autoconfig +
-#       mozilla.cfg lockdowns and the ramdisk profile (patch 007).
-#   --marionette / --remote-debugging-port / --remote-allow-system-access /
-#   --start-debugger-server / --jsdebugger / --wait-for-jsdebugger /
-#   --jsconsole / --attach-console / --console
-#       Remote-control and debugging surfaces.  Belt over the corresponding
-#       lockPrefs in mozilla.cfg.
-#   --screenshot
-#       Headless capture-to-disk mode that writes a PNG of the URL it was
-#       given — bypasses patch 001 (screenshot disable).
-#   --headless / --new-instance / --no-remote / --safe-mode / --purgecaches
-#       Modes that change save / sandbox / pref-load semantics.
-#   --setDefaultBrowser / --preferences / --recording / --recordreplay
-#       Side-effecting flags with no place in a locked-down deployment.
-#
-# Env vars stripped (representative — full list in DenBrowserStripBlockedEnv):
-#
-#   MOZ_LOG, MOZ_LOG_FILE, NSPR_LOG_MODULES, NSPR_LOG_FILE, R_LOG_*,
-#   SSLKEYLOGFILE
-#       Logging endpoints.  SSLKEYLOGFILE in particular dumps the TLS
-#       master secret to a file readable by any user-level process —
-#       catastrophic against the patch 012 proxy-TLS pinning protections.
-#   MOZ_DISABLE_CONTENT_SANDBOX, MOZ_DISABLE_{GMP,RDD,GPU,SOCKET_PROCESS,
-#       UTILITY,VR}_SANDBOX, MOZ_PERMIT_CSP_VIOLATION
-#       Process-sandbox bypasses.
-#   MOZ_HEADLESS, MOZ_FORCE_DISABLE_E10S, MOZ_USE_REMOTE, MOZ_NO_REMOTE,
-#   MOZ_MARIONETTE, MARIONETTE, MOZ_REMOTE_AGENT, XPCOM_DEBUG_BREAK,
-#   XRE_MAIN_BREAK, MOZ_DEBUG_CHILD_*
-#       Remote-control / alternate-mode / debugger-attach toggles.
-#   MOZ_CRASHREPORTER*
-#       Re-enables crash dump writes (process memory snapshot) despite the
-#       mozconfig --disable-crashreporter flag.
-#   MOZ_PROFILER_STARTUP*
-#       Writes performance samples — including JS source frames — to disk.
-#   MOZ_RUN_GTEST, FUZZER, MOZ_FUZZ
-#       Test-only execution paths that should never fire in a release build.
-#
-# Implementation:
-#
-#   DenStripArg() walks gArgv and removes every occurrence of a named flag
-#   (case-insensitive, handling -, -- and Windows / prefixes), including
-#   inline --flag=value and Windows /flag:value spellings.  Only flags marked
-#   as value-taking consume a separate following argument, so a valueless flag
-#   followed by an ordinary URL does not accidentally remove the URL too.
-#
-#   DenStripEnv() fully removes a variable from the environment so
-#   PR_GetEnv() / getenv() see it as unset.  PR_SetEnv("NAME=") only sets the
-#   variable to empty string — code that uses `if (PR_GetEnv("X"))` for
-#   presence checks would still take the branch.  On Windows we clear both
-#   the CRT _environ table (_putenv_s) and the process env block
-#   (SetEnvironmentVariableA).
-#
-#   DenBrowserStripBlockedArgs() and DenBrowserStripBlockedEnv() are called
-#   from XREMain::XRE_main() immediately after gArgc/gArgv are assigned and
-#   before ScopedLogging initialization — earlier than any other flag or env
-#   processing.
-#
-# This patch operates at the C++ level and cannot be circumvented by profile
-# configuration, mozilla.cfg edits, or enterprise policy changes.
-
-diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
-index 0b0e8a138e45..8656166bf0d1 100644
---- a/toolkit/xre/nsAppRunner.cpp
-+++ b/toolkit/xre/nsAppRunner.cpp
-@@ -6332,6 +6332,214 @@ static already_AddRefed<nsIFile> GreOmniPath(int argc, char** argv) {
- }
- #endif
- 
-+// DenBrowser: strip command-line flags and environment variables that can
-+// bypass security controls before any Firefox code reads them.
-+//
-+// argv stripping covers:
-+//   - --profile / -P / --ProfileManager / --CreateProfile / --migration
-+//     (custom profile that bypasses the autoconfig lockdown + ramdisk hook)
-+//   - --marionette / --remote-debugging-port / --remote-allow-system-access /
-+//     --start-debugger-server /
-+//     --jsdebugger / --wait-for-jsdebugger / --jsconsole / --attach-console /
-+//     --console  (remote-control and debugging surfaces)
-+//   - --screenshot (CLI capture-to-disk mode that bypasses patch 001)
-+//   - --headless / --new-instance / --no-remote / --safe-mode / --purgecaches
-+//     (modes that change save / sandbox / pref-load semantics)
-+//   - --setDefaultBrowser / --preferences / --recording / --recordreplay
-+//
-+// Inline values (--flag=value and, on Windows, /flag:value) are recognized.
-+// Only flags declared as value-taking consume a following argv entry; this
-+// avoids turning a valueless lockdown flag followed by a URL into an accidental
-+// request to remove both entries.
-+//
-+// Env stripping covers:
-+//   - MOZ_LOG / MOZ_LOG_FILE / NSPR_LOG_MODULES / NSPR_LOG_FILE / R_LOG_*
-+//     (logging targets — would write request bodies, prefs, JS, etc. to disk)
-+//   - MOZ_DISABLE_*_SANDBOX (process-sandbox bypasses)
-+//   - MOZ_HEADLESS / MOZ_FORCE_DISABLE_E10S / MOZ_USE_REMOTE / MOZ_NO_REMOTE /
-+//     MOZ_MARIONETTE / MARIONETTE  (remote-control + alternate-mode toggles)
-+//   - MOZ_CRASHREPORTER* (re-enable crash dump writes despite mozconfig flag)
-+//   - MOZ_PROFILER_STARTUP* (writes profile samples — incl. JS source — to disk)
-+//   - XPCOM_DEBUG_BREAK / MOZ_DEBUG_CHILD_* (debugger attach helpers)
-+//
-+// This patch operates at the C++ level and cannot be circumvented by profile
-+// configuration, mozilla.cfg edits, or enterprise policy changes.
-+enum class DenArgValue { None, Required, Optional };
+diff --git a/browser/app/winlauncher/DenBrowserLaunchPolicy.h b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2d56860dd695adf4d98b2cb16e3760b6a664d89
+--- /dev/null
++++ b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
+@@ -0,0 +1,140 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 +
-+// Return true when aRaw is aFlag in any command-line spelling Firefox accepts.
-+// The early XRE CheckArg helper only understands separate values, while the
-+// later nsICommandLine parser also accepts --flag=value and Windows /flag:value.
-+static bool DenArgMatches(const char* aRaw, const char* aFlag,
-+                          bool* aHasInlineValue) {
-+  const char* p = aRaw;
-+  if (p[0] == '-') {
-+    p += (p[1] == '-') ? 2 : 1;
-+  }
-+#ifdef XP_WIN
-+  else if (p[0] == '/') {
-+    ++p;
-+  }
-+#endif
-+  else {
++#ifndef mozilla_DenBrowserLaunchPolicy_h
++#define mozilla_DenBrowserLaunchPolicy_h
++
++#include <stddef.h>
++#include <wchar.h>
++
++namespace mozilla::denbrowser {
++
++constexpr size_t kMaximumLaunchUrlLength = 8192;
++
++inline bool IsAllowedWebUrl(const wchar_t* aValue) {
++  if (!aValue) {
 +    return false;
 +  }
 +
-+  const char* separator = strchr(p, '=');
-+#ifdef XP_WIN
-+  const char* colon = strchr(p, ':');
-+  if (colon && (!separator || colon < separator)) {
-+    separator = colon;
++  size_t length = 0;
++  while (aValue[length] && length <= kMaximumLaunchUrlLength) {
++    wchar_t ch = aValue[length++];
++    if (ch <= 0x20 || ch == 0x7f || ch == L'"' || ch == L'<' || ch == L'>' ||
++        ch == L'\\') {
++      return false;
++    }
 +  }
-+#endif
-+  size_t nameLength = separator ? static_cast<size_t>(separator - p)
-+                                : strlen(p);
-+  *aHasInlineValue = separator != nullptr;
-+  return strlen(aFlag) == nameLength &&
-+         nsCRT::strncasecmp(p, aFlag, nameLength) == 0;
++  if (!length || length > kMaximumLaunchUrlLength) {
++    return false;
++  }
++
++  size_t schemeLength = 0;
++  if (length >= 7 && !_wcsnicmp(aValue, L"http://", 7)) {
++    schemeLength = 7;
++  } else if (length >= 8 && !_wcsnicmp(aValue, L"https://", 8)) {
++    schemeLength = 8;
++  } else {
++    return false;
++  }
++
++  const wchar_t* authority = aValue + schemeLength;
++  const wchar_t* authorityEnd = authority;
++  while (*authorityEnd && *authorityEnd != L'/' && *authorityEnd != L'?' &&
++         *authorityEnd != L'#') {
++    if (*authorityEnd == L'@') {
++      // Userinfo makes a command-line URL visually ambiguous and is not needed
++      // by the managed browser deployment.
++      return false;
++    }
++    ++authorityEnd;
++  }
++
++  if (authorityEnd == authority || *authority == L':') {
++    return false;
++  }
++
++  if (*authority == L'[') {
++    const wchar_t* closingBracket = authority + 1;
++    while (closingBracket < authorityEnd && *closingBracket != L']') {
++      ++closingBracket;
++    }
++    if (closingBracket == authorityEnd || closingBracket == authority + 1) {
++      return false;
++    }
++  }
++
++  return true;
 +}
 +
-+static bool DenLooksLikeArg(const char* aRaw) {
-+  if (!aRaw) return false;
-+  if (aRaw[0] == '-') return true;
-+#ifdef XP_WIN
-+  if (aRaw[0] == '/') return true;
-+#endif
++// The public Windows launch language is intentionally tiny:
++//   denbrowser.exe
++//   denbrowser.exe -osint -url http(s)://...
++// Windows Restart Manager may prepend one exact, advisory -os-restarted tag.
++// That tag never grants access to any additional argument or environment state.
++inline bool IsAllowedBrowserCommandLine(int aArgc, wchar_t* const aArgv[]) {
++  if (aArgc < 1 || !aArgv || !aArgv[0]) {
++    return false;
++  }
++
++  int index = 1;
++  if (index < aArgc && aArgv[index] &&
++      !wcscmp(aArgv[index], L"-os-restarted")) {
++    ++index;
++  }
++
++  if (index == aArgc) {
++    return true;
++  }
++
++  return aArgc - index == 3 && aArgv[index] && aArgv[index + 1] &&
++         aArgv[index + 2] && !wcscmp(aArgv[index], L"-osint") &&
++         !wcscmp(aArgv[index + 1], L"-url") &&
++         IsAllowedWebUrl(aArgv[index + 2]);
++}
++
++inline bool IsContentProcessFlag(const wchar_t* aArg) {
++  if (!aArg) {
++    return false;
++  }
++
++  if (*aArg == L'/') {
++    ++aArg;
++  } else if (*aArg == L'-') {
++    ++aArg;
++    if (*aArg == L'-') {
++      ++aArg;
++    }
++  } else {
++    return false;
++  }
++
++  return !_wcsicmp(aArg, L"contentproc");
++}
++
++inline bool HasContentProcessFlag(int aArgc, wchar_t* const aArgv[]) {
++  for (int i = 1; i < aArgc; ++i) {
++    if (IsContentProcessFlag(aArgv[i])) {
++      return true;
++    }
++  }
 +  return false;
 +}
 +
-+static void DenStripArg(const char* aFlag,
-+                        DenArgValue aValue = DenArgValue::None) {
-+  for (int i = 1; i < gArgc;) {
-+    bool hasInlineValue = false;
-+    if (!DenArgMatches(gArgv[i], aFlag, &hasInlineValue)) {
-+      ++i;
-+      continue;
-+    }
-+
-+    int toRemove = 1;
-+    if (!hasInlineValue && aValue != DenArgValue::None && i + 1 < gArgc &&
-+        !DenLooksLikeArg(gArgv[i + 1])) {
-+      toRemove = 2;
-+    }
-+    gArgc -= toRemove;
-+    memmove(gArgv + i, gArgv + i + toRemove, sizeof(char*) * (gArgc - i + 1));
-+    // Do not increment i: the slot now holds the next argument.
++inline bool IsCanonicalContentProcessCommandLine(int aArgc,
++                                                 wchar_t* const aArgv[]) {
++  if (aArgc < 4 || !aArgv || !aArgv[1] || wcscmp(aArgv[1], L"-contentproc")) {
++    return false;
 +  }
++
++  for (int i = 2; i < aArgc; ++i) {
++    if (IsContentProcessFlag(aArgv[i])) {
++      return false;
++    }
++  }
++  return true;
 +}
 +
-+// Fully remove a variable from the environment so PR_GetEnv() / getenv() see
-+// it as unset.  PR_SetEnv("NAME=") only sets it to empty string — code that
-+// uses `if (PR_GetEnv("X"))` for presence checks would still take the branch.
-+// We need real unset semantics from the OS layer.
-+static void DenStripEnv(const char* aName) {
-+#ifdef XP_WIN
-+  // MSVC CRT: _putenv_s(name, "") removes the entry from the _environ table
-+  // that getenv() / PR_GetEnv() consult on Windows.  SetEnvironmentVariableA
-+  // also clears the process env block read by some Win32 APIs directly.
-+  _putenv_s(aName, "");
-+  ::SetEnvironmentVariableA(aName, nullptr);
++}  // namespace mozilla::denbrowser
++
++#endif  // mozilla_DenBrowserLaunchPolicy_h
+diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
+index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6faa4c8ef6a 100644
+--- a/browser/app/winlauncher/LauncherProcessWin.cpp
++++ b/browser/app/winlauncher/LauncherProcessWin.cpp
+@@ -3,6 +3,7 @@
+  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+ #include "LauncherProcessWin.h"
++#include "DenBrowserLaunchPolicy.h"
+
+ #include "mozilla/CmdLineAndEnvUtils.h"
+ #include "mozilla/DebugOnly.h"
+@@ -20,8 +21,17 @@
+
+ #include <windows.h>
+ #include <processthreadsapi.h>
++#include <shlobj.h>
+ #include <shlwapi.h>
+
++#include <algorithm>
++#include <iterator>
++#include <stdlib.h>
++#include <string>
++#include <string.h>
++#include <utility>
++#include <vector>
++
+ #include "DllBlocklistInit.h"
+ #include "ErrorHandler.h"
+ #include "LaunchUnelevated.h"
+@@ -42,8 +52,213 @@ namespace mozilla {
+ // "volatile" because something in another process may.
+ const volatile DeelevationStatus gDeelevationStatus =
+     DeelevationStatus::DefaultStaticValue;
++const volatile DenBrowserLaunchAuthorization gDenBrowserLaunchAuthorization =
++    DenBrowserLaunchAuthorization::Untrusted;
+ }  // namespace mozilla
+
++using DenBrowserEnvironmentEntry = std::pair<std::wstring, std::wstring>;
++using DenBrowserEnvironment = std::vector<DenBrowserEnvironmentEntry>;
++
++static bool DenBrowserGetKnownFolder(REFKNOWNFOLDERID aFolder, HANDLE aToken,
++                                     std::wstring& aPath) {
++  wchar_t* rawPath = nullptr;
++  HRESULT result =
++      ::SHGetKnownFolderPath(aFolder, KF_FLAG_DONT_VERIFY, aToken, &rawPath);
++  if (FAILED(result) || !rawPath || !*rawPath) {
++    if (rawPath) {
++      ::CoTaskMemFree(rawPath);
++    }
++    return false;
++  }
++
++  aPath.assign(rawPath);
++  ::CoTaskMemFree(rawPath);
++  return true;
++}
++
++static bool DenBrowserGetApplicationDirectory(const wchar_t* aBinaryPath,
++                                              std::wstring& aDirectory) {
++  if (!aBinaryPath || !*aBinaryPath) {
++    return false;
++  }
++
++  aDirectory.assign(aBinaryPath);
++  size_t separator = aDirectory.find_last_of(L"\\/");
++  if (separator == std::wstring::npos || separator < 2) {
++    return false;
++  }
++  aDirectory.resize(separator);
++  return aDirectory.find(L';') == std::wstring::npos;
++}
++
++static bool DenBrowserBuildEnvironment(
++    HANDLE aToken, const std::wstring& aApplicationDirectory,
++    DenBrowserEnvironment& aEnvironment) {
++  wchar_t windowsBuffer[MAX_PATH + 1] = {};
++  UINT windowsLength =
++      ::GetWindowsDirectoryW(windowsBuffer, std::size(windowsBuffer));
++  if (!windowsLength || windowsLength >= std::size(windowsBuffer)) {
++    return false;
++  }
++
++  wchar_t systemBuffer[MAX_PATH + 1] = {};
++  UINT systemLength =
++      ::GetSystemDirectoryW(systemBuffer, std::size(systemBuffer));
++  if (!systemLength || systemLength >= std::size(systemBuffer)) {
++    return false;
++  }
++
++  std::wstring windowsDirectory(windowsBuffer, windowsLength);
++  if (windowsDirectory.size() < 3 || windowsDirectory[1] != L':') {
++    return false;
++  }
++
++  std::wstring localAppData;
++  if (!DenBrowserGetKnownFolder(FOLDERID_LocalAppData, aToken, localAppData)) {
++    return false;
++  }
++
++  std::wstring programFiles;
++  if (!DenBrowserGetKnownFolder(FOLDERID_ProgramFiles, aToken, programFiles)) {
++    return false;
++  }
++
++  std::wstring path = aApplicationDirectory;
++  path.append(L";").append(systemBuffer).append(L";").append(windowsBuffer);
++  std::wstring temp = localAppData;
++  temp.append(L"\\Temp");
++
++  aEnvironment.clear();
++  aEnvironment.reserve(8);
++  aEnvironment.emplace_back(L"LOCALAPPDATA", std::move(localAppData));
++  aEnvironment.emplace_back(L"Path", std::move(path));
++  aEnvironment.emplace_back(L"ProgramFiles", programFiles);
++  aEnvironment.emplace_back(L"ProgramW6432", std::move(programFiles));
++  aEnvironment.emplace_back(L"SystemDrive", windowsDirectory.substr(0, 2));
++  aEnvironment.emplace_back(L"SystemRoot", std::move(windowsDirectory));
++  aEnvironment.emplace_back(L"TEMP", temp);
++  aEnvironment.emplace_back(L"TMP", std::move(temp));
++
++  std::sort(aEnvironment.begin(), aEnvironment.end(),
++            [](const DenBrowserEnvironmentEntry& aLeft,
++               const DenBrowserEnvironmentEntry& aRight) {
++              return _wcsicmp(aLeft.first.c_str(), aRight.first.c_str()) < 0;
++            });
++  for (size_t i = 1; i < aEnvironment.size(); ++i) {
++    if (!_wcsicmp(aEnvironment[i - 1].first.c_str(),
++                  aEnvironment[i].first.c_str())) {
++      return false;
++    }
++  }
++  return true;
++}
++
++static mozilla::UniquePtr<wchar_t[]> DenBrowserSerializeEnvironment(
++    const DenBrowserEnvironment& aEnvironment) {
++  size_t totalLength = 1;
++  for (const auto& [name, value] : aEnvironment) {
++    if (name.empty() || name.find(L'=') != std::wstring::npos) {
++      return nullptr;
++    }
++    size_t entryLength = name.size() + 1 + value.size() + 1;
++    if (entryLength > 32767 || totalLength > 32767 - entryLength) {
++      return nullptr;
++    }
++    totalLength += entryLength;
++  }
++
++  auto block = mozilla::MakeUnique<wchar_t[]>(totalLength);
++  if (!block) {
++    return nullptr;
++  }
++
++  wchar_t* cursor = block.get();
++  for (const auto& [name, value] : aEnvironment) {
++    wmemcpy(cursor, name.c_str(), name.size());
++    cursor += name.size();
++    *cursor++ = L'=';
++    wmemcpy(cursor, value.c_str(), value.size());
++    cursor += value.size();
++    *cursor++ = L'\0';
++  }
++  *cursor = L'\0';
++  return block;
++}
++
++static bool DenBrowserWideToUtf8(const std::wstring& aValue,
++                                 std::string& aResult) {
++  if (aValue.empty()) {
++    aResult.clear();
++    return true;
++  }
++
++  if (aValue.size() > 32767) {
++    return false;
++  }
++  int inputLength = static_cast<int>(aValue.size());
++  int length =
++      ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, aValue.c_str(),
++                            inputLength, nullptr, 0, nullptr, nullptr);
++  if (length <= 0) {
++    return false;
++  }
++  aResult.resize(length);
++  return ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, aValue.c_str(),
++                               inputLength, aResult.data(), length, nullptr,
++                               nullptr) == length;
++}
++
++static bool DenBrowserApplyCurrentEnvironment(
++    const DenBrowserEnvironment& aEnvironment) {
++  // Clear the CRT's narrow environment before setting approved values. This is
++  // what early EnvHasValue/getenv consumers read in the launcher.
++  std::vector<std::string> narrowNames;
++  for (char** item = _environ; item && *item; ++item) {
++    const char* separator = strchr(*item, '=');
++    if (separator && separator != *item) {
++      narrowNames.emplace_back(*item, separator - *item);
++    }
++  }
++  for (const std::string& name : narrowNames) {
++    if (_putenv_s(name.c_str(), "")) {
++      return false;
++    }
++  }
++
++  // Clear the native Unicode environment as well. Pseudo drive-current-
++  // directory entries begin with '='; they are omitted from the explicit
++  // browser environment block and are not valid SetEnvironmentVariable names.
++  wchar_t* rawEnvironment = ::GetEnvironmentStringsW();
++  if (!rawEnvironment) {
++    return false;
++  }
++  std::vector<std::wstring> wideNames;
++  for (const wchar_t* item = rawEnvironment; *item; item += wcslen(item) + 1) {
++    const wchar_t* separator = wcschr(item, L'=');
++    if (separator && separator != item) {
++      wideNames.emplace_back(item, separator - item);
++    }
++  }
++  ::FreeEnvironmentStringsW(rawEnvironment);
++  for (const std::wstring& name : wideNames) {
++    if (!::SetEnvironmentVariableW(name.c_str(), nullptr)) {
++      return false;
++    }
++  }
++
++  for (const auto& [name, value] : aEnvironment) {
++    std::string narrowName;
++    std::string narrowValue;
++    if (!DenBrowserWideToUtf8(name, narrowName) ||
++        !DenBrowserWideToUtf8(value, narrowValue) ||
++        _putenv_s(narrowName.c_str(), narrowValue.c_str()) ||
++        !::SetEnvironmentVariableW(name.c_str(), value.c_str())) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ /**
+  * At this point the child process has been created in a suspended state. Any
+  * additional startup work (eg, blocklist setup) should go here.
+@@ -73,6 +288,19 @@ static mozilla::LauncherVoidResult PostCreationSetup(
+     if (result.isErr()) {
+       return result;
+     }
++
++    using mozilla::DenBrowserLaunchAuthorization;
++    using mozilla::gDenBrowserLaunchAuthorization;
++    targetAddress = (LPVOID)&gDenBrowserLaunchAuthorization;
++    auto const authorizationGuard = txManager.Protect(
++        targetAddress, sizeof(gDenBrowserLaunchAuthorization), PAGE_READWRITE);
++    const DenBrowserLaunchAuthorization authorization =
++        DenBrowserLaunchAuthorization::AuthorizedBrowser;
++    result = txManager.Transfer(targetAddress, &authorization,
++                                sizeof(authorization));
++    if (result.isErr()) {
++      return result;
++    }
+   }
+
+   return mozilla::InitializeDllBlocklistOOPFromLauncher(
+@@ -231,35 +459,11 @@ static void SetMitigationPolicies(mozilla::ProcThreadAttributes& aAttrs,
+ #endif  // defined(_M_ARM64)
+ }
+
+-static mozilla::LauncherFlags ProcessCmdLine(int& aArgc, wchar_t* aArgv[]) {
+-  mozilla::LauncherFlags result = mozilla::LauncherFlags::eNone;
+-
+-  if (mozilla::CheckArg(aArgc, aArgv, "wait-for-browser", nullptr,
+-                        mozilla::CheckArgFlag::RemoveArg) ==
+-          mozilla::ARG_FOUND ||
+-      mozilla::CheckArg(aArgc, aArgv, "marionette", nullptr,
+-                        mozilla::CheckArgFlag::None) == mozilla::ARG_FOUND ||
+-      mozilla::CheckArg(aArgc, aArgv, "backgroundtask", nullptr,
+-                        mozilla::CheckArgFlag::None) == mozilla::ARG_FOUND ||
+-      mozilla::CheckArg(aArgc, aArgv, "headless", nullptr,
+-                        mozilla::CheckArgFlag::None) == mozilla::ARG_FOUND ||
+-      mozilla::CheckArg(aArgc, aArgv, "remote-debugging-port", nullptr,
+-                        mozilla::CheckArgFlag::None) == mozilla::ARG_FOUND ||
+-      mozilla::EnvHasValue("MOZ_AUTOMATION") ||
+-      mozilla::EnvHasValue("MOZ_HEADLESS")) {
+-    result |= mozilla::LauncherFlags::eWaitForBrowser;
+-  }
+-
+-  if (mozilla::CheckArg(aArgc, aArgv, "no-deelevate") == mozilla::ARG_FOUND) {
+-    result |= mozilla::LauncherFlags::eNoDeelevate;
+-  }
+-
+-  if (mozilla::CheckArg(aArgc, aArgv, ATTEMPTING_DEELEVATION_FLAG) ==
+-      mozilla::ARG_FOUND) {
+-    result |= mozilla::LauncherFlags::eDeelevating;
+-  }
+-
+-  return result;
++static mozilla::LauncherFlags ProcessCmdLine(int&, wchar_t*[]) {
++  // DenBrowser's public grammar contains no launcher-control switches. In
++  // particular, callers cannot request headless/debug automation, handle
++  // inheritance, waiting, or suppression of de-elevation.
++  return mozilla::LauncherFlags::eNone;
+ }
+
+ static void MaybeBreakForBrowserDebugging() {
+@@ -319,10 +523,9 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
+   bool runAsLauncher = DoLauncherProcessChecks(argc, argv);
+
+ #if defined(MOZ_LAUNCHER_PROCESS)
+-  bool forceLauncher =
+-      runAsLauncher &&
+-      mozilla::CheckArg(argc, argv, "force-launcher", nullptr,
+-                        mozilla::CheckArgFlag::RemoveArg) == mozilla::ARG_FOUND;
++  // DenBrowser must never let launcher crash telemetry or a registry override
++  // demote a validated launcher request into an in-process browser start.
++  bool forceLauncher = runAsLauncher;
+
+   mozilla::LauncherRegistryInfo::ProcessType desiredType =
+       runAsLauncher ? mozilla::LauncherRegistryInfo::ProcessType::Launcher
+@@ -356,20 +559,74 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
+ namespace mozilla {
+
+ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
++  const bool authorizedBrowser =
++      gDenBrowserLaunchAuthorization ==
++      DenBrowserLaunchAuthorization::AuthorizedBrowser;
++  const bool hasContentProcessFlag =
++      denbrowser::HasContentProcessFlag(argc, argv);
++
++  // A typed -contentproc flag is not authority. Genuine same-executable Gecko
++  // children use one canonical flag at argv[1] and have the installed browser
++  // as their actual parent. Anything else is rejected before launcher or
++  // browser initialization can reinterpret it.
++  if (hasContentProcessFlag) {
++    if (authorizedBrowser ||
++        !denbrowser::IsCanonicalContentProcessCommandLine(argc, argv)) {
++      return Some(127);
++    }
++#if defined(MOZ_LAUNCHER_PROCESS)
++    LauncherResult<bool> sameParent = IsSameBinaryAsParentProcess();
++    if (sameParent.isErr()) {
++      HandleLauncherError(sameParent.unwrapErr());
++      return Some(127);
++    }
++    if (!sameParent.unwrap()) {
++      return Some(127);
++    }
 +#else
-+  unsetenv(aName);
++    return Some(127);
 +#endif
++    EnsureBrowserCommandlineSafe(argc, argv);
++    return Nothing();
++  }
++
++  if (!denbrowser::IsAllowedBrowserCommandLine(argc, argv)) {
++    return Some(127);
++  }
++
+   EnsureBrowserCommandlineSafe(argc, argv);
++  if (!SetArgv0ToFullBinaryPath(argv)) {
++    HandleLauncherError(LAUNCHER_ERROR_GENERIC());
++    return Some(127);
++  }
+
+-  // return fast when we're a child process.
+-  // (The remainder of this function has some side effects that are
+-  // undesirable for content processes)
+-  if (mozilla::CheckArg(argc, argv, "contentproc", nullptr,
+-                        mozilla::CheckArgFlag::None) == mozilla::ARG_FOUND) {
+-    // A child process should not instantiate LauncherRegistryInfo.
+-    return Nothing();
++  std::wstring applicationDirectory;
++  if (!DenBrowserGetApplicationDirectory(argv[0], applicationDirectory)) {
++    return Some(127);
++  }
++
++  DenBrowserEnvironment currentEnvironment;
++  if (!DenBrowserBuildEnvironment(nullptr, applicationDirectory,
++                                  currentEnvironment) ||
++      !DenBrowserApplyCurrentEnvironment(currentEnvironment)) {
++    return Some(127);
+   }
+
+   // Called from the launcher process *and* the browser process.
+   EnablePreferLoadFromSystem32IfCompatible();
+
++  if (authorizedBrowser) {
++    return Nothing();
++  }
++
++  // The marker is created only after the public/restart grammar and caller
++  // environment have been validated. It is consumed by the existing launcher
++  // role selection below and is never copied into the browser environment.
++  if (_putenv_s("MOZ_LAUNCHER_PROCESS", "1") ||
++      !::SetEnvironmentVariableW(L"MOZ_LAUNCHER_PROCESS", L"1")) {
++    return Some(127);
++  }
++
+ #if defined(MOZ_LAUNCHER_PROCESS)
+   LauncherRegistryInfo regInfo;
+   Maybe<bool> runAsLauncher = RunAsLauncherProcess(regInfo, argc, argv);
+@@ -383,14 +640,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+   Maybe<std::wstring> blocklistFileName = Nothing();
+ #endif  // defined(MOZ_LAUNCHER_PROCESS)
+   if (!runAsLauncher || !runAsLauncher.value()) {
+-#if defined(MOZ_LAUNCHER_PROCESS)
+-    // Update the registry as Browser
+-    LauncherVoidResult commitResult = regInfo.Commit();
+-    if (commitResult.isErr()) {
+-      mozilla::HandleLauncherError(commitResult);
+-    }
+-#endif  // defined(MOZ_LAUNCHER_PROCESS)
+-    return Nothing();
++    return Some(127);
+   }
+
+ #if defined(MOZ_SANDBOX)
+@@ -400,11 +650,6 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+
+   mozilla::UseParentConsole();
+
+-  if (!SetArgv0ToFullBinaryPath(argv)) {
+-    HandleLauncherError(LAUNCHER_ERROR_GENERIC());
+-    return Nothing();
+-  }
+-
+   LauncherFlags flags = ProcessCmdLine(argc, argv);
+
+   nsAutoHandle mediumIlToken;
+@@ -412,53 +657,20 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+       GetElevationState(argv[0], flags, mediumIlToken);
+   if (elevationState.isErr()) {
+     HandleLauncherError(elevationState);
+-    return Nothing();
++    return Some(127);
+   }
+
+-  // Distill deelevation status, and/or attempt to perform launcher deelevation
+-  // via an indirect relaunch.
++  // Shell-based de-elevation cannot carry the launch authorization. A normal
++  // user launch proceeds; a directly available medium-integrity token is used
++  // when possible; otherwise an elevated launch fails closed.
+   DeelevationStatus deelevationStatus = DeelevationStatus::Unknown;
+   if (mediumIlToken.get()) {
+-    // Rather than indirectly relaunch the launcher, we'll attempt to directly
+-    // launch the main process with a reduced-privilege security token.
+     deelevationStatus = DeelevationStatus::PartiallyDeelevated;
+-  } else if (elevationState.unwrap() == ElevationState::eElevated) {
+-    if (flags & LauncherFlags::eWaitForBrowser) {
+-      // An indirect relaunch won't provide a process-handle to block on,
+-      // so we have to continue onwards with this process.
+-      deelevationStatus = DeelevationStatus::DeelevationProhibited;
+-    } else if (flags & LauncherFlags::eNoDeelevate) {
+-      // Our invoker (hopefully, the user) has explicitly requested that the
+-      // launcher not deelevate itself.
+-      deelevationStatus = DeelevationStatus::DeelevationProhibited;
+-    } else if (flags & LauncherFlags::eDeelevating) {
+-      // We've already tried to deelevate, to no effect. Continue onward.
+-      deelevationStatus = DeelevationStatus::UnsuccessfullyDeelevated;
+-    } else {
+-      // Otherwise, attempt to relaunch the launcher process itself via the
+-      // shell, which hopefully will not be elevated. (But see bug 1733821.)
+-      LauncherVoidResult launchedUnelevated = LaunchUnelevated(argc, argv);
+-      if (launchedUnelevated.isErr()) {
+-        // On failure, don't even try for a launcher process. Continue onwards
+-        // in this one. (TODO: why? This isn't technically fatal...)
+-        HandleLauncherError(launchedUnelevated);
+-        return Nothing();
+-      }
+-      // Otherwise, tell our caller to exit with a success code.
+-      return Some(0);
+-    }
+   } else if (elevationState.unwrap() == ElevationState::eNormalUser) {
+-    if (flags & LauncherFlags::eDeelevating) {
+-      // Deelevation appears to have been successful!
+-      deelevationStatus = DeelevationStatus::SuccessfullyDeelevated;
+-    } else {
+-      // We haven't done anything and we don't need to.
+-      deelevationStatus = DeelevationStatus::StartedUnprivileged;
+-    }
++    deelevationStatus = DeelevationStatus::StartedUnprivileged;
+   } else {
+-    // Some other elevation state with no medium-integrity token.
+-    // (This should probably not happen.)
+-    deelevationStatus = DeelevationStatus::Unknown;
++    HandleLauncherError(LAUNCHER_ERROR_FROM_WIN32(ERROR_ELEVATION_REQUIRED));
++    return Some(127);
+   }
+
+ #if defined(MOZ_LAUNCHER_PROCESS)
+@@ -466,7 +678,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+   LauncherVoidResult commitResult = regInfo.Commit();
+   if (commitResult.isErr()) {
+     mozilla::HandleLauncherError(commitResult);
+-    return Nothing();
++    return Some(127);
+   }
+ #endif  // defined(MOZ_LAUNCHER_PROCESS)
+
+@@ -474,49 +686,30 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+   UniquePtr<wchar_t[]> cmdLine(MakeCommandLine(argc, argv));
+   if (!cmdLine) {
+     HandleLauncherError(LAUNCHER_ERROR_GENERIC());
+-    return Nothing();
++    return Some(127);
+   }
+
+   const Maybe<bool> isSafeMode =
+       IsSafeModeRequested(argc, argv, SafeModeFlag::NoKeyPressCheck);
+   if (!isSafeMode) {
+     HandleLauncherError(LAUNCHER_ERROR_FROM_WIN32(ERROR_INVALID_PARAMETER));
+-    return Nothing();
++    return Some(127);
+   }
+
+   ProcThreadAttributes attrs;
+   SetMitigationPolicies(attrs, isSafeMode.value());
+
+-  HANDLE stdHandles[] = {::GetStdHandle(STD_INPUT_HANDLE),
+-                         ::GetStdHandle(STD_OUTPUT_HANDLE),
+-                         ::GetStdHandle(STD_ERROR_HANDLE)};
+-
+-  attrs.AddInheritableHandles(stdHandles);
+-
+   DWORD creationFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+
+   STARTUPINFOEXW siex;
+   LauncherResult<bool> attrsOk = attrs.AssignTo(siex);
+   if (attrsOk.isErr()) {
+     HandleLauncherError(attrsOk);
+-    return Nothing();
++    return Some(127);
+   }
+
+-  BOOL inheritHandles = FALSE;
+-
+   if (attrsOk.unwrap()) {
+     creationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+-
+-    if (attrs.HasInheritableHandles()) {
+-      siex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+-      siex.StartupInfo.hStdInput = stdHandles[0];
+-      siex.StartupInfo.hStdOutput = stdHandles[1];
+-      siex.StartupInfo.hStdError = stdHandles[2];
+-
+-      // Since attrsOk == true, we have successfully set the handle inheritance
+-      // whitelist policy, so only the handles added to attrs will be inherited.
+-      inheritHandles = TRUE;
+-    }
+   }
+
+   // Pass on the path of the shortcut used to launch this process, if any.
+@@ -531,20 +724,32 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+   PROCESS_INFORMATION pi = {};
+   BOOL createOk;
+
++  DenBrowserEnvironment browserEnvironment;
++  if (!DenBrowserBuildEnvironment(mediumIlToken.get(), applicationDirectory,
++                                  browserEnvironment)) {
++    return Some(127);
++  }
++  UniquePtr<wchar_t[]> environmentBlock =
++      DenBrowserSerializeEnvironment(browserEnvironment);
++  if (!environmentBlock) {
++    return Some(127);
++  }
++
+   if (mediumIlToken.get()) {
+-    createOk =
+-        ::CreateProcessAsUserW(mediumIlToken.get(), argv[0], cmdLine.get(),
+-                               nullptr, nullptr, inheritHandles, creationFlags,
+-                               nullptr, nullptr, &siex.StartupInfo, &pi);
++    createOk = ::CreateProcessAsUserW(
++        mediumIlToken.get(), argv[0], cmdLine.get(), nullptr, nullptr, FALSE,
++        creationFlags, environmentBlock.get(), applicationDirectory.c_str(),
++        &siex.StartupInfo, &pi);
+   } else {
+-    createOk = ::CreateProcessW(argv[0], cmdLine.get(), nullptr, nullptr,
+-                                inheritHandles, creationFlags, nullptr, nullptr,
+-                                &siex.StartupInfo, &pi);
++    createOk =
++        ::CreateProcessW(argv[0], cmdLine.get(), nullptr, nullptr, FALSE,
++                         creationFlags, environmentBlock.get(),
++                         applicationDirectory.c_str(), &siex.StartupInfo, &pi);
+   }
+
+   if (!createOk) {
+     HandleLauncherError(LAUNCHER_ERROR_FROM_LAST());
+-    return Nothing();
++    return Some(127);
+   }
+
+   nsAutoHandle process(pi.hProcess);
+@@ -566,13 +771,13 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+   if (setupResult.isErr()) {
+     HandleLauncherError(setupResult);
+     ::TerminateProcess(process.get(), 1);
+-    return Nothing();
++    return Some(127);
+   }
+
+   if (::ResumeThread(mainThread.get()) == static_cast<DWORD>(-1)) {
+     HandleLauncherError(LAUNCHER_ERROR_FROM_LAST());
+     ::TerminateProcess(process.get(), 1);
+-    return Nothing();
++    return Some(127);
+   }
+
+   if (flags & LauncherFlags::eWaitForBrowser) {
+diff --git a/browser/app/winlauncher/LauncherProcessWin.h b/browser/app/winlauncher/LauncherProcessWin.h
+index c70aa3715c382d264bcaf7161504660e49eab53c..86e72800b1b8de5c780a601d9e71e3c200e42780 100644
+--- a/browser/app/winlauncher/LauncherProcessWin.h
++++ b/browser/app/winlauncher/LauncherProcessWin.h
+@@ -18,8 +18,9 @@ struct StaticXREAppData;
+ /**
+  * Determine whether or not the current process should be run as the launcher
+  * process, and run if so. If we are not supposed to run as the launcher
+- * process, or in the event of a launcher process failure, return Nothing, thus
+- * indicating that we should continue on the original startup code path.
++ * process, return Nothing, indicating that startup may continue. Launcher
++ * failures return a nonzero result and must never fall through to browser
++ * startup.
+  */
+ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]);
+
+@@ -58,10 +59,21 @@ enum class DeelevationStatus : uint32_t {
+   DefaultStaticValue = 0x55AA55AA,
+ };
+
++enum class DenBrowserLaunchAuthorization : uint32_t {
++  Untrusted = 0x3D328CB4,
++  AuthorizedBrowser = 0xA6D73F19,
++};
++
+ // The result of the deelevation attempt. Set by the launcher process in the
+ // main process when the two are distinct.
+ extern const volatile DeelevationStatus gDeelevationStatus;
+
++// Written into the suspended browser by the mandatory launcher. Command-line
++// and environment markers are routing hints only; this value is the authority
++// to enter the browser process path.
++extern const volatile DenBrowserLaunchAuthorization
++    gDenBrowserLaunchAuthorization;
++
+ }  // namespace mozilla
+
+ #endif  // mozilla_LauncherProcessWin_h
+diff --git a/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef96a27e642288791a649116543eae5ef6b5d2f6
+--- /dev/null
++++ b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
+@@ -0,0 +1,103 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
++
++#include <initializer_list>
++#include <stdio.h>
++#include <vector>
++
++#include "DenBrowserLaunchPolicy.h"
++
++static bool CheckBrowserCommandLine(
++    bool aExpected, std::initializer_list<const wchar_t*> aArguments,
++    const char* aDescription) {
++  std::vector<wchar_t*> argv;
++  for (const wchar_t* argument : aArguments) {
++    argv.push_back(const_cast<wchar_t*>(argument));
++  }
++
++  bool actual = mozilla::denbrowser::IsAllowedBrowserCommandLine(
++      static_cast<int>(argv.size()), argv.data());
++  if (actual != aExpected) {
++    printf("TEST-FAILED | DenBrowserLaunchPolicy | %s\n", aDescription);
++    return false;
++  }
++  return true;
 +}
 +
-+static void DenBrowserStripBlockedArgs() {
-+  // Profile manipulation (bypasses autoconfig lockdown + ramdisk profile).
-+  DenStripArg("profile", DenArgValue::Required);  // --profile <path>
-+  DenStripArg("p", DenArgValue::Required);        // -P <name>
-+  DenStripArg("profilemanager");        // --ProfileManager UI
-+  DenStripArg("createprofile", DenArgValue::Required);
-+  DenStripArg("migration");             // --migration profile-import wizard
++static bool CheckContentCommandLine(
++    bool aExpected, std::initializer_list<const wchar_t*> aArguments,
++    const char* aDescription) {
++  std::vector<wchar_t*> argv;
++  for (const wchar_t* argument : aArguments) {
++    argv.push_back(const_cast<wchar_t*>(argument));
++  }
 +
-+  // Remote control and debugging surfaces.
-+  DenStripArg("marionette");            // WebDriver / GeckoDriver
-+  DenStripArg("remote-debugging-port", DenArgValue::Optional);
-+  DenStripArg("remote-allow-system-access");
-+  DenStripArg("start-debugger-server", DenArgValue::Optional);
-+  DenStripArg("jsdebugger");            // JS debugger attach
-+  DenStripArg("wait-for-jsdebugger");
-+  DenStripArg("jsconsole");             // legacy JS console
-+  DenStripArg("attach-console");        // Windows console attach
-+  DenStripArg("console");
-+
-+  // Modes that change save / sandbox / pref-load semantics.
-+  DenStripArg("screenshot", DenArgValue::Optional);
-+  DenStripArg("headless");
-+  DenStripArg("new-instance");          // skip single-instance check
-+  DenStripArg("no-remote");             // ditto
-+  DenStripArg("safe-mode");             // disables JIT + custom prefs
-+  DenStripArg("purgecaches");           // wipes startup cache
-+  DenStripArg("allow-downgrade");       // bypass profile-schema downgrade guard
-+
-+  // Side-effecting flags with no place in a locked-down deployment.
-+  DenStripArg("setdefaultbrowser");
-+  DenStripArg("preferences");           // shortcut to about:preferences
-+  DenStripArg("recording");             // record-and-replay (debug builds)
-+  DenStripArg("recordreplay");
++  bool actual = mozilla::denbrowser::IsCanonicalContentProcessCommandLine(
++      static_cast<int>(argv.size()), argv.data());
++  if (actual != aExpected) {
++    printf("TEST-FAILED | DenBrowserLaunchPolicy | %s\n", aDescription);
++    return false;
++  }
++  return true;
 +}
 +
-+static void DenBrowserStripBlockedEnv() {
-+  // Logging — would route request bodies, prefs, JS source, NSS/SSL session
-+  // data into a user-readable file on disk.
-+  DenStripEnv("MOZ_LOG");
-+  DenStripEnv("MOZ_LOG_FILE");
-+  DenStripEnv("NSPR_LOG_MODULES");
-+  DenStripEnv("NSPR_LOG_FILE");
-+  DenStripEnv("R_LOG_DESTINATION");
-+  DenStripEnv("R_LOG_LEVEL");
-+  DenStripEnv("R_LOG_VERBOSE");
-+  DenStripEnv("SSLKEYLOGFILE");         // dumps TLS keys to a file — catastrophic
++extern "C" int wmain() {
++  bool ok = true;
 +
-+  // Sandbox bypasses — weaken process isolation between content and parent.
-+  DenStripEnv("MOZ_DISABLE_CONTENT_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_GMP_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_RDD_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_SOCKET_PROCESS_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_GPU_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_UTILITY_SANDBOX");
-+  DenStripEnv("MOZ_DISABLE_VR_SANDBOX");
-+  DenStripEnv("MOZ_PERMIT_CSP_VIOLATION");
++  ok &= CheckBrowserCommandLine(true, {L"denbrowser.exe"},
++                                "no-argument launch must be accepted");
++  ok &= CheckBrowserCommandLine(
++      true, {L"denbrowser.exe", L"-osint", L"-url", L"https://example.test/a"},
++      "canonical HTTPS OS launch must be accepted");
++  ok &= CheckBrowserCommandLine(
++      true, {L"denbrowser.exe", L"-osint", L"-url", L"http://example.test/"},
++      "canonical HTTP OS launch must be accepted");
++  ok &= CheckBrowserCommandLine(true, {L"denbrowser.exe", L"-os-restarted"},
++                                "Windows restart tag must be accepted");
++  ok &= CheckBrowserCommandLine(
++      true,
++      {L"denbrowser.exe", L"-os-restarted", L"-osint", L"-url",
++       L"https://example.test/"},
++      "tagged canonical Windows restart must be accepted");
 +
-+  // Remote control, alternate modes, debug attach.
-+  DenStripEnv("MOZ_HEADLESS");
-+  DenStripEnv("MOZ_HEADLESS_WIDTH");
-+  DenStripEnv("MOZ_HEADLESS_HEIGHT");
-+  DenStripEnv("MOZ_FORCE_DISABLE_E10S");
-+  DenStripEnv("MOZ_USE_REMOTE");
-+  DenStripEnv("MOZ_NO_REMOTE");
-+  DenStripEnv("MOZ_MARIONETTE");
-+  DenStripEnv("MARIONETTE");
-+  DenStripEnv("MOZ_REMOTE_AGENT");
-+  DenStripEnv("XPCOM_DEBUG_BREAK");
-+  DenStripEnv("XRE_MAIN_BREAK");
-+  DenStripEnv("MOZ_DEBUG_CHILD_PROCESS");
-+  DenStripEnv("MOZ_DEBUG_CHILD_PAUSE");
++  ok &= CheckBrowserCommandLine(false,
++                                {L"denbrowser.exe", L"https://example.test/"},
++                                "bare URL must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false, {L"denbrowser.exe", L"-xpcshell", L"-e", L"print('unexpected')"},
++      "xpcshell dispatch must be rejected");
++  ok &=
++      CheckBrowserCommandLine(false, {L"denbrowser.exe", L"--MOZ_LOG=Logger:5"},
++                              "logging alias must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false, {L"denbrowser.exe", L"-osint", L"-url", L"file:///C:/secret.txt"},
++      "file URL must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false,
++      {L"denbrowser.exe", L"-osint", L"-url", L"https://user@example.test/"},
++      "URL userinfo must be rejected");
++  ok &= CheckBrowserCommandLine(false,
++                                {L"denbrowser.exe", L"-osint", L"-url",
++                                 L"https://example.test/", L"--headless"},
++                                "extra argument must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false, {L"denbrowser.exe", L"-os-restarted", L"-os-restarted"},
++      "duplicate restart tags must be rejected");
 +
-+  // Crash reporter — overrides mozconfig --disable-crashreporter and would
-+  // write a minidump (process memory snapshot) to disk on crash.
-+  DenStripEnv("MOZ_CRASHREPORTER");
-+  DenStripEnv("MOZ_CRASHREPORTER_DISABLE");
-+  DenStripEnv("MOZ_CRASHREPORTER_NO_REPORT");
-+  DenStripEnv("MOZ_CRASHREPORTER_SHUTDOWN");
-+  DenStripEnv("MOZ_CRASHREPORTER_FULLDUMP");
-+  DenStripEnv("MOZ_CRASHREPORTER_RESTART_ARG_0");
++  ok &= CheckContentCommandLine(
++      true, {L"denbrowser.exe", L"-contentproc", L"1", L"tab"},
++      "canonical child shape must be recognized");
++  ok &= CheckContentCommandLine(
++      false, {L"denbrowser.exe", L"--contentproc", L"1", L"tab"},
++      "alternate child flag spelling must be rejected");
++  ok &= CheckContentCommandLine(
++      false, {L"denbrowser.exe", L"value", L"-contentproc", L"1", L"tab"},
++      "misplaced child flag must be rejected");
++  ok &= CheckContentCommandLine(
++      false,
++      {L"denbrowser.exe", L"-contentproc", L"-contentproc", L"1", L"tab"},
++      "duplicate child flag must be rejected");
 +
-+  // Profiler — writes performance samples (incl. JS source frames) to disk.
-+  DenStripEnv("MOZ_PROFILER_STARTUP");
-+  DenStripEnv("MOZ_PROFILER_STARTUP_INTERVAL");
-+  DenStripEnv("MOZ_PROFILER_STARTUP_FEATURES");
-+  DenStripEnv("MOZ_PROFILER_STARTUP_FEATURES_BITFIELD");
-+  DenStripEnv("MOZ_PROFILER_STARTUP_FILTERS");
-+  DenStripEnv("MOZ_PROFILER_SHUTDOWN");
-+  DenStripEnv("MOZ_PROFILER_HELP");
-+
-+  // gtest / fuzzer entry points — enable special test-only execution paths.
-+  DenStripEnv("MOZ_RUN_GTEST");
-+  DenStripEnv("FUZZER");
-+  DenStripEnv("MOZ_FUZZ");
-+  DenStripEnv("MOZ_GMP_SANDBOX_LOGGING");
++  return ok ? 0 : 1;
 +}
-+
- /*
-  * XRE_main - A class based main entry point used by most platforms.
-  *            Note that on OSX, aAppData->xreDirectory will point to
-@@ -6340,6 +6548,11 @@ static already_AddRefed<nsIFile> GreOmniPath(int argc, char** argv) {
- int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
-   gArgc = argc;
-   gArgv = argv;
-+  // DenBrowser: strip blocked argv flags and environment variables
-+  // before any other Firefox code reads them.
-+  DenBrowserStripBlockedArgs();
-+  DenBrowserStripBlockedEnv();
-+
-   AppRunnerTelemFlags appRunnerTelemFlags{};
- 
-   ScopedLogging log;
+diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
+index a4687d9dc0cdb2a9c9515080fc5ac1f0385a1c1c..36b3c6392b1767795d66361b89cf12a9cf280f04 100644
+--- a/browser/app/winlauncher/test/moz.build
++++ b/browser/app/winlauncher/test/moz.build
+@@ -7,6 +7,7 @@ DisableStlWrapping()
+ GeckoCppUnitTests(
+     [
+         "TestCrossProcessWin",
++        "TestDenBrowserLaunchPolicy",
+         "TestSafeThreadLocal",
+         "TestSameBinary",
+     ],
