@@ -149,6 +149,7 @@ lives.
 | Built-in VPN / local-network access | — | `IPProtectionAvailable: false`, `LocalNetworkAccess` | `browser.ipProtection.enabled`, `network.lna.*` |
 | Visual Search | — | `VisualSearchEnabled: false` | `browser.search.visualSearch.featureGate` |
 | Context-menu search for selected/link text | 023 | — | — |
+| Windows process-memory dumps | 025 | — | — |
 | Web-platform capability APIs (Share / FS Access / Serial / MIDI / Payments / Push / Notifications / SpeechSynth / Battery / Sensors / WebTransport / file://) | — | — | `dom.webshare.enabled`, `dom.fs.enabled`, `dom.webserial.enabled`, `dom.webmidi.enabled`, `dom.payments.request.enabled`, `dom.push.enabled`, `dom.webnotifications.enabled`, `media.webspeech.synth.enabled`, `media.webspeech.recognition.enable`, `dom.battery.enabled`, `device.sensors.enabled`, `network.webtransport.enabled`, `network.protocol-handler.expose.file` |
 
 Per-deployment configuration (`config/site-config.json`) drives the
@@ -548,5 +549,6 @@ for navigation.
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
 | 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
 | 024 | `windows-machine-certificate-header` | Read the current workstation certificate's public DER from the Windows managed/ordinary Personal stores, require its CN to match the local Windows hostname, and attach it as `X-DenBrowser-Machine-Cert` only on requests claimed by the attestation proxy table. Caller-supplied values are stripped to prevent spoofing and redirect leakage; no private key is opened. |
+| 025 | `protect-process-memory` | Give the main browser and Firefox-owned Windows children a protected creation-time DACL that denies ordinary same-user `PROCESS_VM_READ`, DACL rewrite, and owner rewrite opens while preserving Firefox broker IPC. Blocks Task Manager/ordinary external minidumps; custom handle duplication, creator handles, enabled debug privilege, and kernel access remain out of scope. |
 
 ---
