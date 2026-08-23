@@ -75,6 +75,47 @@ git -C ../firefox switch DenBrowser && git -C ../firefox branch -D _roundtrip
 
 Commit the refreshed `patches/`, then push the fork branch/tags as desired.
 
+## Patch change statistics
+
+`scripts/patch-stats.py` reports each tagged patch commit's Firefox source-line
+changes, split into code, comment-only, and blank additions/deletions. By
+default it selects the newest stable `denbrowser-*` tag in `../firefox` and
+infers its nearest `FIREFOX_*esr_RELEASE` base:
+
+```bash
+scripts/patch-stats.py
+```
+
+For a reproducible historical source report, specify both tags explicitly:
+
+```bash
+scripts/patch-stats.py \
+  --base-tag FIREFOX_153_1_0esr_RELEASE \
+  --tag denbrowser-153.1.0esr-2
+```
+
+Use `--show-files` for rows beneath each patch or `--format json` for structured
+output. A changed line containing code and a trailing comment counts as code;
+only comment-only lines count as comments. Patch MPL/rationale headers, commit
+messages, and unified-diff metadata do not count toward source lines. The
+classifier uses each complete before/after source file, so multiline comment
+state carries across unchanged hunks. It fails on unsupported text types rather
+than silently guessing, and checks each categorized total against Git's
+`--numstat` total so no changed text lines are omitted.
+
+Rows marked `[local stub]` come from this repo's current `patches/` manifest,
+because stubs have no Firefox commit or tag object. Use `--no-local-stubs` for a
+strictly tag-contained historical report. `PATCH CHURN` sums every
+parent-to-commit patch diff, so its `FILES` count is file-change occurrences and
+a later patch can count a path or line again. `FINAL TREE` is the direct
+ESR-base-to-tag delta. Binary changes increment `BIN` but have no line counts.
+
+Run the focused tests after changing the classifier:
+
+```bash
+python3 -m unittest discover -s test/patch_stats -p 'test_*.py'
+```
+
 ## Restart from scratch (re-bootstrap)
 
 To rebuild the branch from the patch **files** (e.g. discarding a bad rebase):

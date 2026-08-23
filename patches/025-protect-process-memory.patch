@@ -28,8 +28,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #              not a determined same-user boundary. Privileged, kernel,
 #              in-process, and physical-display observation are out of scope.
 
+
 diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
-index 64ab5f306a62fd1d1f55c450d7fab6faa4c8ef6a..4fd44878c192cf90e89cccebbd0643a46e2c7fec 100644
+index 64ab5f306a62..4fd44878c192 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.cpp
 +++ b/browser/app/winlauncher/LauncherProcessWin.cpp
 @@ -7,6 +7,7 @@
@@ -69,7 +70,7 @@ index 64ab5f306a62fd1d1f55c450d7fab6faa4c8ef6a..4fd44878c192cf90e89cccebbd0643a4
  
 diff --git a/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp b/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..15576fa514c9a1c941db134bcf9c4679167e42a8
+index 000000000000..15576fa514c9
 --- /dev/null
 +++ b/browser/app/winlauncher/test/TestDenBrowserProcessSecurity.cpp
 @@ -0,0 +1,246 @@
@@ -320,7 +321,7 @@ index 0000000000000000000000000000000000000000..15576fa514c9a1c941db134bcf9c4679
 +  return ParentMain(argv[0]);
 +}
 diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
-index 36b3c6392b1767795d66361b89cf12a9cf280f04..2a93263a102e38e11ed04d98eee5a44d47212d0a 100644
+index 36b3c6392b17..2a93263a102e 100644
 --- a/browser/app/winlauncher/test/moz.build
 +++ b/browser/app/winlauncher/test/moz.build
 @@ -8,6 +8,7 @@ GeckoCppUnitTests(
@@ -340,7 +341,7 @@ index 36b3c6392b1767795d66361b89cf12a9cf280f04..2a93263a102e38e11ed04d98eee5a44d
  ]
  
 diff --git a/ipc/chromium/src/base/process_util_win.cc b/ipc/chromium/src/base/process_util_win.cc
-index c281aeeadbad97faf2be68c2fdeeff84a41d365b..cc148f73f4f1131839ef12bd6e8d23bd8bff1428 100644
+index c281aeeadbad..cc148f73f4f1 100644
 --- a/ipc/chromium/src/base/process_util_win.cc
 +++ b/ipc/chromium/src/base/process_util_win.cc
 @@ -17,8 +17,9 @@
@@ -379,7 +380,7 @@ index c281aeeadbad97faf2be68c2fdeeff84a41d365b..cc148f73f4f1131839ef12bd6e8d23bd
      DLOG(WARNING) << "CreateProcess Failed: " << GetLastError();
 diff --git a/mozglue/misc/DenBrowserProcessSecurity.cpp b/mozglue/misc/DenBrowserProcessSecurity.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c441d4ce643f709aed2561b10698eb62f8d0cbc
+index 000000000000..8c441d4ce643
 --- /dev/null
 +++ b/mozglue/misc/DenBrowserProcessSecurity.cpp
 @@ -0,0 +1,60 @@
@@ -445,7 +446,7 @@ index 0000000000000000000000000000000000000000..8c441d4ce643f709aed2561b10698eb6
 +}  // namespace mozilla::denbrowser
 diff --git a/mozglue/misc/DenBrowserProcessSecurity.h b/mozglue/misc/DenBrowserProcessSecurity.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..31786e048fc0d1c1179f8b372b9ace7ecda71a35
+index 000000000000..31786e048fc0
 --- /dev/null
 +++ b/mozglue/misc/DenBrowserProcessSecurity.h
 @@ -0,0 +1,42 @@
@@ -492,7 +493,7 @@ index 0000000000000000000000000000000000000000..31786e048fc0d1c1179f8b372b9ace7e
 +
 +#endif  // mozilla_DenBrowserProcessSecurity_h
 diff --git a/mozglue/misc/moz.build b/mozglue/misc/moz.build
-index 2099a46a24e0350b95ee8a420214714fc38a4ac2..ded5af7402837ecae913e0b92ce83b5b1229ebeb 100644
+index 2099a46a24e0..ded5af740283 100644
 --- a/mozglue/misc/moz.build
 +++ b/mozglue/misc/moz.build
 @@ -33,6 +33,7 @@ EXPORTS.mozilla.glue += [
@@ -512,7 +513,7 @@ index 2099a46a24e0350b95ee8a420214714fc38a4ac2..ded5af7402837ecae913e0b92ce83b5b
          "WindowsDiagnostics.cpp",
          "WindowsDllMain.cpp",
 diff --git a/security/sandbox/chromium/sandbox/win/src/target_process.cc b/security/sandbox/chromium/sandbox/win/src/target_process.cc
-index 739372de276545e5d1285b198177b66bb0eed13c..42b87f5a5f5172aec669c93d5f6ca066b857a8a8 100644
+index 739372de2765..42b87f5a5f51 100644
 --- a/security/sandbox/chromium/sandbox/win/src/target_process.cc
 +++ b/security/sandbox/chromium/sandbox/win/src/target_process.cc
 @@ -25,6 +25,7 @@

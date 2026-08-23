@@ -27,7 +27,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/components/tabbrowser/content/drag-and-drop.js b/browser/components/tabbrowser/content/drag-and-drop.js
-index 603a0ae..45f722a 100644
+index 603a0ae4a667..45f722aa2bbd 100644
 --- a/browser/components/tabbrowser/content/drag-and-drop.js
 +++ b/browser/components/tabbrowser/content/drag-and-drop.js
 @@ -9,6 +9,7 @@
@@ -65,7 +65,8 @@ index 603a0ae..45f722a 100644
  
      constructor(tabbrowserTabs) {
        this._tabbrowserTabs = tabbrowserTabs;
-@@ -253,6 +273,14 @@
+@@ -252,7 +272,15 @@
+ 
      // eslint-disable-next-line complexity
      handle_drop(event) {
 +      // A native drop is terminal. Re-enable browser chrome before touching
@@ -185,17 +186,17 @@ index 603a0ae..45f722a 100644
 +        draggedTab = this.#dragSource;
 +        recoveredDragSource = !!draggedTab;
 +      }
-+
+ 
+-      // Prevent this code from running if a tabdrop animation is
+-      // running since calling finishAnimateTabMove would clear
+-      // any CSS transition that is running.
+-      if (draggedTab.hasAttribute("tabdrop-samewindow")) {
 +      // Do not cancel a valid same-window drop animation. Its bounded fallback
 +      // guarantees cleanup even if transitionend is lost.
 +      if (this.#hasActiveSameWindowDropTransition()) {
 +        return;
 +      }
-
--      // Prevent this code from running if a tabdrop animation is
--      // running since calling finishAnimateTabMove would clear
--      // any CSS transition that is running.
--      if (draggedTab.hasAttribute("tabdrop-samewindow")) {
++
 +      if (!draggedTab || recoveredDragSource || !dt) {
 +        this._cancelInterruptedTabDrag(draggedTab);
          return;
@@ -361,7 +362,7 @@ index 603a0ae..45f722a 100644
 +          dt.mozSetDataAt("text/x-moz-text-internal", "", i);
          }
        }
-
+ 
 @@ -1284,6 +1443,7 @@
          tabGroupCreationColor: gBrowser.tabGroupMenu.nextUnusedColor,
          expandGroupOnDrop: collapseTabGroupDuringDrag,

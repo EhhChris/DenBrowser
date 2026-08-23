@@ -80,6 +80,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   widget/windows/nsWindow.cpp
 #   widget/gtk/nsWindow.cpp
 
+
 diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
 index 6484c3c9a42e..1db0fe014894 100644
 --- a/widget/cocoa/nsCocoaWindow.mm

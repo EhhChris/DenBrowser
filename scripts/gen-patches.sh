@@ -49,8 +49,36 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 EOF
 
+COMMITS=()
+while IFS= read -r commit; do
+    COMMITS+=("$commit")
+done < <(git -C "$FORK" rev-list --reverse "${BASE_TAG}..${BRANCH}")
+
+PREFLIGHT_FAILED=0
+for commit in "${COMMITS[@]}"; do
+    stem="$(git -C "$FORK" log -1 --format=%s "$commit")"
+    body="$(git -C "$FORK" log -1 --format=%b "$commit")"
+    first_line="${body%%$'\n'*}"
+    expected="# PATCH: $stem"
+
+    case "$first_line" in
+        "$expected"|"$expected "*) ;;
+        *)
+            short="$(git -C "$FORK" rev-parse --short "$commit")"
+            echo "[gen] ERROR: ${stem} (${short}) has an invalid patch documentation body." >&2
+            echo "[gen]   Expected first body line: ${expected}" >&2
+            echo "[gen]   Found: ${first_line:-<empty>}" >&2
+            PREFLIGHT_FAILED=1 ;;
+    esac
+done
+
+if [[ $PREFLIGHT_FAILED -ne 0 ]]; then
+    echo "[gen] ERROR: Refusing to overwrite patches; repair the commit messages first." >&2
+    exit 1
+fi
+
 WROTE=0
-for commit in $(git -C "$FORK" rev-list --reverse "${BASE_TAG}..${BRANCH}"); do
+for commit in "${COMMITS[@]}"; do
     stem="$(git -C "$FORK" log -1 --format=%s "$commit")"
     out="$PATCHES_DIR/${stem}.patch"
     {

@@ -21,10 +21,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
-index 55283b5..4b6f915 100644
+index 5e7aaa93002b..869f04692e7b 100644
 --- a/browser/base/content/nsContextMenu.sys.mjs
 +++ b/browser/base/content/nsContextMenu.sys.mjs
-@@ -2677,7 +2677,9 @@ export class nsContextMenu {
+@@ -2699,7 +2699,9 @@ export class nsContextMenu {
      );
  
      let opts = {

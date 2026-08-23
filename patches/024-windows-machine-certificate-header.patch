@@ -45,8 +45,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   header and are logged once per process. The browser request is not locally
 #   blocked; a proxy configured with machine_identity.required=true rejects it.
 #
+
+
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
-index b93111a..a51dc47 100644
+index b93111abbab1..a51dc471c9cf 100644
 --- a/netwerk/base/DenBrowserAttest.cpp
 +++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -4,11 +4,14 @@
@@ -335,7 +337,7 @@ index b93111a..a51dc47 100644
  }
  
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
-index 159c2eb..5f1596f 100644
+index 159c2eb882b6..5f1596f8b628 100644
 --- a/netwerk/base/DenBrowserAttest.h
 +++ b/netwerk/base/DenBrowserAttest.h
 @@ -18,9 +18,10 @@ class nsHttpRequestHead;

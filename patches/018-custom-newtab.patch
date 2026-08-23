@@ -35,11 +35,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   The page is pure static HTML (no script), so clicking a tile is an ordinary
 #   top-level navigation.
 
+
 diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
-index c919cf5c91b3..9de616c03c4e 100644
+index 1df07b24a235..449a94fbddfd 100644
 --- a/browser/base/content/browser.js
 +++ b/browser/base/content/browser.js
-@@ -724,6 +724,8 @@ var gInitialPages = [
+@@ -739,6 +739,8 @@ var gInitialPages = [
    "about:firefoxview",
    "about:newtab",
    "about:opentabs",
@@ -221,7 +222,7 @@ index 416391b3ecf2..baeb85bfcd04 100644
          content/browser/logos/fxa-logo.svg            (content/logos/fxa-logo.svg)
          content/browser/logos/ipprotection-states.svg  (content/logos/ipprotection-states.svg)
 diff --git a/browser/components/about/AboutRedirector.cpp b/browser/components/about/AboutRedirector.cpp
-index 958db7176c11..136e4f3bc6c7 100644
+index 48bbf4038d6f..3d84f10c409d 100644
 --- a/browser/components/about/AboutRedirector.cpp
 +++ b/browser/components/about/AboutRedirector.cpp
 @@ -138,6 +138,15 @@ static const RedirEntry kRedirMap[] = {
@@ -237,11 +238,11 @@ index 958db7176c11..136e4f3bc6c7 100644
 +    {"denbrowserhome", "chrome://browser/content/denbrowser-newtab.html",
 +     nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
 +         nsIAboutModule::URI_MUST_LOAD_IN_CHILD},
- #ifdef MOZ_SELECTABLE_PROFILES
-     {"profilemanager", "chrome://browser/content/profiles/profiles.html",
+ #ifdef MOZ_NORMANDY
+     {"studies", "resource://normandy-content/about-studies/about-studies.html",
       nsIAboutModule::ALLOW_SCRIPT | nsIAboutModule::IS_SECURE_CHROME_UI |
 diff --git a/browser/components/about/components.conf b/browser/components/about/components.conf
-index 669c6912f636..384264ea893b 100644
+index 6d439f1746b5..f85502173431 100644
 --- a/browser/components/about/components.conf
 +++ b/browser/components/about/components.conf
 @@ -7,6 +7,7 @@ pages = [

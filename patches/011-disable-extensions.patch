@@ -40,10 +40,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
-index 37af7d163d33..8c64c7fd10a4 100644
+index c63f5ad14810..a0c16ea043c3 100644
 --- a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
 +++ b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
-@@ -1387,6 +1387,8 @@ class AddonInstall {
+@@ -1395,6 +1395,8 @@ class AddonInstall {
     * @throws if installation cannot proceed from the current state
     */
    install() {

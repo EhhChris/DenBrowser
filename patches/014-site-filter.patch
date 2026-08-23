@@ -80,7 +80,7 @@ index 13464a72e83e..ba5a127f92ff 100644
  invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
  networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
-index 275d0ce1d33e..d5b0bfed986d 100644
+index 723b4c0a54a8..1e21056c264c 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
 @@ -4,6 +4,8 @@
@@ -92,7 +92,7 @@ index 275d0ce1d33e..d5b0bfed986d 100644
  #include <algorithm>
  #include "mozilla/CycleCollectedJSContext.h"
  #include "mozilla/dom/HTMLFormElement.h"
-@@ -8499,6 +8501,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
+@@ -8505,6 +8507,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
  
    MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
  

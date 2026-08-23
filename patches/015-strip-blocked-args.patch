@@ -1,4 +1,10 @@
-# PATCH 015: Enforce a fail-closed Windows launch contract
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# PATCH: 015-strip-blocked-args
+#
+# Enforce a fail-closed Windows launch contract
 #
 # PURPOSE:
 #   Make Firefox's existing same-binary Windows launcher mandatory for every
@@ -32,9 +38,10 @@
 #   Eliminating the first-process loader residual would require an external
 #   protected launcher, intentionally outside this Firefox-only design.
 
+
 diff --git a/browser/app/winlauncher/DenBrowserLaunchPolicy.h b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a2d56860dd695adf4d98b2cb16e3760b6a664d89
+index 000000000000..a2d56860dd69
 --- /dev/null
 +++ b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
 @@ -0,0 +1,140 @@
@@ -179,24 +186,24 @@ index 0000000000000000000000000000000000000000..a2d56860dd695adf4d98b2cb16e3760b
 +
 +#endif  // mozilla_DenBrowserLaunchPolicy_h
 diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
-index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6faa4c8ef6a 100644
+index 8337336dc894..64ab5f306a62 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.cpp
 +++ b/browser/app/winlauncher/LauncherProcessWin.cpp
 @@ -3,6 +3,7 @@
   * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-
+ 
  #include "LauncherProcessWin.h"
 +#include "DenBrowserLaunchPolicy.h"
-
+ 
  #include "mozilla/CmdLineAndEnvUtils.h"
  #include "mozilla/DebugOnly.h"
 @@ -20,8 +21,17 @@
-
+ 
  #include <windows.h>
  #include <processthreadsapi.h>
 +#include <shlobj.h>
  #include <shlwapi.h>
-
+ 
 +#include <algorithm>
 +#include <iterator>
 +#include <stdlib.h>
@@ -215,7 +222,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +const volatile DenBrowserLaunchAuthorization gDenBrowserLaunchAuthorization =
 +    DenBrowserLaunchAuthorization::Untrusted;
  }  // namespace mozilla
-
+ 
 +using DenBrowserEnvironmentEntry = std::pair<std::wstring, std::wstring>;
 +using DenBrowserEnvironment = std::vector<DenBrowserEnvironmentEntry>;
 +
@@ -440,12 +447,12 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +      return result;
 +    }
    }
-
+ 
    return mozilla::InitializeDllBlocklistOOPFromLauncher(
 @@ -231,35 +459,11 @@ static void SetMitigationPolicies(mozilla::ProcThreadAttributes& aAttrs,
  #endif  // defined(_M_ARM64)
  }
-
+ 
 -static mozilla::LauncherFlags ProcessCmdLine(int& aArgc, wchar_t* aArgv[]) {
 -  mozilla::LauncherFlags result = mozilla::LauncherFlags::eNone;
 -
@@ -481,11 +488,11 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +  // inheritance, waiting, or suppression of de-elevation.
 +  return mozilla::LauncherFlags::eNone;
  }
-
+ 
  static void MaybeBreakForBrowserDebugging() {
 @@ -319,10 +523,9 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
    bool runAsLauncher = DoLauncherProcessChecks(argc, argv);
-
+ 
  #if defined(MOZ_LAUNCHER_PROCESS)
 -  bool forceLauncher =
 -      runAsLauncher &&
@@ -494,12 +501,12 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +  // DenBrowser must never let launcher crash telemetry or a registry override
 +  // demote a validated launcher request into an in-process browser start.
 +  bool forceLauncher = runAsLauncher;
-
+ 
    mozilla::LauncherRegistryInfo::ProcessType desiredType =
        runAsLauncher ? mozilla::LauncherRegistryInfo::ProcessType::Launcher
 @@ -356,20 +559,74 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
  namespace mozilla {
-
+ 
  Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
 +  const bool authorizedBrowser =
 +      gDenBrowserLaunchAuthorization ==
@@ -541,7 +548,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +    HandleLauncherError(LAUNCHER_ERROR_GENERIC());
 +    return Some(127);
 +  }
-
+ 
 -  // return fast when we're a child process.
 -  // (The remainder of this function has some side effects that are
 -  // undesirable for content processes)
@@ -560,10 +567,10 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +      !DenBrowserApplyCurrentEnvironment(currentEnvironment)) {
 +    return Some(127);
    }
-
+ 
    // Called from the launcher process *and* the browser process.
    EnablePreferLoadFromSystem32IfCompatible();
-
+ 
 +  if (authorizedBrowser) {
 +    return Nothing();
 +  }
@@ -593,19 +600,19 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
  #if defined(MOZ_SANDBOX)
 @@ -400,11 +650,6 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
-
+ 
    mozilla::UseParentConsole();
-
+ 
 -  if (!SetArgv0ToFullBinaryPath(argv)) {
 -    HandleLauncherError(LAUNCHER_ERROR_GENERIC());
 -    return Nothing();
 -  }
 -
    LauncherFlags flags = ProcessCmdLine(argc, argv);
-
+ 
    nsAutoHandle mediumIlToken;
 @@ -412,53 +657,20 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
        GetElevationState(argv[0], flags, mediumIlToken);
@@ -614,7 +621,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
 -  // Distill deelevation status, and/or attempt to perform launcher deelevation
 -  // via an indirect relaunch.
 +  // Shell-based de-elevation cannot carry the launch authorization. A normal
@@ -666,7 +673,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +    HandleLauncherError(LAUNCHER_ERROR_FROM_WIN32(ERROR_ELEVATION_REQUIRED));
 +    return Some(127);
    }
-
+ 
  #if defined(MOZ_LAUNCHER_PROCESS)
 @@ -466,7 +678,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    LauncherVoidResult commitResult = regInfo.Commit();
@@ -676,7 +683,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +    return Some(127);
    }
  #endif  // defined(MOZ_LAUNCHER_PROCESS)
-
+ 
 @@ -474,49 +686,30 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    UniquePtr<wchar_t[]> cmdLine(MakeCommandLine(argc, argv));
    if (!cmdLine) {
@@ -684,7 +691,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
    const Maybe<bool> isSafeMode =
        IsSafeModeRequested(argc, argv, SafeModeFlag::NoKeyPressCheck);
    if (!isSafeMode) {
@@ -692,10 +699,10 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
    ProcThreadAttributes attrs;
    SetMitigationPolicies(attrs, isSafeMode.value());
-
+ 
 -  HANDLE stdHandles[] = {::GetStdHandle(STD_INPUT_HANDLE),
 -                         ::GetStdHandle(STD_OUTPUT_HANDLE),
 -                         ::GetStdHandle(STD_ERROR_HANDLE)};
@@ -703,7 +710,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -  attrs.AddInheritableHandles(stdHandles);
 -
    DWORD creationFlags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
-
+ 
    STARTUPINFOEXW siex;
    LauncherResult<bool> attrsOk = attrs.AssignTo(siex);
    if (attrsOk.isErr()) {
@@ -711,7 +718,7 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
 -  BOOL inheritHandles = FALSE;
 -
    if (attrsOk.unwrap()) {
@@ -728,12 +735,12 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -      inheritHandles = TRUE;
 -    }
    }
-
+ 
    // Pass on the path of the shortcut used to launch this process, if any.
 @@ -531,20 +724,32 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    PROCESS_INFORMATION pi = {};
    BOOL createOk;
-
+ 
 +  DenBrowserEnvironment browserEnvironment;
 +  if (!DenBrowserBuildEnvironment(mediumIlToken.get(), applicationDirectory,
 +                                  browserEnvironment)) {
@@ -763,13 +770,13 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 +                         creationFlags, environmentBlock.get(),
 +                         applicationDirectory.c_str(), &siex.StartupInfo, &pi);
    }
-
+ 
    if (!createOk) {
      HandleLauncherError(LAUNCHER_ERROR_FROM_LAST());
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
    nsAutoHandle process(pi.hProcess);
 @@ -566,13 +771,13 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    if (setupResult.isErr()) {
@@ -778,17 +785,17 @@ index 8337336dc894b44ea696bb780e448dfbdd8b6357..64ab5f306a62fd1d1f55c450d7fab6fa
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
    if (::ResumeThread(mainThread.get()) == static_cast<DWORD>(-1)) {
      HandleLauncherError(LAUNCHER_ERROR_FROM_LAST());
      ::TerminateProcess(process.get(), 1);
 -    return Nothing();
 +    return Some(127);
    }
-
+ 
    if (flags & LauncherFlags::eWaitForBrowser) {
 diff --git a/browser/app/winlauncher/LauncherProcessWin.h b/browser/app/winlauncher/LauncherProcessWin.h
-index c70aa3715c382d264bcaf7161504660e49eab53c..86e72800b1b8de5c780a601d9e71e3c200e42780 100644
+index c70aa3715c38..86e72800b1b8 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.h
 +++ b/browser/app/winlauncher/LauncherProcessWin.h
 @@ -18,8 +18,9 @@ struct StaticXREAppData;
@@ -802,11 +809,11 @@ index c70aa3715c382d264bcaf7161504660e49eab53c..86e72800b1b8de5c780a601d9e71e3c2
 + * startup.
   */
  Maybe<int> LauncherMain(int& argc, wchar_t* argv[]);
-
+ 
 @@ -58,10 +59,21 @@ enum class DeelevationStatus : uint32_t {
    DefaultStaticValue = 0x55AA55AA,
  };
-
+ 
 +enum class DenBrowserLaunchAuthorization : uint32_t {
 +  Untrusted = 0x3D328CB4,
 +  AuthorizedBrowser = 0xA6D73F19,
@@ -815,7 +822,7 @@ index c70aa3715c382d264bcaf7161504660e49eab53c..86e72800b1b8de5c780a601d9e71e3c2
  // The result of the deelevation attempt. Set by the launcher process in the
  // main process when the two are distinct.
  extern const volatile DeelevationStatus gDeelevationStatus;
-
+ 
 +// Written into the suspended browser by the mandatory launcher. Command-line
 +// and environment markers are routing hints only; this value is the authority
 +// to enter the browser process path.
@@ -823,11 +830,11 @@ index c70aa3715c382d264bcaf7161504660e49eab53c..86e72800b1b8de5c780a601d9e71e3c2
 +    gDenBrowserLaunchAuthorization;
 +
  }  // namespace mozilla
-
+ 
  #endif  // mozilla_LauncherProcessWin_h
 diff --git a/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef96a27e642288791a649116543eae5ef6b5d2f6
+index 000000000000..ef96a27e6422
 --- /dev/null
 +++ b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
 @@ -0,0 +1,103 @@
@@ -935,7 +942,7 @@ index 0000000000000000000000000000000000000000..ef96a27e642288791a649116543eae5e
 +  return ok ? 0 : 1;
 +}
 diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
-index a4687d9dc0cdb2a9c9515080fc5ac1f0385a1c1c..36b3c6392b1767795d66361b89cf12a9cf280f04 100644
+index a4687d9dc0cd..36b3c6392b17 100644
 --- a/browser/app/winlauncher/test/moz.build
 +++ b/browser/app/winlauncher/test/moz.build
 @@ -7,6 +7,7 @@ DisableStlWrapping()

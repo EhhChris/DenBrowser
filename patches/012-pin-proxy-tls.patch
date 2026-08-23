@@ -77,7 +77,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
-index f930dbd9b58d..f8937fef3104 100644
+index 3901a65eb6b1..b93111abbab1 100644
 --- a/netwerk/base/DenBrowserAttest.cpp
 +++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -32,6 +32,8 @@
@@ -89,7 +89,7 @@ index f930dbd9b58d..f8937fef3104 100644
  #include "keyhi.h"
  #include "mozilla/Base64.h"
  #include "mozilla/Logging.h"
-@@ -53,6 +55,7 @@
+@@ -52,6 +54,7 @@
  #include "secasn1.h"
  #include "secitem.h"
  
@@ -97,7 +97,7 @@ index f930dbd9b58d..f8937fef3104 100644
  #include <iterator>  // std::size
  
  namespace denbrowser {
-@@ -518,4 +521,86 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
+@@ -517,4 +520,86 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
    return NS_OK;
  }
  
