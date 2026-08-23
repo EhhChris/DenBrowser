@@ -163,7 +163,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 diff --git a/netwerk/base/DenBrowserAttest.cpp b/netwerk/base/DenBrowserAttest.cpp
 new file mode 100644
-index 000000000000..f930dbd9b58d
+index 000000000000..3901a65eb6b1
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.cpp
 @@ -0,0 +1,520 @@

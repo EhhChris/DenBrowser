@@ -51,6 +51,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   defence-in-depth: the policy depends on policies.json loading correctly at
 #   runtime; the source-level changes are unconditional.
 
+
 diff --git a/browser/base/content/main-popupset.inc.xhtml b/browser/base/content/main-popupset.inc.xhtml
 index 2338bac0003a..0bb6b8a2d49f 100644
 --- a/browser/base/content/main-popupset.inc.xhtml
@@ -93,7 +94,7 @@ index c76a0647e14b..ee4c0393e235 100644
    for (let [id, config] of Object.entries(CONFIG_PANES)) {
      if (!redesignEnabled && config.replaces) {
 diff --git a/browser/components/sidebar/browser-sidebar.js b/browser/components/sidebar/browser-sidebar.js
-index 36f7e1ceba70..461f9f89afe6 100644
+index 947f026af920..05da7170ddba 100644
 --- a/browser/components/sidebar/browser-sidebar.js
 +++ b/browser/components/sidebar/browser-sidebar.js
 @@ -141,25 +141,6 @@ var SidebarController = {

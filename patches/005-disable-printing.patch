@@ -45,7 +45,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/browser-sets.js b/browser/base/content/browser-sets.js
-index b3615d0..60af2f8 100644
+index b3615d038a44..60af2f868f63 100644
 --- a/browser/base/content/browser-sets.js
 +++ b/browser/base/content/browser-sets.js
 @@ -51,17 +51,13 @@ document.addEventListener(
@@ -70,7 +70,7 @@ index b3615d0..60af2f8 100644
            case "cmd_file_importFromAnotherBrowser":
              MigrationUtils.showMigrationWizard(window, {
 diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
-index c919cf5..1df07b2 100644
+index c919cf5c91b3..1df07b24a235 100644
 --- a/browser/base/content/browser.js
 +++ b/browser/base/content/browser.js
 @@ -606,6 +606,21 @@ XPCOMUtils.defineLazyPreferenceGetter(
@@ -159,10 +159,10 @@ index c919cf5..1df07b2 100644
      let closedPromise = new Promise(resolve => (resolveClosed = resolve));
      // Get the dialog manager to open the prompt with.
 diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
-index a4d6956..55283b5 100644
+index b406154aba3b..5e7aaa93002b 100644
 --- a/browser/base/content/nsContextMenu.sys.mjs
 +++ b/browser/base/content/nsContextMenu.sys.mjs
-@@ -2472,15 +2472,11 @@ export class nsContextMenu {
+@@ -2494,15 +2494,11 @@ export class nsContextMenu {
    }
  
    printFrame() {
@@ -181,7 +181,7 @@ index a4d6956..55283b5 100644
  
    switchPageDirection() {
 diff --git a/browser/components/extensions/parent/ext-tabs.js b/browser/components/extensions/parent/ext-tabs.js
-index f342748..b52d549 100644
+index f342748d4b68..b52d549c2b6e 100644
 --- a/browser/components/extensions/parent/ext-tabs.js
 +++ b/browser/components/extensions/parent/ext-tabs.js
 @@ -27,6 +27,22 @@ const TAB_HIDE_CONFIRMED_TYPE = "tabHideNotification";
@@ -233,7 +233,7 @@ index f342748..b52d549 100644
              Ci.nsIFilePicker
            );
 diff --git a/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs b/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
-index b99a80b..ed7783d 100644
+index b99a80ba9cab..ed7783d3977b 100644
 --- a/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
 +++ b/browser/components/urlbar/QuickActionsLoaderDefault.sys.mjs
 @@ -237,18 +237,9 @@ const DEFAULT_ACTIONS = {
@@ -259,7 +259,7 @@ index b99a80b..ed7783d 100644
    },
    screenshot: {
 diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserDOMWindow.sys.mjs
-index 29c5b15..e45e09c 100644
+index 29c5b1510696..e45e09c1c0ee 100644
 --- a/browser/modules/BrowserDOMWindow.sys.mjs
 +++ b/browser/modules/BrowserDOMWindow.sys.mjs
 @@ -53,6 +53,22 @@ export class BrowserDOMWindow {
@@ -313,7 +313,7 @@ index 29c5b15..e45e09c 100644
  
      if (
 diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
-index 00c69a2..4e28680 100644
+index 00c69a2310f1..4e2868098eee 100644
 --- a/docshell/base/CanonicalBrowsingContext.cpp
 +++ b/docshell/base/CanonicalBrowsingContext.cpp
 @@ -954,6 +954,8 @@ already_AddRefed<Promise> CanonicalBrowsingContext::PrintJS(
@@ -335,7 +335,7 @@ index 00c69a2..4e28680 100644
    return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
  #else
 diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
-index 0fbb9d9..dd07395 100644
+index c6e7f23507a6..a359d61ceb88 100644
 --- a/dom/base/nsGlobalWindowOuter.cpp
 +++ b/dom/base/nsGlobalWindowOuter.cpp
 @@ -263,6 +263,8 @@ using mozilla::OriginAttributes;
@@ -376,7 +376,7 @@ index 0fbb9d9..dd07395 100644
    nsCOMPtr<nsIPrintSettingsService> printSettingsService =
        do_GetService("@mozilla.org/gfx/printsettings-service;1");
 diff --git a/gfx/thebes/moz.build b/gfx/thebes/moz.build
-index 6919fcf..d757eed 100644
+index 6919fcff1cd3..d757eedd4cc0 100644
 --- a/gfx/thebes/moz.build
 +++ b/gfx/thebes/moz.build
 @@ -85,16 +85,12 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
@@ -462,7 +462,7 @@ index 6919fcf..d757eed 100644
  if CONFIG["INTEL_ARCHITECTURE"]:
      SOURCES += ["gfxAlphaRecoverySSE2.cpp"]
 diff --git a/layout/printing/nsPrintJob.cpp b/layout/printing/nsPrintJob.cpp
-index 0904ef0..c82a9fa 100644
+index 0904ef055fce..c82a9fa9a863 100644
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
 @@ -329,8 +329,13 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
@@ -504,7 +504,7 @@ index 0904ef0..c82a9fa 100644
    return rv;
 diff --git a/toolkit/actors/DenBrowserPrintingChild.sys.mjs b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
 new file mode 100644
-index 0000000..62a5810
+index 000000000000..62a581016516
 --- /dev/null
 +++ b/toolkit/actors/DenBrowserPrintingChild.sys.mjs
 @@ -0,0 +1,16 @@
@@ -526,7 +526,7 @@ index 0000000..62a5810
 +}
 diff --git a/toolkit/actors/DenBrowserPrintingParent.sys.mjs b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
 new file mode 100644
-index 0000000..73f8587
+index 000000000000..73f8587e6e13
 --- /dev/null
 +++ b/toolkit/actors/DenBrowserPrintingParent.sys.mjs
 @@ -0,0 +1,43 @@
@@ -574,7 +574,7 @@ index 0000000..73f8587
 +  }
 +}
 diff --git a/toolkit/actors/moz.build b/toolkit/actors/moz.build
-index 3c6d8d0..d0789ae 100644
+index 3c6d8d02420f..d0789aee1cf5 100644
 --- a/toolkit/actors/moz.build
 +++ b/toolkit/actors/moz.build
 @@ -53,6 +53,8 @@ FINAL_TARGET_FILES.actors += [
@@ -587,7 +587,7 @@ index 3c6d8d0..d0789ae 100644
      "FindBarChild.sys.mjs",
      "FindBarParent.sys.mjs",
 diff --git a/toolkit/components/printing/content/print.js b/toolkit/components/printing/content/print.js
-index d9204f2..9e938cd 100644
+index d9204f28178b..9e938cdbd178 100644
 --- a/toolkit/components/printing/content/print.js
 +++ b/toolkit/components/printing/content/print.js
 @@ -15,10 +15,13 @@ const INPUT_DELAY_MS = Cu.isInAutomation ? 100 : 500;
@@ -628,7 +628,7 @@ index d9204f2..9e938cd 100644
  
      this.printPreviewEl =
 diff --git a/toolkit/components/printing/content/printUtils.js b/toolkit/components/printing/content/printUtils.js
-index c3e6c6e..1603d69 100644
+index c3e6c6e15350..1603d699f19e 100644
 --- a/toolkit/components/printing/content/printUtils.js
 +++ b/toolkit/components/printing/content/printUtils.js
 @@ -55,6 +55,8 @@ ChromeUtils.defineESModuleGetters(this, {
@@ -725,7 +725,7 @@ index c3e6c6e..1603d69 100644
      // settings changes.
      try {
 diff --git a/toolkit/modules/ActorManagerParent.sys.mjs b/toolkit/modules/ActorManagerParent.sys.mjs
-index 1404039..04ac05d 100644
+index 140403964557..04ac05d20a7a 100644
 --- a/toolkit/modules/ActorManagerParent.sys.mjs
 +++ b/toolkit/modules/ActorManagerParent.sys.mjs
 @@ -536,6 +536,20 @@ let JSWINDOWACTORS = {
@@ -750,7 +750,7 @@ index 1404039..04ac05d 100644
      parent: {
        esModuleURI: "resource://gre/actors/PrintingParent.sys.mjs",
 diff --git a/widget/android/components.conf b/widget/android/components.conf
-index 97b84da..4874e79 100644
+index 97b84da47b17..4874e79f9c9a 100644
 --- a/widget/android/components.conf
 +++ b/widget/android/components.conf
 @@ -54,19 +54,6 @@ Classes = [
@@ -795,7 +795,7 @@ index 97b84da..4874e79 100644
 +        },
 +    ]
 diff --git a/widget/android/moz.build b/widget/android/moz.build
-index 25b6911..4a83964 100644
+index 25b6911135d0..4a83964ab49d 100644
 --- a/widget/android/moz.build
 +++ b/widget/android/moz.build
 @@ -145,10 +145,8 @@ UNIFIED_SOURCES += [
@@ -823,7 +823,7 @@ index 25b6911..4a83964 100644
      "components.conf",
  ]
 diff --git a/widget/cocoa/components.conf b/widget/cocoa/components.conf
-index 0ca2fba..27cb774 100644
+index 0ca2fba50292..27cb774418db 100644
 --- a/widget/cocoa/components.conf
 +++ b/widget/cocoa/components.conf
 @@ -78,30 +78,6 @@ Classes = [
@@ -890,7 +890,7 @@ index 0ca2fba..27cb774 100644
 +        },
 +    ]
 diff --git a/widget/cocoa/moz.build b/widget/cocoa/moz.build
-index a6d1438..909c9b3 100644
+index a6d143819e49..909c9b38bd4d 100644
 --- a/widget/cocoa/moz.build
 +++ b/widget/cocoa/moz.build
 @@ -47,7 +47,6 @@ UNIFIED_SOURCES += [
@@ -927,7 +927,7 @@ index a6d1438..909c9b3 100644
  SOURCES += [
      "DesktopBackgroundImage.mm",
 diff --git a/widget/cocoa/nsWidgetFactory.mm b/widget/cocoa/nsWidgetFactory.mm
-index 6bb5630..71a5fe6 100644
+index 6bb563066fea..71a5fe6d04f8 100644
 --- a/widget/cocoa/nsWidgetFactory.mm
 +++ b/widget/cocoa/nsWidgetFactory.mm
 @@ -31,10 +31,12 @@
@@ -947,7 +947,7 @@ index 6bb5630..71a5fe6 100644
  #include "nsToolkitCompsCID.h"
  
  #include "mozilla/widget/ScreenManager.h"
-@@ -78,10 +80,12 @@ MAKE_GENERIC_CTOR(nsTransferable, nsITransferable)
+@@ -78,10 +80,12 @@
  MAKE_GENERIC_CTOR(nsHTMLFormatConverter, nsIFormatConverter)
  MAKE_GENERIC_CTOR(nsClipboardHelper, nsIClipboardHelper)
  MAKE_GENERIC_CTOR(nsDragService, nsIDragService)

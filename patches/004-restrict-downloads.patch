@@ -39,7 +39,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
-index 311e36a..64819c5 100644
+index 311e36a23026..64819c5d2896 100644
 --- a/browser/base/content/browser-init.js
 +++ b/browser/base/content/browser-init.js
 @@ -40,6 +40,189 @@ var gSerialDeviceObserver = {
@@ -257,7 +257,7 @@ index 311e36a..64819c5 100644
        PopupAndRedirectBlockerObserver.handleEvent(e)
      );
 diff --git a/browser/components/shell/ShellService.sys.mjs b/browser/components/shell/ShellService.sys.mjs
-index 9d57af1..1ebcabf 100644
+index 9c1541ec5cc3..a2718c4e7ae9 100644
 --- a/browser/components/shell/ShellService.sys.mjs
 +++ b/browser/components/shell/ShellService.sys.mjs
 @@ -5,6 +5,8 @@
@@ -280,7 +280,7 @@ index 9d57af1..1ebcabf 100644
        return true;
      }
 diff --git a/browser/components/shell/nsMacShellService.cpp b/browser/components/shell/nsMacShellService.cpp
-index 5f5dd41..fac137c 100644
+index 5f5dd4163cb3..fac137c60652 100644
 --- a/browser/components/shell/nsMacShellService.cpp
 +++ b/browser/components/shell/nsMacShellService.cpp
 @@ -37,6 +37,10 @@ using mozilla::widget::SetDesktopImage;
@@ -306,10 +306,10 @@ index 5f5dd41..fac137c 100644
  
    // Get the image URI:
 diff --git a/browser/components/shell/nsWindowsShellService.cpp b/browser/components/shell/nsWindowsShellService.cpp
-index 2b36517..4b32fa9 100644
+index 424bf6469e19..d085868a2600 100644
 --- a/browser/components/shell/nsWindowsShellService.cpp
 +++ b/browser/components/shell/nsWindowsShellService.cpp
-@@ -117,6 +117,10 @@ using namespace ABI::Windows::UI::StartScreen;
+@@ -120,6 +120,10 @@ using namespace ABI::Windows::UI::StartScreen;
  using namespace mozilla;
  using mozilla::intl::Localization;
  
@@ -332,7 +332,7 @@ index 2b36517..4b32fa9 100644
      // XXX write background loading stuff!
      return NS_ERROR_NOT_AVAILABLE;
 diff --git a/browser/locales/en-US/browser/browser.ftl b/browser/locales/en-US/browser/browser.ftl
-index f05045a..2f879ac 100644
+index f05045ad2d6c..2f879ace6ec8 100644
 --- a/browser/locales/en-US/browser/browser.ftl
 +++ b/browser/locales/en-US/browser/browser.ftl
 @@ -1318,6 +1318,13 @@ restore-session-startup-suggestion-button = Show me how
@@ -350,7 +350,7 @@ index f05045a..2f879ac 100644
  
  data-reporting-notification-message = { -brand-short-name } automatically sends some data to { -vendor-short-name } so that we can improve your experience.
 diff --git a/toolkit/content/contentAreaUtils.js b/toolkit/content/contentAreaUtils.js
-index 0500166..fc525a5 100644
+index 0500166d874d..fc525a5ab2b1 100644
 --- a/toolkit/content/contentAreaUtils.js
 +++ b/toolkit/content/contentAreaUtils.js
 @@ -28,6 +28,38 @@ var ContentAreaUtils = {
@@ -429,7 +429,7 @@ index 0500166..fc525a5 100644
      aSkipPrompt = false;
    }
 diff --git a/uriloader/exthandler/nsExternalHelperAppService.cpp b/uriloader/exthandler/nsExternalHelperAppService.cpp
-index 1eab401..0e60142 100644
+index 1eab40145589..0e60142cfbc0 100644
 --- a/uriloader/exthandler/nsExternalHelperAppService.cpp
 +++ b/uriloader/exthandler/nsExternalHelperAppService.cpp
 @@ -51,6 +51,7 @@
