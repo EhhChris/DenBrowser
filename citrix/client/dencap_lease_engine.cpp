@@ -93,7 +93,8 @@ ProtectionResult LeaseEngine::ReconcileProtectionLocked(std::uint64_t now_ms,
   if (!active) {
     last_protection_refresh_ms_ = now_ms;
     window_changed_.store(false, std::memory_order_release);
-    return protector_.Restore();
+    last_protection_result_ = protector_.Restore();
+    return last_protection_result_;
   }
 
   const bool changed =
@@ -101,11 +102,38 @@ ProtectionResult LeaseEngine::ReconcileProtectionLocked(std::uint64_t now_ms,
   const bool refresh_due =
       now_ms - last_protection_refresh_ms_ >= kProtectionRefreshMs;
   if (!force && !changed && !refresh_due) {
-    return ProtectionResult{Status::kOk, ERROR_SUCCESS, WDA_EXCLUDEFROMCAPTURE};
+    return last_protection_result_;
   }
 
   last_protection_refresh_ms_ = now_ms;
-  return protector_.Protect();
+  last_protection_result_ = protector_.Protect();
+  if (last_protection_result_.ok()) {
+    for (auto &lease : leases_) {
+      lease.failure_episode_seen = false;
+    }
+  } else {
+    for (auto &lease : leases_) {
+      if (!lease.active || lease.failure_episode_seen) {
+        continue;
+      }
+      // Preserve the first undelivered failure even if a later refresh or
+      // request restores protection before the transport queue drains. The
+      // browser must learn that its previously verified protection was lost.
+      // One pending negative per lease is sufficient to make it fail closed.
+      if (!lease.failure_pending) {
+        Message request{};
+        std::memcpy(request.lease_id, lease.id.data(), lease.id.size());
+        request.sequence = lease.last_sequence;
+        lease.pending_failure = MakeStatusMessage(
+            &request, last_protection_result_.status,
+            last_protection_result_.win32_error,
+            last_protection_result_.observed_affinity, now_ms);
+        lease.failure_pending = true;
+      }
+      lease.failure_episode_seen = true;
+    }
+  }
+  return last_protection_result_;
 }
 
 Message LeaseEngine::HandleFrame(const void *bytes, std::size_t length,
@@ -187,13 +215,27 @@ Message LeaseEngine::HandleFrame(const void *bytes, std::size_t length,
                            result.observed_affinity, now_ms, granted_ms);
 }
 
-void LeaseEngine::Poll(std::uint64_t now_ms) noexcept {
+bool LeaseEngine::Poll(std::uint64_t now_ms, LeaseStatusSink failure_sink,
+                        void *failure_context) noexcept {
   std::scoped_lock lock(mutex_);
   if (shutdown_) {
-    return;
+    return true;
   }
   PurgeExpired(now_ms);
   ReconcileProtectionLocked(now_ms, /*force=*/false);
+  if (failure_sink != nullptr) {
+    for (auto &lease : leases_) {
+      if (!lease.active || !lease.failure_pending) {
+        continue;
+      }
+      if (!failure_sink(failure_context, lease.pending_failure)) {
+        return false; // Retry undelivered notifications when the queue drains.
+      }
+      lease.failure_pending = false;
+      lease.pending_failure = Message{};
+    }
+  }
+  return true;
 }
 
 void LeaseEngine::NotifyWindowChanged() noexcept {

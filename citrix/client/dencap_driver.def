@@ -1,0 +1,3 @@
+LIBRARY DENCAP
+EXPORTS
+    Load @1

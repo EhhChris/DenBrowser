@@ -29,6 +29,21 @@ public:
   dencap::ProtectionResult next_restore_result{};
 };
 
+struct StatusCollector {
+  std::array<dencap::Message, dencap::LeaseEngine::kMaxLeases> messages{};
+  std::size_t count = 0;
+  std::size_t capacity = messages.size();
+
+  static bool __cdecl Accept(void *context, const dencap::Message &message) {
+    auto &collector = *static_cast<StatusCollector *>(context);
+    if (collector.count == collector.capacity) {
+      return false;
+    }
+    collector.messages[collector.count++] = message;
+    return true;
+  }
+};
+
 void Require(bool condition, const char *message) {
   if (!condition) {
     std::cerr << "FAIL: " << message << '\n';
@@ -148,6 +163,112 @@ int main() {
   response = engine.HandleFrame(nullptr, 0, 3'000);
   Require(ResponseStatus(response) == dencap::Status::kInvalidMessage,
           "invalid frame length should be rejected");
+
+  // Losing window protection between requests must notify every browser.
+  // Backpressure must retain undelivered failures even before the next recheck.
+  FakeProtector failure_protector;
+  dencap::LeaseEngine failure_engine(failure_protector);
+  auto first = Request(dencap::MessageType::kAcquire, 51, 1, 30'000);
+  auto second = Request(dencap::MessageType::kAcquire, 52, 7, 30'000);
+  failure_engine.HandleFrame(&first, sizeof(first), 100);
+  failure_engine.HandleFrame(&second, sizeof(second), 100);
+  failure_protector.next_protect_result = {
+      dencap::Status::kSetAffinityFailed, ERROR_ACCESS_DENIED, WDA_NONE};
+  failure_engine.NotifyWindowChanged();
+  StatusCollector failures;
+  failures.capacity = 1;
+  Require(!failure_engine.Poll(200, &StatusCollector::Accept, &failures),
+          "a full response queue must signal backpressure");
+  Require(failures.count == 1 && failures.messages[0].lease_id[0] == 51 &&
+              failures.messages[0].sequence == 1 &&
+              ResponseStatus(failures.messages[0]) ==
+                  dencap::Status::kSetAffinityFailed,
+          "poll failure must identify the affected lease and last sequence");
+  failures.capacity = failures.messages.size();
+  Require(failure_engine.Poll(201, &StatusCollector::Accept, &failures) &&
+              failures.count == 2 && failures.messages[1].lease_id[0] == 52 &&
+              failures.messages[1].sequence == 7,
+          "cached protection failure must retry unsent notifications");
+  failure_engine.Poll(202, &StatusCollector::Accept, &failures);
+  Require(failures.count == 2,
+          "a persistent failure must not flood the response queue");
+  failure_protector.next_protect_result = {
+      dencap::Status::kOk, ERROR_SUCCESS, WDA_EXCLUDEFROMCAPTURE};
+  failure_engine.Poll(1'200, &StatusCollector::Accept, &failures);
+  failure_protector.next_protect_result = {
+      dencap::Status::kWindowOwnershipFailed, ERROR_ACCESS_DENIED, WDA_NONE};
+  failure_engine.Poll(2'200, &StatusCollector::Accept, &failures);
+  Require(failures.count == 4,
+          "a new failure after verified recovery must notify both leases");
+
+  // A recorded loss of protection must survive recovery while output is full.
+  // Cover recovery during both the periodic recheck and an incoming request.
+  for (const bool recover_with_request : {false, true}) {
+    FakeProtector recovery_protector;
+    dencap::LeaseEngine recovery_engine(recovery_protector);
+    auto acquire = Request(dencap::MessageType::kAcquire, 61, 1, 30'000);
+    recovery_engine.HandleFrame(&acquire, sizeof(acquire), 100);
+    recovery_protector.next_protect_result = {
+        dencap::Status::kSetAffinityFailed, ERROR_ACCESS_DENIED, WDA_NONE};
+    recovery_engine.NotifyWindowChanged();
+    StatusCollector delayed;
+    delayed.capacity = 0;
+    Require(!recovery_engine.Poll(200, &StatusCollector::Accept, &delayed),
+            "detected failure must remain pending when no output is available");
+
+    recovery_protector.next_protect_result = {
+        dencap::Status::kOk, ERROR_SUCCESS, WDA_EXCLUDEFROMCAPTURE};
+    if (recover_with_request) {
+      auto renew = Request(dencap::MessageType::kRenew, 61, 2, 30'000);
+      const auto renewed = recovery_engine.HandleFrame(&renew, sizeof(renew), 250);
+      Require(ResponseStatus(renewed) == dencap::Status::kOk,
+              "renewal can restore protection while an earlier failure is pending");
+    }
+    delayed.capacity = delayed.messages.size();
+    Require(recovery_engine.Poll(1'200, &StatusCollector::Accept, &delayed) &&
+                delayed.count == 1 && delayed.messages[0].lease_id[0] == 61 &&
+                delayed.messages[0].sequence == 1 &&
+                delayed.messages[0].monotonic_ms == 200 &&
+                delayed.messages[0].win32_error == ERROR_ACCESS_DENIED &&
+                ResponseStatus(delayed.messages[0]) ==
+                    dencap::Status::kSetAffinityFailed,
+            "recovery cannot erase or rewrite an undelivered failure snapshot");
+    recovery_engine.Poll(1'201, &StatusCollector::Accept, &delayed);
+    Require(delayed.count == 1, "a drained snapshot is delivered exactly once");
+
+    recovery_protector.next_protect_result = {
+        dencap::Status::kWindowOwnershipFailed, ERROR_ACCESS_DENIED, WDA_NONE};
+    recovery_engine.NotifyWindowChanged();
+    recovery_engine.Poll(1'202, &StatusCollector::Accept, &delayed);
+    Require(delayed.count == 2 &&
+                ResponseStatus(delayed.messages[1]) ==
+                    dencap::Status::kWindowOwnershipFailed,
+            "delivery of an older snapshot cannot suppress a later failure episode");
+  }
+
+  // Removed leases have no remaining recipient. Do not deliver their pending
+  // errors to a later browser instance or a new lease reusing the same slot.
+  for (const bool remove_with_release : {false, true}) {
+    FakeProtector removal_protector;
+    dencap::LeaseEngine removal_engine(removal_protector);
+    auto acquire = Request(dencap::MessageType::kAcquire, 71, 1, 1'000);
+    removal_engine.HandleFrame(&acquire, sizeof(acquire), 100);
+    removal_protector.next_protect_result = {
+        dencap::Status::kSetAffinityFailed, ERROR_ACCESS_DENIED, WDA_NONE};
+    removal_engine.NotifyWindowChanged();
+    StatusCollector delayed;
+    delayed.capacity = 0;
+    Require(!removal_engine.Poll(200, &StatusCollector::Accept, &delayed),
+            "failure is queued before lease removal");
+    if (remove_with_release) {
+      auto release = Request(dencap::MessageType::kRelease, 71, 2, 0);
+      removal_engine.HandleFrame(&release, sizeof(release), 250);
+    }
+    delayed.capacity = delayed.messages.size();
+    removal_engine.Poll(1'100, &StatusCollector::Accept, &delayed);
+    Require(delayed.count == 0 && removal_engine.active_lease_count() == 0,
+            "release or expiry clears the pending failure with its lease");
+  }
 
   std::cout << "All DENCAP lease-engine tests passed.\n";
   return 0;

@@ -28,7 +28,7 @@ new file mode 100644
 index 0000000..9aec157
 --- /dev/null
 +++ b/toolkit/xre/DenCitrixCaptureProtection.cpp
-@@ -0,0 +1,756 @@
+@@ -0,0 +1,815 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -121,6 +121,7 @@ index 0000000..9aec157
 +
 +struct WfApi {
 +  HMODULE module = nullptr;
++  bool runtimeFound = false;
 +  WFVirtualChannelOpenFn open = nullptr;
 +  WFVirtualChannelCloseFn close = nullptr;
 +  WFVirtualChannelReadFn read = nullptr;
@@ -134,6 +135,7 @@ index 0000000..9aec157
 +  }
 +
 +  bool ResolveExports() {
++    runtimeFound = true;
 +    open = reinterpret_cast<WFVirtualChannelOpenFn>(
 +        ::GetProcAddress(module, "WFVirtualChannelOpen"));
 +    close = reinterpret_cast<WFVirtualChannelCloseFn>(
@@ -171,6 +173,8 @@ index 0000000..9aec157
 +    constexpr wchar_t kDllName[] = L"wfapi.dll";
 +#endif
 +    aDirectory.append(kDllName);
++    runtimeFound |=
++        ::GetFileAttributesW(aDirectory.c_str()) != INVALID_FILE_ATTRIBUTES;
 +    module = ::LoadLibraryExW(
 +        aDirectory.c_str(), nullptr,
 +        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -243,6 +247,33 @@ index 0000000..9aec157
 +    return module && ResolveExports();
 +  }
 +};
++
++bool HasCitrixVdaInstallation() {
++  // These are server/VDA markers, not the ICAClient key installed by
++  // Workspace. A local machine that only runs Workspace remains unaffected.
++  constexpr std::array<const wchar_t*, 3> kVdaKeys{
++      L"SOFTWARE\\Citrix\\VirtualDesktopAgent",
++      L"SOFTWARE\\Citrix\\Install\\HDX",
++      L"SYSTEM\\CurrentControlSet\\Services\\CitrixBrokerAgent"};
++  constexpr std::array<REGSAM, 2> kRegistryViews{
++      KEY_WOW64_64KEY, KEY_WOW64_32KEY};
++  for (const auto view : kRegistryViews) {
++    for (const auto* path : kVdaKeys) {
++      HKEY key = nullptr;
++      const LSTATUS status = ::RegOpenKeyExW(
++          HKEY_LOCAL_MACHINE, path, 0, KEY_QUERY_VALUE | view, &key);
++      if (status == ERROR_SUCCESS) {
++        ::RegCloseKey(key);
++        return true;
++      }
++      // A present but inaccessible VDA key is not evidence of a local PC.
++      if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
 +
 +enum class ExchangeResult {
 +  kReply,
@@ -381,14 +412,17 @@ index 0000000..9aec157
 +    ::SetEvent(mLeaseChangedEvent);
 +  }
 +  if (mThread) {
-+    // Best-effort cancellation prevents a conforming synchronous WFAPI call
-+    // from delaying shutdown. Never destroy this guard while its worker can
-+    // still reference it: if cancellation does not complete promptly, the
-+    // already-closing process is terminated instead of hanging indefinitely.
-+    (void)::CancelSynchronousIo(mThread);
-+    if (::WaitForSingleObject(mThread, kShutdownJoinTimeoutMs) !=
-+        WAIT_OBJECT_0) {
-+      TerminateCurrentProcessNow(ERROR_TIMEOUT);
++    // Let a bounded read complete so normal close can send RELEASE on the
++    // existing channel. Immediate cancellation can turn an in-flight renewal
++    // into a channel failure and discard the channel before RELEASE is sent.
++    constexpr DWORD kGraceMs = kAckTimeoutMs + kAttemptSchedulingMarginMs;
++    if (::WaitForSingleObject(mThread, kGraceMs) != WAIT_OBJECT_0) {
++      (void)::CancelSynchronousIo(mThread);
++      if (::WaitForSingleObject(mThread, kShutdownJoinTimeoutMs - kGraceMs) !=
++          WAIT_OBJECT_0) {
++        // Never destroy the guard while a stalled worker can reference it.
++        TerminateCurrentProcessNow(ERROR_TIMEOUT);
++      }
 +    }
 +    ::CloseHandle(mThread);
 +  }
@@ -437,7 +471,8 @@ index 0000000..9aec157
 +  return mFirstAcquireSucceeded;
 +}
 +
-+bool DenCitrixCaptureProtection::IsCurrentSessionIca() {
++DenCitrixCaptureProtection::SessionType
++DenCitrixCaptureProtection::GetCurrentSessionType() {
 +  LPWSTR buffer = nullptr;
 +  DWORD bytes = 0;
 +  if (::WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
@@ -447,10 +482,10 @@ index 0000000..9aec157
 +    const USHORT protocol = *reinterpret_cast<const USHORT*>(buffer);
 +    ::WTSFreeMemory(buffer);
 +    if (protocol == WTS_PROTOCOL_TYPE_ICA) {
-+      return true;
++      return SessionType::kIca;
 +    }
 +    if (protocol == WTS_PROTOCOL_TYPE_RDP) {
-+      return false;
++      return SessionType::kNotIca;
 +    }
 +  } else if (buffer) {
 +    ::WTSFreeMemory(buffer);
@@ -460,8 +495,24 @@ index 0000000..9aec157
 +  // session. WFGetActiveProtocol is the VDA-aware discriminator supplied by
 +  // WFAPI; use it when WTS reports console or cannot classify the session.
 +  WfApi api;
-+  return api.Load() && api.getActiveProtocol &&
-+         api.getActiveProtocol(0xFFFFFFFFu) == WTS_PROTOCOL_TYPE_ICA;
++  if (api.Load() && api.getActiveProtocol) {
++    const INT protocol = api.getActiveProtocol(0xFFFFFFFFu);
++    if (protocol == WTS_PROTOCOL_TYPE_ICA) {
++      return SessionType::kIca;
++    }
++    if (protocol == WTS_PROTOCOL_TYPE_CONSOLE ||
++        protocol == WTS_PROTOCOL_TYPE_RDP) {
++      return SessionType::kNotIca;
++    }
++    return SessionType::kUnknown;
++  }
++
++  // A broken/missing WFAPI on a VDA must not silently turn a console-shaped
++  // ICA session into an unprotected local session. Keep ordinary machines
++  // without a VDA, and positively identified RDP/console sessions, unchanged.
++  return api.runtimeFound || HasCitrixVdaInstallation()
++             ? SessionType::kUnknown
++             : SessionType::kNotIca;
 +}
 +
 +DWORD WINAPI DenCitrixCaptureProtection::ThreadEntry(void* aContext) {
@@ -606,7 +657,7 @@ index 0000000..9aec157
 +          break;
 +        }
 +        FailClosed();
-+        return;
++        break;
 +      }
 +      constexpr uint64_t kAttemptGuardMs =
 +          kLeaseSafetyMarginMs + kAckTimeoutMs +
@@ -616,7 +667,7 @@ index 0000000..9aec157
 +      uint64_t now = ::GetTickCount64();
 +      if (now > latestAttemptAt) {
 +        FailClosed();
-+        return;
++        break;
 +      }
 +
 +      const uint64_t target =
@@ -632,13 +683,13 @@ index 0000000..9aec157
 +      }
 +      if (waitResult != WAIT_TIMEOUT) {
 +        FailClosed();
-+        return;
++        break;
 +      }
 +
 +      now = ::GetTickCount64();
 +      if (now > latestAttemptAt) {
 +        FailClosed();
-+        return;
++        break;
 +      }
 +    }
 +
@@ -670,7 +721,7 @@ index 0000000..9aec157
 +          break;
 +        }
 +        FailClosed();
-+        return;
++        break;
 +      }
 +      constexpr uint64_t kAttemptGuardMs =
 +          kLeaseSafetyMarginMs + kAckTimeoutMs +
@@ -678,7 +729,7 @@ index 0000000..9aec157
 +      if (deadline <= kAttemptGuardMs ||
 +          attemptStarted > deadline - kAttemptGuardMs) {
 +        FailClosed();
-+        return;
++        break;
 +      }
 +    }
 +
@@ -688,6 +739,14 @@ index 0000000..9aec157
 +    const ExchangeResult exchange = SendMessageAndReadReply(
 +        api, channel, messageType, mInstanceId, requestSequence,
 +        attemptStarted + kAckTimeoutMs, &reply);
++
++    // Shutdown may start while WFAPI is waiting for this reply. Take the
++    // common cleanup path even for a negative STATUS or transport failure:
++    // FailClosed intentionally does nothing once stopping, but returning
++    // directly here would otherwise skip RELEASE on an existing lease.
++    if (::WaitForSingleObject(mStopEvent, 0) == WAIT_OBJECT_0) {
++      break;
++    }
 +
 +    if (exchange == ExchangeResult::kReply) {
 +      uint64_t acknowledgedAttemptStarted = 0;
@@ -703,7 +762,7 @@ index 0000000..9aec157
 +        // The endpoint has explicitly reported that current protection cannot
 +        // be trusted. Do not risk blocking in channel cleanup before exiting.
 +        FailClosed();
-+        return;
++        break;
 +      }
 +
 +      const uint64_t candidateDeadline =
@@ -752,7 +811,7 @@ index 0000000..9aec157
 +      // A malformed or explicit older negative status is not a transport
 +      // hiccup. Fail before any potentially blocking channel cleanup.
 +      FailClosed();
-+      return;
++      break;
 +    }
 +
 +    if (exchange == ExchangeResult::kChannelFailure) {
@@ -790,7 +849,7 @@ new file mode 100644
 index 0000000..a6e1e66
 --- /dev/null
 +++ b/toolkit/xre/DenCitrixCaptureProtection.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,70 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -807,8 +866,9 @@ index 0000000..a6e1e66
 +
 +/**
 + * Holds one capture-protection lease for the lifetime of the primary browser
-+ * process. The caller creates this guard only in an ICA session; local and RDP
-+ * sessions continue to rely on patch 001 for DenBrowser's own HWNDs.
++ * process. The caller creates this guard only in an ICA session and rejects
++ * unclassifiable sessions on a VDA. Confirmed local and RDP sessions continue
++ * to rely on patch 001 for DenBrowser's own HWNDs.
 + *
 + * In an ICA session, a background worker sends ACQUIRE/RENEW/RELEASE messages
 + * over the DENCAP Citrix virtual channel. A separate watchdog enforces the last
@@ -832,8 +892,10 @@ index 0000000..a6e1e66
 +   */
 +  bool Start();
 +
-+  /** Returns true only when WTS or VDA WFAPI identifies an ICA session. */
-+  static bool IsCurrentSessionIca();
++  enum class SessionType { kNotIca, kIca, kUnknown };
++
++  /** Unknown means an installed VDA could not reliably classify the session. */
++  static SessionType GetCurrentSessionType();
 +
 + private:
 +  static DWORD WINAPI ThreadEntry(void* aContext);
@@ -1008,36 +1070,66 @@ index 390b160..68863c7 100644
      LOCAL_INCLUDES += [
          "../components/printingui",
 diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
-index 8656166..c9eb61f 100644
 --- a/toolkit/xre/nsAppRunner.cpp
 +++ b/toolkit/xre/nsAppRunner.cpp
-@@ -111,2 +111,3 @@
+@@ -109,6 +109,7 @@
+ #endif
+ 
  #ifdef XP_WIN
 +#  include "DenCitrixCaptureProtection.h"
  #  include "nsIWinAppHelper.h"
-@@ -6750,2 +6751,25 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+ #  include <windows.h>
+ #  include <intrin.h>
+@@ -6534,6 +6535,38 @@
+   result = XRE_mainStartup(&exit, appRunnerTelemFlags);
+   if (result != 0 || exit) return result;
+ 
 +#if defined(XP_WIN) && defined(MOZ_BUILD_APP_IS_BROWSER)
 +  // DenBrowser: propagate capture protection across the ICA boundary.  This
 +  // guard is created only after startup/remoting has selected the primary
-+  // browser process, and its destructor releases the endpoint lease after the
-+  // browser run loop exits.
++  // browser process. Explicitly release it below before XPCOM's fast shutdown
++  // can terminate the process without unwinding local variables.
 +  UniquePtr<mozilla::denbrowser::DenCitrixCaptureProtection>
 +      denCitrixCaptureProtection;
 +#  ifdef MOZ_BACKGROUNDTASKS
-+  if (!mozilla::BackgroundTasks::IsBackgroundTaskMode())
++  if (!mozilla::BackgroundTasks::IsBackgroundTaskMode()) {
++#  else
++  {
 +#  endif
-+  if (mozilla::denbrowser::DenCitrixCaptureProtection::
-+          IsCurrentSessionIca()) {
-+    denCitrixCaptureProtection =
-+        MakeUnique<mozilla::denbrowser::DenCitrixCaptureProtection>();
-+    if (!denCitrixCaptureProtection->Start()) {
++    using Protection = mozilla::denbrowser::DenCitrixCaptureProtection;
++    const auto sessionType = Protection::GetCurrentSessionType();
++    if (sessionType == Protection::SessionType::kUnknown) {
 +      Output(true,
-+             "DenBrowser cannot start because Citrix endpoint capture "
-+             "protection is unavailable.\n");
++             "DenBrowser cannot determine whether this VDA session uses "
++             "Citrix. Repair the VDA WFAPI runtime and try again.\n");
 +      return 1;
++    }
++    if (sessionType == Protection::SessionType::kIca) {
++      denCitrixCaptureProtection = MakeUnique<Protection>();
++      if (!denCitrixCaptureProtection->Start()) {
++        Output(true,
++               "DenBrowser cannot start because Citrix endpoint capture "
++               "protection is unavailable.\n");
++        return 1;
++      }
 +    }
 +  }
 +#endif
 +
    // Start the real application. We use |aInitJSContext = false| because
    // XRE_mainRun wants to initialize the JSContext after reading user prefs.
+ 
+@@ -6591,6 +6624,13 @@
+     gStartupLock = nullptr;
+     gRemoteService = nullptr;
+   }
++#endif
++
++#if defined(XP_WIN) && defined(MOZ_BUILD_APP_IS_BROWSER)
++  // The application run loop has exited and its windows have closed. Send
++  // RELEASE now: XPCOM teardown may invoke fast shutdown/TerminateProcess,
++  // so a destructor at function exit is too late for normal browser close.
++  denCitrixCaptureProtection = nullptr;
+ #endif
+ 
+   mScopedXPCOM = nullptr;

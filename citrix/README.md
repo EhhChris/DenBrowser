@@ -31,7 +31,7 @@ GetWindowThreadProcessId(hwnd) == GetCurrentProcessId()
 GetWindowDisplayAffinity(hwnd) succeeds
 ```
 
-Test this before building the rest of the deployment. Some Workspace/Desktop
+Test this first in the Demo Center. Some Workspace/Desktop
 Viewer versions put the top-level window in `CDViewer.exe` while a virtual
 driver runs in `wfica32.exe`. If the PIDs differ, this design is a **no-go for
 that Workspace build**. A service, elevated helper, browser process, or
@@ -80,7 +80,7 @@ Patch 021 implements the browser side as follows:
 7. Send `RELEASE` on orderly final shutdown.
 8. Refuse startup without an `ACQUIRE` status that reports `kOk`, affinity
    `0x11`, and the exact requested 30-second lease.
-9. Terminate immediately on an explicit negative protection status. Exhausted
+9. Terminate when an explicit negative protection status is read. Exhausted
    transport retries terminate before the last verified endpoint lease could
    expire, rather than after a single missed acknowledgement.
 
@@ -187,109 +187,78 @@ different process, while still attempting the read-only affinity query.
 apply/read-back/restore cycle. Use the in-driver Phase-0 result for the real
 Citrix decision.
 
-## Build the Citrix adapter
+## Build the Workspace package
 
-Download the official Virtual Channel SDK that matches the deployed Citrix
-Workspace release and architecture. Do not copy Citrix headers or libraries
-from another CWA generation. Then configure:
+From ordinary PowerShell at the repository root:
 
 ```powershell
-cmake -S citrix -B out\citrix-sdk -A x64 `
-  -DDENCAP_BUILD_CITRIX_ADAPTER=ON `
-  -DCITRIX_VC_INCLUDE_DIR='C:\path\to\matching-vcsdk\include' `
-  -DCITRIX_VDAPI_LIBRARY='C:\path\to\matching-vcsdk\lib\x64\Vdapi.lib' `
-  -DCITRIX_WDICA_LIBRARY='C:\path\to\matching-vcsdk\lib\x64\wdica30.lib'
-cmake --build out\citrix-sdk --config Release
+.\citrix\Build-DenCap.ps1
 ```
 
-The result is a static adapter library, not a guessed standalone DLL. Citrix's
-`DriverOpen`, virtual-write hook, DLL exports, `.def` file, library set, and
-configuration format vary across SDK releases. Start with the official sample
-virtual-driver project shipped in the selected SDK and add:
+This locates Visual Studio C++/CMake/Ninja, builds and tests x86 and x64, and
+writes a dated `build/dencap/DENCAP-demo-*.zip`. It includes the loadable
+`dencap_vd.dll`, symbols, diagnostic probe, runtime installers, registration
+scripts and hashes. Use `-Architecture x86` for x86 only, or `-SdkRoot` to
+select another extracted SDK. The supplied `citrix/VCSDK` is sufficient and
+unchanged. No additional Workspace SDK or endpoint service is required.
 
-- `client/dencap_citrix_adapter.cpp`;
-- `client/dencap_lease_engine.cpp`;
-- `client/dencap_window_protector.cpp`;
-- the corresponding headers and `protocol/dencap_protocol.h`.
+The installer selects the DLL matching the Workspace engine's architecture.
+It checks the matching Visual C++ runtime and reports the bundled runtime
+installer command when needed.
 
-Retain the sample's `Load` export and its exact `Vdapi.lib`/`wdica30.lib`
-linkage. The adapter deliberately includes the real `vdapi.h` and `wdapi.h`
-rather than reproducing SDK types. Citrix's public documentation currently
-shows both three- and four-argument `VdCallWd` calls; the adapter selects at
-compile time the signature declared by the actual header.
+For direct CMake builds, enable `DENCAP_BUILD_CITRIX_DRIVER=ON`, which also
+enables the adapter. The SDK uses `src/inc`, `src/inc/win32`, `src/shared/inc`,
+and `bin/Release/Win32` or `bin/Release/x64` libraries `vdapi.lib` and
+`clibdll.lib`. SDK consumers inherit 8-byte packing and x86 stdcall. The core
+retains its ordinary calling convention. ARM64 selection exists but is not
+validated or packaged here.
 
-If an older matching SDK does not declare the window-change callback types or
-information classes, configure with
-`-DDENCAP_CITRIX_HAS_WINDOW_CALLBACK=OFF`. The one-second polling fallback
-remains active.
+CTest includes lease-engine tests, a real SDK link check and a simulated
+Citrix host fixture using real owned Windows windows. It verifies framing,
+legacy/HPC transport, backpressure, isolation, delayed initialization,
+protection, idle expiry, release and teardown. Live Workspace remains a
+separate compatibility test.
 
-### Official-sample integration boundary
+## Driver integration and registration
 
-Wire the adapter into the selected sample's known-good driver shell:
+`client/dencap_driver.cpp` provides the SDK lifecycle entry points and the
+`Load` export at ordinal 1 via `client/dencap_driver.def`. Per-driver bounded
+queues hold input bytes and complete STATUS frames. Data arrival only copies
+input; periodic `DriverPoll` performs protection work and output, including
+idle lease expiry. Output backpressure retains frames for retry; a positive
+status held beyond its granted lease becomes negative. Input overflow stops
+channel parsing so partial bytes cannot become new requests.
 
-```text
-DriverOpen:
-  open static channel "DENCAP" using kWfApiChannelName and the sample's
-  OPENVIRTUALCHANNEL flow (the WFAPI form is space-padded to seven bytes)
-  create CitrixAdapter from the PVD
-  run Initialize and log the complete OwnershipProbeResult
-  if the result is an absent/not-yet-created HWND, retry from DriverPoll
-  if it is a different owner PID, mark the module unsupported
+Polling retains detected protection failures until they can be queued for
+the active leases. The browser sees them when it next reads the channel;
+this is not an instantaneous signal. Normal browser shutdown releases before
+Firefox's fast shutdown and gives an in-flight exchange a bounded grace period.
+Crash/termination relies on lease expiry. A known VDA with missing/broken WFAPI
+fails browser startup instead of silently treating an uncertain session as local.
 
-DataArrival / PVDWRITEPROCEDURE:
-  copy pBuf before returning; do not perform WDA work in this callback
-  enqueue the bytes in the sample driver's bounded input queue
+`DriverClose` shuts down the adapter and restores affinity. Failed window
+callback unregistration retains a module reference obtained at open, keeping
+callback code loaded for the process lifetime. Logs go to
+`%LOCALAPPDATA%\DenBrowser\Citrix\dencap-<PID>.log` (about 2 MiB maximum)
+and `OutputDebugString`.
 
-DriverPoll:
-  drain queued bytes through CitrixAdapter::OnChannelBytes
-  make ResponseSink synchronously write or copy each exact 64-byte status
-  frame into the sample's supported output queue before returning
-  call CitrixAdapter::Poll even when no data arrived
+The installer supports per-machine Workspace. Close Citrix sessions/Workspace
+and run elevated from the extracted package:
 
-DriverClose:
-  call CitrixAdapter::Shutdown before destroying the driver context
-  log/treat a false return as a serious callback-unregistration diagnostic
+```powershell
+.\deploy\Install-DenCapClient.ps1 -AllowUnsignedDevelopmentBuild
 ```
 
-`Shutdown` is terminal. Destroy the adapter with the driver context after
-`DriverClose`; do not attempt to reopen the same C++ object. If callback
-unregistration fails, `Shutdown` preserves the registration handle and can be
-called again. The callback does not dereference an adapter instance, but the
-official driver shell must not silently unload a DLL while Citrix might still
-retain its function pointer; record `last_callback_error()` and follow the
-matching SDK's teardown behavior.
+The unsigned switch is explicit for this local lab build; signed builds can
+omit it. `-WhatIf` previews installation. `-WorkspacePath` supplies the ICA
+engine directory when discovery is ambiguous. Registration appends DENCAP to
+`VirtualDriverEx`, preserves other drivers, and records a manifest for removal.
+The uninstaller removes only this installation's owned registration and DLL.
 
-Citrix says the data-arrival callback must not block, and its buffer does not
-remain valid after return. Keep the callback as a bounded copy only. Do not
-invent a write function: use the exact output queue/write mechanism in the
-matching SDK sample.
-
-## Client registration and rollout
-
-Citrix client-module registration is version- and architecture-specific.
-Native x64 CWA uses native configuration paths; x86 CWA on x64 Windows uses
-`WOW6432Node`. Citrix's own examples also differ in whitespace and registry
-location, and editing `Module.ini` after Workspace installation does not
-retroactively register a module.
-
-For that reason this prototype does not contain a fabricated `.reg` file.
-Use the selected SDK sample's installer/configuration entry as the source of
-truth:
-
-1. Pick a unique module name such as `DENCAPVD` (the module name need not equal
-   the `DENCAP` channel).
-2. Install and register the unmodified SDK sample on a disposable endpoint.
-3. Export and diff the actual CWA configuration-storage entries under
-   `...\Citrix\ICA Client\Engine\Configuration\Advanced\Modules`.
-4. Substitute the signed DENCAP DLL and module name in an MSI/WiX package.
-5. Validate both per-machine/per-user behavior and x86/x64 registry views for
-   the exact Workspace release.
-6. Pilot Phase 0, lease expiry, Workspace reconnect, multi-monitor changes,
-   Desktop Viewer mode changes, and browser crash recovery before broad
-   deployment.
-
-The scripts in [deploy](deploy) copy and remove a validated binary using
-`SupportsShouldProcess`; they intentionally do **not** edit the registry.
+See [DEMO.md](DEMO.md) for the two-machine walkthrough and
+[the verification record](../docs/citrix-demo-center.md) for acceptance gates.
+The browser must be rebuilt with patch 021; older binaries cannot negotiate
+this protection.
 
 ## RDP and security boundary
 

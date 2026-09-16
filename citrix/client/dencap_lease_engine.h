@@ -11,6 +11,10 @@
 
 namespace dencap {
 
+// The sink copies/queues a status without re-entering the lease engine. An
+// explicit convention keeps the SDK-neutral core compatible with /Gz clients.
+using LeaseStatusSink = bool (__cdecl *)(void *context, const Message &message);
+
 class LeaseEngine {
 public:
   static constexpr std::size_t kMaxLeases = 64;
@@ -24,7 +28,8 @@ public:
 
   Message HandleFrame(const void *bytes, std::size_t length,
                       std::uint64_t now_ms) noexcept;
-  void Poll(std::uint64_t now_ms) noexcept;
+  bool Poll(std::uint64_t now_ms, LeaseStatusSink failure_sink = nullptr,
+            void *failure_context = nullptr) noexcept;
   void NotifyWindowChanged() noexcept;
   void Shutdown() noexcept;
 
@@ -36,6 +41,9 @@ private:
     std::uint64_t last_sequence = 0;
     std::uint64_t expires_at_ms = 0;
     bool active = false;
+    bool failure_episode_seen = false;
+    bool failure_pending = false;
+    Message pending_failure{};
   };
 
   static std::uint32_t ClampLeaseMs(std::uint32_t requested) noexcept;
@@ -52,6 +60,7 @@ private:
   std::array<Lease, kMaxLeases> leases_{};
   std::atomic_bool window_changed_{false};
   std::uint64_t last_protection_refresh_ms_ = 0;
+  ProtectionResult last_protection_result_{};
   bool shutdown_ = false;
 };
 

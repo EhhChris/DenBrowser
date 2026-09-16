@@ -14,3 +14,6 @@ proxy/target/
 build/
 test/**/*private*.pem
 test/**/*.key
+
+# Citrix SDK
+citrix/VCSDK/

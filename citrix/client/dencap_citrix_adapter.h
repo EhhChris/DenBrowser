@@ -9,10 +9,23 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <windows.h>
+#include <wtypes.h> // DOUBLE in WDOVERLAYINFO, omitted by lean windows.h.
+
+// Match the SDK sample's platform setup before loading its driver interfaces.
+// vd.h supplies PVD and VdCallWd; vdapi.h alone does not declare them.
+// platcomm.h defines min/max even with NOMINMAX; keep them out of our C++ API.
+#pragma push_macro("min")
+#pragma push_macro("max")
 extern "C" {
-#include <vdapi.h>
+#include <citrix.h>
+#include <clib.h>
 #include <wdapi.h>
+#include <vdapi.h>
+#include <vd.h>
 }
+#pragma pop_macro("max")
+#pragma pop_macro("min")
 
 #include <array>
 #include <atomic>
@@ -46,8 +59,8 @@ private:
 // SDK-neutral lease/protection code plus the two stable Citrix integration
 // points: VdCallWd window discovery and window-change notification.
 //
-// The official SDK sample remains responsible for DriverOpen/DriverPoll/
-// DriverClose/ICADataArrival and for writing status frames back to the channel.
+// dencap_driver.cpp provides DriverOpen/DriverPoll/DriverClose/ICADataArrival
+// and writes status frames back to the channel using the SDK transport.
 class CitrixAdapter {
 public:
   explicit CitrixAdapter(PVD pvd) noexcept;
@@ -60,7 +73,8 @@ public:
   bool OnChannelBytes(const std::uint8_t *bytes, std::size_t length,
                       ResponseSink response_sink,
                       void *response_context) noexcept;
-  void Poll() noexcept;
+  bool Poll(ResponseSink response_sink = nullptr,
+            void *response_context = nullptr) noexcept;
   [[nodiscard]] bool Shutdown() noexcept;
 
   [[nodiscard]] bool window_callback_registered() const noexcept {

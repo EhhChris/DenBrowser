@@ -7,6 +7,18 @@
 namespace dencap {
 namespace {
 
+struct PollResponseContext {
+  ResponseSink sink;
+  void *context;
+};
+
+bool __cdecl ForwardPollStatus(void *context, const Message &message) {
+  auto *response = static_cast<PollResponseContext *>(context);
+  return response->sink(response->context,
+                        reinterpret_cast<const std::uint8_t *>(&message),
+                        sizeof(message));
+}
+
 // Citrix's published examples contain both three- and four-argument VdCallWd
 // calls. Select the ABI exposed by the installed SDK header instead of
 // re-declaring the function or trusting one documentation version.
@@ -133,13 +145,14 @@ bool CitrixAdapter::OnChannelBytes(const std::uint8_t *bytes,
   return true;
 }
 
-void CitrixAdapter::Poll() noexcept {
+bool CitrixAdapter::Poll(ResponseSink response_sink,
+                         void *response_context) noexcept {
   if (shutdown_) {
-    return;
+    return true;
   }
   if (!initialized_) {
     Initialize(nullptr);
-    return;
+    return true;
   }
 
   const std::uint64_t generation =
@@ -148,7 +161,9 @@ void CitrixAdapter::Poll() noexcept {
     observed_window_generation_ = generation;
     lease_engine_.NotifyWindowChanged();
   }
-  lease_engine_.Poll(::GetTickCount64());
+  PollResponseContext context{response_sink, response_context};
+  return lease_engine_.Poll(::GetTickCount64(),
+      response_sink != nullptr ? &ForwardPollStatus : nullptr, &context);
 }
 
 bool CitrixAdapter::Shutdown() noexcept {
