@@ -23,6 +23,12 @@ The installer detects Workspace, selects the matching DLL and registers it
 without replacing the other virtual drivers. The unsigned switch is needed for
 this locally built lab package. Omit it when deploying a signed DLL.
 
+DLL architecture must match the Workspace engine. Workspace 2507.1 uses the
+x86 DLL on both x86 and x64 Windows; do not manually choose the x64 DLL just
+because Windows is 64-bit. The package contains both architectures. The x64
+DLL has passed local build/fixture checks only, not a live native x64
+Workspace pilot.
+
 If the installer reports an outdated/missing Visual C++ runtime, run the
 matching bundled runtime installer it names, then repeat the install command.
 For Workspace 2507.1 this will normally be:
@@ -73,7 +79,24 @@ DENCAP,C:\Program Files\DenBrowser\denbrowser.exe
 Apply the policy and restart the affected VDA as required by your environment.
 The browser uses the VDA's existing WFAPI runtime.
 
-## 3. Test the complete connection
+## 3. Disable Desktop Viewer for the demo website
+
+On the StoreFront server, edit the website used for this demo. Under **User
+interface settings**, clear **Show Desktop Viewer** and save. Use a scoped
+demo website because this setting affects launches through that website.
+See [Citrix's StoreFront setting](https://docs.citrix.com/en-us/storefront/2507-ltsr/stores/websites/client-interface-settings.html).
+
+Save work, close the existing Citrix connection and exit Workspace on machine A,
+then launch again from that website using native Workspace. In the September 17
+Workspace 2507.1 pilot, this change alone gave the plug-in an owned top-level
+window and successful `affinity=0x11` renewals. No `ConnectionBar` change was
+needed. With Desktop Viewer enabled, the root belonged to
+`Citrix.DesktopViewer.App.exe`, so the plug-in in `wfica32.exe` could not protect
+it. Recheck the ownership and capture tests after Workspace upgrades or changes
+to the launch route; disabling the setting is not a universal compatibility
+guarantee.
+
+## 4. Test the complete connection
 
 Use a non-sensitive page first. Logs on machine A are under:
 
@@ -85,6 +108,20 @@ The first gate is a successful `phase0`: the ICA window must be a top-level
 window owned by the same Workspace process that loaded the plug-in. An
 accepted ACQUIRE must report `status=0` and `affinity=0x11`. A different window
 owner means this approach is unsupported for that Workspace configuration.
+
+The plug-in resolves an SDK-returned child window to its top-level ancestor
+before checking ownership. In packages built before the September 17 fix,
+`phase0=2 status=9 win32=5` with different `hwnd` and `root` values could mean
+the child was rejected before the root was examined. Upgrade the endpoint
+package for that case; the browser package and VDA policy need no change.
+The new Phase-0 log reports the resolved window and its actual owner.
+
+To upgrade, close Citrix sessions and exit Workspace, then run the same
+installation command from the newly extracted package. The installer updates
+the previously recorded installation. Start a fresh Citrix connection afterward.
+Success is `phase0=0 status=0`, followed by an ACQUIRE STATUS with
+`status=0 affinity=0x11`. If the resolved root's `owner` differs from `current`,
+the DLL still refuses protection because Windows requires the owning process.
 
 Check all of the following:
 

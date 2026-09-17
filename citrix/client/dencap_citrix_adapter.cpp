@@ -53,7 +53,13 @@ WindowQueryResult CitrixWindowSource::QueryIcaWindow() noexcept {
     return WindowQueryResult{Status::kIcaWindowQueryFailed,
                              static_cast<DWORD>(result), nullptr};
   }
-  return WindowQueryResult{Status::kOk, ERROR_SUCCESS, window_info.hwnd};
+  // Workspace can return its ICA rendering child rather than the top-level
+  // window required by SetWindowDisplayAffinity. Follow only the parent chain;
+  // an owner window (GA_ROOTOWNER) can be an unrelated Desktop Viewer surface.
+  // WindowProtector still validates the resulting root and its process before
+  // reading or changing affinity. A missing/destroyed HWND remains retryable.
+  const HWND root = ::GetAncestor(window_info.hwnd, GA_ROOT);
+  return WindowQueryResult{Status::kOk, ERROR_SUCCESS, root};
 }
 
 CitrixAdapter::CitrixAdapter(PVD pvd) noexcept

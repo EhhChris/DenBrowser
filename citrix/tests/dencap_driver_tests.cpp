@@ -1,6 +1,6 @@
 // Drive the actual Driver* entry points through a fake WinStation driver. No
 // Workspace installation or ICA connection is required. Window-affinity checks
-// use only this test process's hidden top-level window.
+// use this process's hidden windows and a hidden helper owned by the test.
 #include "../client/dencap_citrix_adapter.h"
 extern "C" {
 #include <clterr.h>
@@ -27,6 +27,106 @@ void Require(bool condition, const char *reason) {
     std::exit(1);
   }
 }
+
+// A separate copy of this executable owns the foreign root. Its helper loop
+// processes window messages so a test-owned rendering child can be parented to
+// that root, matching the case where Workspace and Desktop Viewer differ.
+int RunForeignWindowHelper(HANDLE stop) {
+  HWND window = ::CreateWindowExW(0, L"STATIC", L"DENCAP foreign test root",
+      WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, nullptr, nullptr,
+      ::GetModuleHandleW(nullptr), nullptr);
+  if (window == nullptr) {
+    return 2;
+  }
+  const UINT_PTR value = reinterpret_cast<UINT_PTR>(window);
+  DWORD written = 0;
+  if (!::WriteFile(::GetStdHandle(STD_OUTPUT_HANDLE), &value, sizeof(value),
+                   &written, nullptr) || written != sizeof(value)) {
+    ::DestroyWindow(window);
+    return 3;
+  }
+  const auto deadline = ::GetTickCount64() + 20'000;
+  while (::GetTickCount64() < deadline) {
+    const DWORD result = ::MsgWaitForMultipleObjects(1, &stop, FALSE, 1000, QS_ALLINPUT);
+    if (result == WAIT_OBJECT_0) {
+      break;
+    }
+    if (result != WAIT_OBJECT_0 + 1 && result != WAIT_TIMEOUT) {
+      ::DestroyWindow(window);
+      return 4;
+    }
+    MSG message{};
+    while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+      ::TranslateMessage(&message);
+      ::DispatchMessageW(&message);
+    }
+  }
+  DWORD affinity = 0;
+  const BOOL observed = ::GetWindowDisplayAffinity(window, &affinity);
+  ::DestroyWindow(window);
+  ::CloseHandle(stop);
+  return observed && affinity == WDA_NONE ? 0 : 5;
+}
+
+class ForeignWindow {
+public:
+  ForeignWindow() {
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    stop_ = ::CreateEventW(&security, TRUE, FALSE, nullptr);
+    Require(stop_ != nullptr, "create foreign-window stop event");
+    HANDLE reader = nullptr;
+    HANDLE writer = nullptr;
+    Require(::CreatePipe(&reader, &writer, &security, 0) != FALSE,
+            "create foreign-window result pipe");
+    Require(::SetHandleInformation(reader, HANDLE_FLAG_INHERIT, 0) != FALSE,
+            "keep pipe reader private to test parent");
+    wchar_t executable[MAX_PATH]{};
+    const DWORD length = ::GetModuleFileNameW(nullptr, executable, MAX_PATH);
+    Require(length != 0 && length < MAX_PATH, "find test helper executable");
+    wchar_t command[MAX_PATH + 80]{};
+    swprintf_s(command, L"\"%s\" --foreign-window %llu", executable,
+                static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(stop_)));
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = ::GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = writer;
+    startup.hStdError = writer;
+    Require(::CreateProcessW(executable, command, nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                             &process_) != FALSE,
+            "start hidden foreign-window helper");
+    ::CloseHandle(writer);
+    UINT_PTR value = 0;
+    DWORD received = 0;
+    const BOOL read = ::ReadFile(reader, &value, sizeof(value), &received, nullptr);
+    ::CloseHandle(reader);
+    window_ = reinterpret_cast<HWND>(value);
+    Require(read && received == sizeof(value) && ::IsWindow(window_),
+            "receive foreign top-level HWND");
+    DWORD owner = 0;
+    ::GetWindowThreadProcessId(window_, &owner);
+    Require(owner == process_.dwProcessId && owner != ::GetCurrentProcessId(),
+            "test root belongs to another process");
+  }
+  ~ForeignWindow() {
+    ::SetEvent(stop_);
+    Require(::WaitForSingleObject(process_.hProcess, 5000) == WAIT_OBJECT_0,
+            "foreign-window helper exits");
+    DWORD exit_code = 0;
+    Require(::GetExitCodeProcess(process_.hProcess, &exit_code) && exit_code == 0,
+            "foreign root affinity remained unchanged");
+    ::CloseHandle(process_.hThread);
+    ::CloseHandle(process_.hProcess);
+    ::CloseHandle(stop_);
+  }
+  HWND get() const noexcept { return window_; }
+
+private:
+  HANDLE stop_ = nullptr;
+  PROCESS_INFORMATION process_{};
+  HWND window_ = nullptr;
+};
 
 struct Session;
 std::array<Session *, 8> sessions{};
@@ -161,8 +261,8 @@ void TestInfo() {
           "DriverInfo handshake content");
 }
 
-void TestTransport(bool hpc, HWND child) {
-  Session session(hpc, child);
+void TestTransport(bool hpc, HWND foreign_root) {
+  Session session(hpc, foreign_root);
   session.Open();
   auto first = Request(dencap::MessageType::kAcquire, 1);
   session.Deliver(&first, 7);
@@ -193,9 +293,9 @@ void TestTransport(bool hpc, HWND child) {
           "idle poll requests continued periodic polling");
 }
 
-void TestIsolation(HWND child) {
-  Session first(false, child);
-  Session second(true, child);
+void TestIsolation(HWND foreign_root) {
+  Session first(false, foreign_root);
+  Session second(true, foreign_root);
   first.Open();
   second.Open();
   auto request = Request(dencap::MessageType::kAcquire, 41);
@@ -252,6 +352,53 @@ void TestDelayedWindowAndLease(HWND top) {
           "expired queued acknowledgement cannot report successful protection");
   session.Close();
   Require(session.unregister_count == 1, "window callback unregistered on close");
+}
+
+void TestChildResolvesToRoot(HWND child, HWND root, HWND unrelated_owner = nullptr) {
+  Require(::GetAncestor(child, GA_ROOT) == root, "test child has expected parent root");
+  Session session(true, child);
+  session.Open();
+  dencap::CitrixWindowSource source(&session.vd);
+  Require(source.QueryIcaWindow().hwnd == root, "SDK child resolves to parent root");
+  auto request = Request(dencap::MessageType::kAcquire, 1);
+  session.Deliver(&request, sizeof(request));
+  session.Poll();
+  Require(session.sent.size() == 1 &&
+              session.sent[0].status == static_cast<ULONG>(dencap::Status::kOk) &&
+              session.sent[0].observed_affinity == WDA_EXCLUDEFROMCAPTURE &&
+              Affinity(root) == WDA_EXCLUDEFROMCAPTURE,
+          "SDK rendering child permits protection of its owned top-level root");
+  if (unrelated_owner != nullptr) {
+    Require(Affinity(unrelated_owner) == WDA_NONE,
+            "owner window outside the parent chain remains unchanged");
+  }
+  request = Request(dencap::MessageType::kRelease, 2);
+  session.Deliver(&request, sizeof(request));
+  session.Poll();
+  Require(Affinity(root) == WDA_NONE, "release restores normalized root affinity");
+}
+
+void TestForeignRootIsRejected(HWND foreign_root) {
+  HWND child = ::CreateWindowExW(0, L"STATIC", L"DENCAP cross-process test child",
+      WS_CHILD, 0, 0, 50, 50, foreign_root, nullptr,
+      ::GetModuleHandleW(nullptr), nullptr);
+  Require(child != nullptr && ::GetAncestor(child, GA_ROOT) == foreign_root,
+          "create own rendering child beneath foreign root");
+  DWORD owner = 0;
+  ::GetWindowThreadProcessId(child, &owner);
+  Require(owner == ::GetCurrentProcessId(), "rendering child belongs to test process");
+  Session session(true, child);
+  session.Open();
+  auto request = Request(dencap::MessageType::kAcquire, 1);
+  session.Deliver(&request, sizeof(request));
+  session.Poll();
+  Require(session.sent.size() == 1 &&
+              session.sent[0].status == static_cast<ULONG>(dencap::Status::kWindowOwnershipFailed) &&
+              session.sent[0].win32_error == ERROR_ACCESS_DENIED &&
+              session.window_callback == nullptr,
+          "own child cannot authorize modifying a foreign top-level root");
+  session.Close();
+  ::DestroyWindow(child);
 }
 
 void TestOverflowAndPurge(HWND child) {
@@ -368,7 +515,12 @@ extern "C" int VdCallWd(PVD vd, USHORT procedure, PVOID parameter, PUINT16) {
   return CLIENT_ERROR_INVALID_PARAMETER;
 }
 
-int __cdecl main() {
+int __cdecl main(int argc, char **argv) {
+  if (argc == 3 && std::strcmp(argv[1], "--foreign-window") == 0) {
+    return RunForeignWindowHelper(reinterpret_cast<HANDLE>(
+        static_cast<UINT_PTR>(std::strtoull(argv[2], nullptr, 10))));
+  }
+  ForeignWindow foreign;
   HWND top = ::CreateWindowExW(0, L"STATIC", L"DENCAP test owned window",
                                 WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, nullptr,
                                 nullptr, ::GetModuleHandleW(nullptr), nullptr);
@@ -376,11 +528,24 @@ int __cdecl main() {
   HWND child = ::CreateWindowExW(0, L"STATIC", L"DENCAP test child", WS_CHILD,
                                   0, 0, 50, 50, top, nullptr,
                                   ::GetModuleHandleW(nullptr), nullptr);
-  Require(child != nullptr, "create non-top-level window for ownership denial");
+  Require(child != nullptr, "create SDK rendering child");
   TestInfo();
-  TestTransport(false, child);
-  TestTransport(true, child);
-  TestIsolation(child);
+  TestTransport(false, foreign.get());
+  TestTransport(true, foreign.get());
+  TestIsolation(foreign.get());
+  TestChildResolvesToRoot(child, top);
+  TestForeignRootIsRejected(foreign.get());
+  HWND popup = ::CreateWindowExW(0, L"STATIC", L"DENCAP test owned popup",
+      WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, 100, 100, top, nullptr,
+      ::GetModuleHandleW(nullptr), nullptr);
+  HWND popup_child = ::CreateWindowExW(0, L"STATIC", L"DENCAP popup rendering child",
+      WS_CHILD, 0, 0, 50, 50, popup, nullptr,
+      ::GetModuleHandleW(nullptr), nullptr);
+  Require(popup != nullptr && popup_child != nullptr &&
+              ::GetAncestor(popup_child, GA_ROOTOWNER) == top,
+          "owned-popup fixture distinguishes root from root owner");
+  TestChildResolvesToRoot(popup_child, popup, top);
+  ::DestroyWindow(popup);
   TestDelayedWindowAndLease(top);
   TestOverflowAndPurge(child);
   TestDisableAndFailedUnregister(top);

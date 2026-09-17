@@ -20,9 +20,10 @@ the stated topology.
 ## The non-negotiable Phase-0 test
 
 Windows permits `SetWindowDisplayAffinity` only for a top-level window owned by
-the calling process. The client module therefore obtains the current ICA HWND
-using Citrix's `WdGetICAWindowInfo` query and refuses to write unless all of
-these are true:
+the calling process. The client module obtains the current ICA HWND using
+Citrix's `WdGetICAWindowInfo` query, resolves its top-level ancestor with
+`GetAncestor(..., GA_ROOT)`, and refuses to write unless all of these are true
+for that resolved window:
 
 ```text
 IsWindow(hwnd)
@@ -31,12 +32,24 @@ GetWindowThreadProcessId(hwnd) == GetCurrentProcessId()
 GetWindowDisplayAffinity(hwnd) succeeds
 ```
 
+Citrix can return an ICA child window. Resolving its root is necessary before
+applying display affinity; the child window's owner PID does not establish who
+owns the root. Ownership is checked on the resolved root itself. The adapter
+does not follow popup ownership chains with `GA_ROOTOWNER`.
+
 Test this first in the Demo Center. Some Workspace/Desktop
-Viewer versions put the top-level window in `CDViewer.exe` while a virtual
-driver runs in `wfica32.exe`. If the PIDs differ, this design is a **no-go for
-that Workspace build**. A service, elevated helper, browser process, or
+Viewer versions put the top-level window in `CDViewer.exe` or
+`Citrix.DesktopViewer.App.exe` while a virtual driver runs in `wfica32.exe`.
+If the PIDs differ, this design is a **no-go for that Workspace configuration**.
+A service, elevated helper, browser process, or
 cross-process injection-free implementation cannot work around the Windows
 ownership rule.
+
+The September 17 Workspace 2507.1 pilot passed this gate after disabling
+**Show Desktop Viewer** on the StoreFront website, with no `ConnectionBar`
+change. ACQUIRE and 30 successive renewals reported `status=0 affinity=0x11`.
+This establishes ownership and read-back in that configuration; actual capture
+and reconnect behavior still require the [live acceptance tests](DEMO.md).
 
 `CitrixAdapter::Initialize` returns `kReady`, `kRetryLater`, or `kUnsupported`
 plus the structured probe result for logging. A missing/not-yet-created HWND is
