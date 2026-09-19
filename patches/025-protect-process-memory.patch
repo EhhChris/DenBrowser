@@ -505,7 +505,7 @@ index 2099a46a24e0..ded5af740283 100644
          "WindowsDiagnostics.cpp",
          "WindowsDllMain.cpp",
 diff --git a/security/sandbox/chromium/sandbox/win/src/target_process.cc b/security/sandbox/chromium/sandbox/win/src/target_process.cc
-index 74a63e1d0c60..5eeee9c89005 100644
+index 74a63e1d0c60..32934b97b373 100644
 --- a/security/sandbox/chromium/sandbox/win/src/target_process.cc
 +++ b/security/sandbox/chromium/sandbox/win/src/target_process.cc
 @@ -31,6 +31,7 @@
@@ -516,7 +516,7 @@ index 74a63e1d0c60..5eeee9c89005 100644
  #include "sandbox/win/src/crosscall_client.h"
  #include "sandbox/win/src/crosscall_server.h"
  #include "sandbox/win/src/policy_low_level.h"
-@@ -197,11 +198,15 @@ ResultCode TargetProcess::Create(
+@@ -197,11 +198,17 @@ ResultCode TargetProcess::Create(
    }
  
    bool inherit_handles = startup_info_helper->ShouldInheritHandles();
@@ -527,11 +527,10 @@ index 74a63e1d0c60..5eeee9c89005 100644
 +  }
 +
    PROCESS_INFORMATION temp_process_info = {};
--  // Allow Token handle to be closed once this function completes.
--  auto lockdown_token = lockdown_token_.release();
--  if (!::CreateProcessAsUserW(lockdown_token.get(), exe_path, cmd_line.get(),
+   // Allow Token handle to be closed once this function completes.
+   auto lockdown_token = lockdown_token_.release();
+   if (!::CreateProcessAsUserW(lockdown_token.get(), exe_path, cmd_line.get(),
 -                              nullptr,  // No security attribute.
-+  if (!::CreateProcessAsUserW(lockdown_token_.get(), exe_path, cmd_line.get(),
 +                              process_security.Get(),
                                nullptr,  // No thread attribute.
                                inherit_handles, flags,
