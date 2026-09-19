@@ -321,7 +321,7 @@ index 000000000000..15576fa514c9
 +  return ParentMain(argv[0]);
 +}
 diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
-index 36b3c6392b17..2a93263a102e 100644
+index dbea3da7e9f7..2a93263a102e 100644
 --- a/browser/app/winlauncher/test/moz.build
 +++ b/browser/app/winlauncher/test/moz.build
 @@ -8,6 +8,7 @@ GeckoCppUnitTests(
@@ -332,14 +332,6 @@ index 36b3c6392b17..2a93263a102e 100644
          "TestSafeThreadLocal",
          "TestSameBinary",
      ],
-@@ -19,6 +20,7 @@ LOCAL_INCLUDES += [
- ]
- 
- OS_LIBS += [
-+    "advapi32",
-     "ntdll",
- ]
- 
 diff --git a/ipc/chromium/src/base/process_util_win.cc b/ipc/chromium/src/base/process_util_win.cc
 index c281aeeadbad..cc148f73f4f1 100644
 --- a/ipc/chromium/src/base/process_util_win.cc
@@ -513,10 +505,10 @@ index 2099a46a24e0..ded5af740283 100644
          "WindowsDiagnostics.cpp",
          "WindowsDllMain.cpp",
 diff --git a/security/sandbox/chromium/sandbox/win/src/target_process.cc b/security/sandbox/chromium/sandbox/win/src/target_process.cc
-index 739372de2765..42b87f5a5f51 100644
+index 74a63e1d0c60..5eeee9c89005 100644
 --- a/security/sandbox/chromium/sandbox/win/src/target_process.cc
 +++ b/security/sandbox/chromium/sandbox/win/src/target_process.cc
-@@ -25,6 +25,7 @@
+@@ -31,6 +31,7 @@
  #include "base/win/scoped_handle.h"
  #include "base/win/security_util.h"
  #include "base/win/startup_information.h"
@@ -524,8 +516,8 @@ index 739372de2765..42b87f5a5f51 100644
  #include "sandbox/win/src/crosscall_client.h"
  #include "sandbox/win/src/crosscall_server.h"
  #include "sandbox/win/src/policy_low_level.h"
-@@ -187,9 +188,15 @@ ResultCode TargetProcess::Create(
-   new_env = base::internal::AlterEnvironment(std::data(new_env), env_changes);
+@@ -197,11 +198,15 @@ ResultCode TargetProcess::Create(
+   }
  
    bool inherit_handles = startup_info_helper->ShouldInheritHandles();
 +  mozilla::denbrowser::ProcessSecurityAttributes process_security;
@@ -535,8 +527,11 @@ index 739372de2765..42b87f5a5f51 100644
 +  }
 +
    PROCESS_INFORMATION temp_process_info = {};
-   if (!::CreateProcessAsUserW(lockdown_token_.get(), exe_path, cmd_line.get(),
+-  // Allow Token handle to be closed once this function completes.
+-  auto lockdown_token = lockdown_token_.release();
+-  if (!::CreateProcessAsUserW(lockdown_token.get(), exe_path, cmd_line.get(),
 -                              nullptr,  // No security attribute.
++  if (!::CreateProcessAsUserW(lockdown_token_.get(), exe_path, cmd_line.get(),
 +                              process_security.Get(),
                                nullptr,  // No thread attribute.
                                inherit_handles, flags,

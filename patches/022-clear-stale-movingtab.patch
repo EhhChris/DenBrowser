@@ -27,7 +27,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/components/tabbrowser/content/drag-and-drop.js b/browser/components/tabbrowser/content/drag-and-drop.js
-index 603a0ae4a667..45f722aa2bbd 100644
+index 7101cb673e48..d5e4ed25d0d7 100644
 --- a/browser/components/tabbrowser/content/drag-and-drop.js
 +++ b/browser/components/tabbrowser/content/drag-and-drop.js
 @@ -9,6 +9,7 @@
@@ -159,7 +159,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
            return;
          }
  
-@@ -682,25 +736,42 @@
+@@ -693,25 +747,42 @@
          delete tab.currentIndex;
        }
  
@@ -209,7 +209,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
          this._setIsDraggingTabGroup(draggedTab.group, false);
          this._expandGroupOnDrop(draggedTab);
        }
-@@ -713,6 +784,7 @@
+@@ -724,6 +795,7 @@
          this._tabbrowserTabs._isCustomizing
        ) {
          delete draggedTab._dragData;
@@ -217,7 +217,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
          return;
        }
  
-@@ -750,6 +822,8 @@
+@@ -761,6 +833,8 @@
            crossAxisEnd = window.mozInnerScreenY + rect.top + 1.5 * rect.height;
          }
          if (crossAxisPos > crossAxisStart && crossAxisPos < crossAxisEnd) {
@@ -226,7 +226,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
            return;
          }
        }
-@@ -815,6 +889,7 @@
+@@ -826,6 +900,7 @@
        top /= ourCssToDesktopScale;
  
        delete draggedTab._dragData;
@@ -234,7 +234,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
  
        if (gBrowser.tabs.length == 1) {
          // resize _before_ move to ensure the window fits the new screen.  if
-@@ -865,9 +940,94 @@
+@@ -876,9 +951,94 @@
        return !this._tabbrowserTabs.verticalMode && RTL_UI;
      }
  
@@ -330,7 +330,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
      }
  
      _getDropIndex(event) {
-@@ -989,7 +1149,10 @@
+@@ -1000,7 +1160,10 @@
      }
  
      #isMovingTab() {
@@ -342,7 +342,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
      }
  
      // Tab groups
-@@ -1146,16 +1309,12 @@
+@@ -1157,16 +1320,12 @@
          let dtTab = dataTransferOrderedTabs[i];
          dt.mozSetDataAt(TAB_DROP_TYPE, dtTab, i);
          if (isTab(dtTab)) {
@@ -363,7 +363,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
          }
        }
  
-@@ -1284,6 +1443,7 @@
+@@ -1295,6 +1454,7 @@
          tabGroupCreationColor: gBrowser.tabGroupMenu.nextUnusedColor,
          expandGroupOnDrop: collapseTabGroupDuringDrag,
        };
@@ -371,7 +371,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
        if (this._rtlMode) {
          // Reverse order to handle positioning in `_updateTabStylesOnDrag`
          // and animation in `_animateTabMove`
-@@ -2554,8 +2714,8 @@
+@@ -2565,8 +2725,8 @@
        this._pinnedDropIndicator.removeAttribute("interactive");
      }
  
@@ -382,7 +382,7 @@ index 603a0ae4a667..45f722aa2bbd 100644
          return;
        }
  
-@@ -2669,6 +2829,9 @@
+@@ -2680,6 +2840,9 @@
       */
      getDropEffectForTabDrag(event) {
        var dt = event.dataTransfer;

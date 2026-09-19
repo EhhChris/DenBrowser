@@ -42,9 +42,15 @@ Assume the branch is currently on `FIREFOX_<OLD>esr_RELEASE` and you're moving t
 `FIREFOX_<NEW>esr_RELEASE`. Both tags must exist in `../firefox`
 (`git -C ../firefox fetch upstream --tags`).
 
+Set Git's comment character before starting the rebase. Patch documentation
+uses `#` lines, which Git's default message cleanup otherwise removes when
+editing a commit message after resolving conflicts. Using `;` keeps those
+lines while still removing Git's generated editor comments.
+
 ```bash
 cd ../firefox
 git config rerere.enabled true          # reuse each resolution across retries
+git config --local core.commentChar ';' # preserve # PATCH documentation
 
 # Replay the patch commits from the old base onto the new ESR tag.
 git rebase --onto FIREFOX_<NEW>esr_RELEASE FIREFOX_<OLD>esr_RELEASE DenBrowser
@@ -74,6 +80,26 @@ git -C ../firefox switch DenBrowser && git -C ../firefox branch -D _roundtrip
 ```
 
 Commit the refreshed `patches/`, then push the fork branch/tags as desired.
+
+## Missing patch documentation after a rebase
+
+If `gen-patches.sh` reports an invalid documentation body with `Found: <empty>`,
+the commit's `# PATCH:` block may have been stripped during conflict resolution.
+The generator stops before writing any files so the saved documentation remains
+available.
+
+Back up the fork branch, set `core.commentChar` as above, and use an interactive
+rebase to edit the affected commits. Restore each complete message (subject,
+blank line, documentation body) from the pre-rebase commit or the corresponding
+patch file's documentation header. When supplying a message file, use
+`git commit --amend --cleanup=whitespace -F <message-file>`, then continue the
+rebase. Check that the repaired branch has the same tree as the backup before
+regenerating patches. Review the restored documentation if conflict resolution
+changed the patch's behavior.
+
+Repairing messages changes commit IDs, including those of later commits. Keep
+the backup until verification is complete; updating an already-pushed branch
+requires coordinating the history rewrite and pushing with `--force-with-lease`.
 
 ## Patch change statistics
 
