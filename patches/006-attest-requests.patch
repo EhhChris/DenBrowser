@@ -784,7 +784,7 @@ index 56459dca696f..baf48c8f5d46 100644
      "ExecuteIfOnMainThreadEventTarget.cpp",
      "InterceptionInfo.cpp",
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
-index c6d926448e39..000209cf4ae0 100644
+index eb246d810406..19f25f25584f 100644
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
 +++ b/netwerk/protocol/http/nsHttpChannel.cpp
 @@ -5,6 +5,7 @@

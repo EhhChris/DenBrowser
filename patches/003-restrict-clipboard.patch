@@ -93,7 +93,7 @@ index 042341cecb1a..19a7cbf8df1f 100644
          case "context-copyaudiourl":
          case "context-copyimage":
 diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
-index ff02d8268fd0..b406154aba3b 100644
+index 5bab8ffea8d5..144fb8465e95 100644
 --- a/browser/base/content/nsContextMenu.sys.mjs
 +++ b/browser/base/content/nsContextMenu.sys.mjs
 @@ -75,13 +75,6 @@ XPCOMUtils.defineLazyServiceGetter(
@@ -110,8 +110,8 @@ index ff02d8268fd0..b406154aba3b 100644
  XPCOMUtils.defineLazyPreferenceGetter(
    lazy,
    "TEXT_FRAGMENTS_ENABLED",
-@@ -1725,10 +1718,22 @@ export class nsContextMenu {
-     return this.actor.canvasToBlobURL(targetIdentifier);
+@@ -1731,13 +1724,22 @@ export class nsContextMenu {
+     return blobURL;
    }
  
 +  _notifyDenBrowserCopyBlocked() {
@@ -129,14 +129,17 @@ index ff02d8268fd0..b406154aba3b 100644
 +  }
 +
    copyCanvasImage() {
--    this.actor.copyCanvasImage(this.targetIdentifier).then(arrayBuffer => {
--      lazy.BrowserUtils.copyImageToClipboard(arrayBuffer);
--    }, console.error);
+-    this.actor
+-      .canvasToBlob(this.targetIdentifier)
+-      .then(blob => blob.arrayBuffer())
+-      .then(arrayBuffer => {
+-        lazy.BrowserUtils.copyImageToClipboard(arrayBuffer);
+-      }, console.error);
 +    this.copyImage();
    }
  
    // Change current window to the URL of the image, video, or audio.
-@@ -2211,57 +2216,16 @@ export class nsContextMenu {
+@@ -2220,57 +2222,16 @@ export class nsContextMenu {
  
    // Generate email address and put it on clipboard.
    copyEmail() {
@@ -198,7 +201,7 @@ index ff02d8268fd0..b406154aba3b 100644
    }
  
    previewLink(url = this.linkURL) {
-@@ -2275,16 +2239,8 @@ export class nsContextMenu {
+@@ -2284,16 +2245,8 @@ export class nsContextMenu {
     * 'Stripped' means that query parameters for tracking/ link decoration
     * that are known to us will be removed from the URI.
     */
@@ -217,7 +220,7 @@ index ff02d8268fd0..b406154aba3b 100644
    }
  
    async addSearchFieldAsEngine() {
-@@ -2563,10 +2519,7 @@ export class nsContextMenu {
+@@ -2572,10 +2525,7 @@ export class nsContextMenu {
    }
  
    copyMediaLocation() {
@@ -396,7 +399,7 @@ index 2309c29fb6f4..e05a6c6820d4 100644
  
    async handleDeleteEvent() {
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
-index 512d786cdafb..f76d8f33aae8 100644
+index 0122df8a7f1f..70d4b67e2b64 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
 @@ -5621,6 +5621,19 @@ bool Document::ExecCommand(const nsAString& aHTMLCommandName, bool aShowUI,
@@ -553,7 +556,7 @@ index 432b2c11fae9..a0965818b39c 100644
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
    RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 906eb61fcf94..4c0b30901211 100644
+index ffdec6acc45f..5560c0bcae99 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -135,6 +135,8 @@
@@ -565,7 +568,7 @@ index 906eb61fcf94..4c0b30901211 100644
  #ifdef MOZ_WMF
  #  include "mozilla/glean/DomMediaPlatformsWmfMetrics.h"
  #endif
-@@ -3236,10 +3238,113 @@ void ContentParent::OnVarChanged(const nsTArray<GfxVarUpdate>& aVar) {
+@@ -3242,10 +3244,113 @@ void ContentParent::OnVarChanged(const nsTArray<GfxVarUpdate>& aVar) {
    (void)SendVarUpdate(aVar);
  }
  
@@ -680,7 +683,7 @@ index 906eb61fcf94..4c0b30901211 100644
    // aRequestingPrincipal is allowed to be nullptr here.
  
    if (!ValidatePrincipal(aTransferable.dataPrincipal(),
-@@ -3267,6 +3372,57 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
+@@ -3273,6 +3378,57 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
    if (!aRequestingWindowContext.IsDiscarded()) {
      window = aRequestingWindowContext.get_canonical();
    }
@@ -738,7 +741,7 @@ index 906eb61fcf94..4c0b30901211 100644
    clipboard->SetData(trans, nullptr, aWhichClipboard, window);
    return IPC_OK();
  }
-@@ -3319,6 +3475,22 @@ nsresult ContentParent::GetClipboardDataInternal(
+@@ -3325,6 +3481,22 @@ nsresult ContentParent::GetClipboardDataInternal(
      return NS_ERROR_ILLEGAL_VALUE;
    }
  
@@ -761,7 +764,7 @@ index 906eb61fcf94..4c0b30901211 100644
    nsresult rv;
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
    if (NS_FAILED(rv)) {
-@@ -3413,9 +3585,64 @@ mozilla::ipc::IPCResult ContentParent::RecvEmptyClipboard(
+@@ -3419,9 +3591,64 @@ mozilla::ipc::IPCResult ContentParent::RecvEmptyClipboard(
    return IPC_OK();
  }
  
@@ -826,7 +829,7 @@ index 906eb61fcf94..4c0b30901211 100644
    nsresult rv;
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
    NS_ENSURE_SUCCESS(rv, IPC_OK());
-@@ -3516,6 +3743,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
+@@ -3522,6 +3749,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -850,7 +853,7 @@ index 906eb61fcf94..4c0b30901211 100644
    nsresult rv;
    // Retrieve clipboard
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
-@@ -3553,6 +3797,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
+@@ -3559,6 +3803,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -879,10 +882,10 @@ index 906eb61fcf94..4c0b30901211 100644
    if (!clipboard) {
      *aRequestOrError = NS_ERROR_FAILURE;
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index 8cca90086a07..0421865b03bf 100644
+index 4e7694702d76..8ee13b89efe4 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
-@@ -973,7 +973,8 @@ class ContentParent final : public PContentParent,
+@@ -975,7 +975,8 @@ class ContentParent final : public PContentParent,
    mozilla::ipc::IPCResult RecvSetClipboard(
        const IPCTransferable& aTransferable,
        const nsIClipboard::ClipboardType& aWhichClipboard,
@@ -892,7 +895,7 @@ index 8cca90086a07..0421865b03bf 100644
  
    template <typename GetClipboardDataFunction>
    nsresult GetClipboardDataInternal(
-@@ -1002,6 +1003,11 @@ class ContentParent final : public PContentParent,
+@@ -1004,6 +1005,11 @@ class ContentParent final : public PContentParent,
        nsTArray<nsCString>&& aTypes,
        const nsIClipboard::ClipboardType& aWhichClipboard, bool* aHasType);
  
@@ -1078,7 +1081,7 @@ index 71bbb8af2b5c..3aef75b1811d 100644
    if (NS_FAILED(rv)) {
      MOZ_CLIPBOARD_LOG("%s: setting native clipboard data failed.",
 diff --git a/widget/nsBaseDragService.cpp b/widget/nsBaseDragService.cpp
-index 51b8a7581fe6..17934ba9eb56 100644
+index 6c6474f1ed1b..a203b5dd8722 100644
 --- a/widget/nsBaseDragService.cpp
 +++ b/widget/nsBaseDragService.cpp
 @@ -25,6 +25,7 @@
@@ -1089,7 +1092,7 @@ index 51b8a7581fe6..17934ba9eb56 100644
  #include "mozilla/MouseEvents.h"
  #include "mozilla/Preferences.h"
  #include "mozilla/PresShell.h"
-@@ -404,8 +405,29 @@ nsresult nsBaseDragSession::InvokeDragSession(
+@@ -395,8 +396,29 @@ nsresult nsBaseDragSession::InvokeDragSession(
      }
    }
  

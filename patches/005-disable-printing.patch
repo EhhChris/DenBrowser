@@ -159,10 +159,10 @@ index c919cf5c91b3..1df07b24a235 100644
      let closedPromise = new Promise(resolve => (resolveClosed = resolve));
      // Get the dialog manager to open the prompt with.
 diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
-index b406154aba3b..5e7aaa93002b 100644
+index 144fb8465e95..a814757bb58b 100644
 --- a/browser/base/content/nsContextMenu.sys.mjs
 +++ b/browser/base/content/nsContextMenu.sys.mjs
-@@ -2494,15 +2494,11 @@ export class nsContextMenu {
+@@ -2500,15 +2500,11 @@ export class nsContextMenu {
    }
  
    printFrame() {
@@ -313,10 +313,10 @@ index 29c5b1510696..e45e09c1c0ee 100644
  
      if (
 diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
-index 00c69a2310f1..4e2868098eee 100644
+index d96248fcc4ce..45aabd059eec 100644
 --- a/docshell/base/CanonicalBrowsingContext.cpp
 +++ b/docshell/base/CanonicalBrowsingContext.cpp
-@@ -954,6 +954,8 @@ already_AddRefed<Promise> CanonicalBrowsingContext::PrintJS(
+@@ -967,6 +967,8 @@ already_AddRefed<Promise> CanonicalBrowsingContext::PrintJS(
  
  RefPtr<PrintPromise> CanonicalBrowsingContext::Print(
      nsIPrintSettings* aPrintSettings) {
@@ -325,7 +325,7 @@ index 00c69a2310f1..4e2868098eee 100644
  #ifndef NS_PRINTING
    return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
  #else
-@@ -1020,6 +1022,8 @@ void CanonicalBrowsingContext::ReleaseClonedPrint(
+@@ -1033,6 +1035,8 @@ void CanonicalBrowsingContext::ReleaseClonedPrint(
  RefPtr<PrintPromise> CanonicalBrowsingContext::PrintWithNoContentAnalysis(
      nsIPrintSettings* aPrintSettings, bool aForceStaticDocument,
      const MaybeDiscardedBrowsingContext& aCachedStaticDocument) {
@@ -335,7 +335,7 @@ index 00c69a2310f1..4e2868098eee 100644
    return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
  #else
 diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
-index c6e7f23507a6..a359d61ceb88 100644
+index 89649eb2f2b3..251ae80523ad 100644
 --- a/dom/base/nsGlobalWindowOuter.cpp
 +++ b/dom/base/nsGlobalWindowOuter.cpp
 @@ -263,6 +263,8 @@ using mozilla::OriginAttributes;
@@ -347,7 +347,7 @@ index c6e7f23507a6..a359d61ceb88 100644
  static inline nsGlobalWindowInner* GetCurrentInnerWindowInternal(
      const nsGlobalWindowOuter* aOuter) {
    return nsGlobalWindowInner::Cast(aOuter->GetCurrentInnerWindow());
-@@ -4965,6 +4967,14 @@ void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
+@@ -4963,6 +4965,14 @@ void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
      return;
    }
  
@@ -362,7 +362,7 @@ index c6e7f23507a6..a359d61ceb88 100644
    // Printing is disabled, silently return.
    if (!StaticPrefs::print_enabled()) {
      return;
-@@ -5026,6 +5036,12 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
+@@ -5024,6 +5034,12 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
      IsPreview aIsPreview, IsForWindowDotPrint aForWindowDotPrint,
      PrintPreviewResolver&& aPrintPreviewCallback,
      RefPtr<BrowsingContext>* aCachedBrowsingContext, ErrorResult& aError) {
@@ -462,7 +462,7 @@ index 6919fcff1cd3..d757eedd4cc0 100644
  if CONFIG["INTEL_ARCHITECTURE"]:
      SOURCES += ["gfxAlphaRecoverySSE2.cpp"]
 diff --git a/layout/printing/nsPrintJob.cpp b/layout/printing/nsPrintJob.cpp
-index 0904ef055fce..c82a9fa9a863 100644
+index ed37d65ea475..6fb88e1b6377 100644
 --- a/layout/printing/nsPrintJob.cpp
 +++ b/layout/printing/nsPrintJob.cpp
 @@ -329,8 +329,13 @@ nsresult nsPrintJob::CommonPrint(bool aIsPrintPreview,
