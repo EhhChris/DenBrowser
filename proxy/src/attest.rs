@@ -47,8 +47,6 @@ pub struct AttestInputs<'a> {
 /// to hash up front, so the proxy streams the body straight through without
 /// buffering.  Origin attestation, nonce replay, timestamp, and method/host/path
 /// binding still apply — only per-body integrity is dropped for these requests.
-/// The `Unbound` state lives inside the AES-GCM-authenticated plaintext, so a
-/// client cannot forge it or downgrade a normal (bound) request without the key.
 pub enum BodyBinding {
     Hash([u8; 32]),
     Unbound,

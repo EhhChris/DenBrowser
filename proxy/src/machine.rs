@@ -25,9 +25,8 @@
 //!    certificate only works from a host that name actually points at.
 //!
 //! That makes machine identity strictly weaker than attestation against a
-//! compromised endpoint (attestation is unforgeable precisely because the
-//! browser holds no private key), and it is why the hostname is recorded rather
-//! than used to grant anything.
+//! compromised endpoint, and it is why the hostname is recorded rather than
+//! used to grant anything.
 //!
 //! # Verification order
 //!

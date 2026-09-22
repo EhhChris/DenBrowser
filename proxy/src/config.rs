@@ -144,7 +144,7 @@ pub struct RuleConfig {
 /// during the TLS handshake; a client with no certificate or an untrusted one is
 /// rejected at the handshake and never reaches the request path.  This sits *in
 /// front of* attestation as an independent layer: it authenticates the user/
-/// device, while attestation still proves the request came from a genuine
+/// device, while attestation attempts to prove the request came from a genuine
 /// DenBrowser build and TLS pinning still authenticates the proxy to the browser.
 ///
 /// Disabled by default, so a proxy with no config (or `enabled = false`) requests

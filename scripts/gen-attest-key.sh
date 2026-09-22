@@ -44,11 +44,9 @@
 # SECURITY NOTES:
 #   - Never commit *-private.pem.  build/ is gitignored.
 #   - Treat each proxy private key like any other TLS private key.
-#   - The public keys in the build are not secret; embedding them in the binary
-#     gives attackers nothing useful (they cannot forge tokens without the
-#     proxy private key to complete ECDH on the other side).
-#   - Keys are per proxy on purpose: one partner can never verify — or mint —
-#     another partner's tokens.
+#   - The public keys in the build are not secret.
+#   - Keys are per proxy on purpose: one partner can never verify another
+#     partner's tokens.
 
 set -euo pipefail
 
