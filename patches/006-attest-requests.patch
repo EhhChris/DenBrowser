@@ -6,16 +6,16 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # PURPOSE: Attach a per-request ECIES attestation token to outbound HTTP(S)
 #          requests bound for a DenBrowser proxy (Pingora-based; see proxy/)
-#          so the proxy can verify that traffic originated from a genuine
-#          DenBrowser browser build, *and* that the captured headers cannot be
-#          replayed to issue a different request from curl.
+#          so the proxy can attempt to verify that traffic originated from a
+#          genuine DenBrowser browser build, *and* that the captured headers
+#          cannot be replayed to issue a different request from curl.
 #
 # MULTI-PROXY DEPLOYMENT MODEL:
 #
 #   A deployment usually fronts more than one partner application, and each
 #   partner runs its own attestation proxy with its own keypair — no partner
-#   should be able to verify (or mint) another partner's tokens.  The build
-#   therefore embeds a *table* of proxies rather than one global key:
+#   should be able to verify another partner's tokens.  The build therefore
+#   embeds a *table* of proxies rather than one global key:
 #
 #     domains  →  attestation public key  (+ TLS SPKI pin, patch 012)
 #
@@ -63,8 +63,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #        traffic is now rejected even if the binary is still in circulation.
 #
 #   The browser binary contains ONLY public keys, which are not secret.
-#   Extracting them from the binary gives an attacker nothing useful because
-#   you cannot forge an encrypted token without the proxy's private key.
+#   Forging headers with the public keys is meant to be mitigated by combining
+#   this model with local security integrations on controlled client endpoints.
+#   Examples may include TPM integration, firewall policies to limit egress to
+#   controlled proxy IPs, and other mechanisms.
 #
 # WHY THIS DOES NOT AFFECT PKI / OAUTH:
 #   These headers are an independent application-layer channel added on top
@@ -90,9 +92,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #        the literal "unbound" instead of a hash.  The proxy then streams the
 #        body straight through without buffering it.  Origin, replay, timestamp,
 #        and method/host/path binding still apply; only per-body integrity is
-#        dropped for these large uploads.  Because "unbound" lives inside the
-#        GCM-authenticated plaintext, a client cannot forge it or downgrade a
-#        normal (bound) request without the proxy's private key.
+#        dropped for these large uploads.
 #     7. Build the canonical plaintext:
 #          "denbrowser-attest:v2\n<base64(N)>\n<ts>\n<host>\n<method>\n<path>\n<body_hash>"
 #          (the final field is the literal "unbound" for large uploads)
@@ -140,12 +140,6 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #       token loses in phase-2 commit (atomic check-and-insert).
 #     - A token captured from partner A's traffic is useless against partner
 #       B's proxy: host binding rejects it, and B cannot decrypt it anyway.
-#
-#   The only attack the protocol still allows is replaying the exact same
-#   request to the exact same path with the exact same body before the
-#   legitimate request reaches the proxy — a race the attacker cannot win
-#   from a separate process under normal conditions, and which the LRU
-#   eliminates entirely once either request lands.
 #
 # FILES ADDED:
 #   netwerk/base/DenBrowserAttest.h

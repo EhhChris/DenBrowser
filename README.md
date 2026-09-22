@@ -189,9 +189,9 @@ compile-time switches and the baked-in bookmarks:
 
 A deployment normally fronts several partner applications, each behind its
 **own** attestation proxy with its own attestation keypair and TLS cert — no
-partner should be able to verify (or mint) another partner's tokens.  The
-`proxies` array is the build-time map from *domains* to *the proxy that fronts
-them*, and it drives both compile-time proxy features at once:
+partner should be able to verify another partner's tokens.  The `proxies`
+array is the build-time map from *domains* to *the proxy that fronts them*,
+and it drives both compile-time proxy features at once:
 
 - the attestation public key used to encrypt a request's token (patch 006), and
 - the TLS SPKI pin enforced when connecting to those domains (patch 012).
@@ -337,10 +337,10 @@ none of the others:
 - **TLS SPKI pinning** (patch 012) authenticates the *proxy* to the browser
   (proxy → client); the browser pins the proxy's cert, defeating MITM even by a
   validly-CA-issued cert. mTLS is the opposite direction and does not replace it.
-- **Attestation** (ECIES headers) proves the request came from a genuine
-  DenBrowser build and binds it against replay/tampering — properties a client
-  cert doesn't provide. mTLS proves *who* holds a key but not *what software*
-  produced the request, so the two are complementary.
+- **Attestation** (ECIES headers) attempts to prove the request came from a
+  genuine DenBrowser build and binds it against replay/tampering — properties
+  a client cert doesn't provide. mTLS proves *who* holds a key but not *what
+  software* produced the request, so the two are complementary.
 - **Machine identity** (`[machine_identity]`, below) names the *workstation* the
   request came from — which none of the other three establish.
 

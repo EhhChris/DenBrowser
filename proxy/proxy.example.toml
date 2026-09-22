@@ -88,9 +88,10 @@ max_requests = 50
 #
 # This is one of four orthogonal layers and replaces none of them: mTLS
 # authenticates the user (client -> proxy), TLS SPKI pinning authenticates
-# the proxy to the browser (proxy -> client), attestation proves the request
-# came from a genuine DenBrowser build and binds it against replay/tampering,
-# and machine identity ([machine_identity] below) names the workstation.
+# the proxy to the browser (proxy -> client), attestation attempts to prove
+# the request came from a genuine DenBrowser build and binds it against
+# replay/tampering, and machine identity ([machine_identity] below) names the
+# workstation.
 #
 # Disabled by default: with enabled = false, no client certificate is requested
 # and the listener behaves exactly as before.
