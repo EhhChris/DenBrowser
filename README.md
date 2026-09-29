@@ -189,14 +189,22 @@ compile-time switches and the baked-in bookmarks:
 ### File uploads
 
 DenBrowser blocks data leaving the browser (downloads, printing, copy-out,
-screen capture); it does **not** block data going *into* a site.  Nothing in
-the patch set, `policies.json`, `mozconfig`, or `mozilla.cfg` disables
-`<input type="file">`, the native file picker, dropping files onto a page, or
-the multipart/`fetch` request that carries the bytes.  Firefox's own
-`widget.disable_file_pickers` kill switch (set by the `AllowFileSelectionDialogs`
-enterprise policy) is intentionally *not* used.  When an upload does fail in a
-deployment, check these knobs, in order:
+screen capture); it does **not** block data going *into* a site.  The patch
+set, `policies.json`, and `mozconfig` leave `<input type="file">`, the native
+file picker, dropping files onto a page, and the multipart/`fetch` request that
+carries the bytes untouched, and `mozilla.cfg` no longer locks any pref that
+affects them (`network.file.disable_unc_paths` used to; see below).  Firefox's
+own `widget.disable_file_pickers` kill switch (set by the
+`AllowFileSelectionDialogs` enterprise policy) is intentionally *not* used.
+When an upload does fail in a deployment, check these knobs, in order:
 
+- **Files on network shares** upload only while `network.file.disable_unc_paths`
+  stays unset.  Windows enforces that pref inside `nsLocalFile::InitWithPath`,
+  so with it locked true every `\\server\share\…` path fails with
+  `NS_ERROR_FILE_ACCESS_DENIED` and the picker or drop silently yields no file,
+  while the same file copied to `C:\` uploads fine and mapped drive letters are
+  never affected.  Earlier revisions of this config locked it; it is now left
+  at the Firefox default (false).
 - **`site_whitelist` (patch 014)** is enforced on *every* HTTP(S) channel, not
   just top-level navigation.  Apps that upload straight to object storage or a
   CDN (pre-signed S3/GCS/Azure URLs, `upload.<partner>.com`, …) need that host
