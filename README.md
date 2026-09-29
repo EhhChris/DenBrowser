@@ -118,7 +118,7 @@ lives.
 | Profile / on-disk content | — | `SanitizeOnShutdown`, `DisableFormHistory`, `BrowserDataBackup: false` | `browser.privatebrowsing.autostart`, `browser.cache.disk.*`, `media.cache_size`, `media.cache_size.cellular`, `browser.privatebrowsing.forceMediaMemoryCache`, `places.history.enabled`, `signon.rememberSignons`, `browser.formfill.enable`, `browser.sessionstore.*`, `browser.pagethumbnails.capturing_disabled`, `browser.shell.shortcutFavicons`, `dom.serviceWorkers.enabled`, `browser.backup.*`, `browser.profiles.enabled` |
 | Screenshots (built-in + OS capture) | 001 | `DisableFirefoxScreenshots` | `screenshots.browser.component.enabled` |
 | Screen / window / browser capture | 002 | — | `media.getdisplaymedia.enabled`, `media.getusermedia.browser.enabled`, `media.getusermedia.window.focus_source.enabled` |
-| Clipboard + drag-and-drop | 003 | — | `dom.allow_cut_copy`, `dom.event.clipboardevents.enabled` |
+| Clipboard + drag-and-drop (out of the browser) | 003 | — | `dom.allow_cut_copy` |
 | Downloads / Save As / wallpaper | 004 | — | `browser.download.useDownloadDir`, `browser.download.forbid_open_with`, `browser.download.always_ask_before_handling_new_types`, `browser.download.start_downloads_in_tmp_dir`, `browser.helperApps.deleteTempFileOnExit` |
 | Printing + print-to-PDF | 005 | `PrintingEnabled=false` | `print.enabled` |
 | Per-request attestation to proxy | 006 | — | — |
@@ -215,6 +215,9 @@ deployment, check these knobs, in order:
   upload endpoints that authenticate with them.
 - **Local Network Access** (`LocalNetworkAccess` policy, `network.lna.*`)
   gates requests from a public page to a private-address endpoint.
+- **Paste-in uploads** (`event.clipboardData.files`) need the `paste` event to
+  reach the page, so `dom.event.clipboardevents.enabled` is left at its Firefox
+  default; see the comment in `config/mozilla.cfg`.
 - **Origin Private File System** is off (`dom.fs.enabled`); an app that stages
   uploads in OPFS will fall back to memory or fail on its own terms.
 - Stock Firefox rules, unchanged here: a picker requested without a recent
