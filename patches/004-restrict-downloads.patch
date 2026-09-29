@@ -279,11 +279,11 @@ index 9c1541ec5cc3..a2718c4e7ae9 100644
      if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
        return true;
      }
-diff --git a/browser/components/shell/nsMacShellService.cpp b/browser/components/shell/nsMacShellService.cpp
-index 5f5dd4163cb3..fac137c60652 100644
---- a/browser/components/shell/nsMacShellService.cpp
-+++ b/browser/components/shell/nsMacShellService.cpp
-@@ -37,6 +37,10 @@ using mozilla::widget::SetDesktopImage;
+diff --git a/browser/components/shell/nsMacShellService.mm b/browser/components/shell/nsMacShellService.mm
+index 6bdf1087f321..a0b05d6e2887 100644
+--- a/browser/components/shell/nsMacShellService.mm
++++ b/browser/components/shell/nsMacShellService.mm
+@@ -39,6 +39,10 @@
  
  #define SAFARI_BUNDLE_IDENTIFIER "com.apple.Safari"
  
@@ -294,7 +294,7 @@ index 5f5dd4163cb3..fac137c60652 100644
  NS_IMPL_ISUPPORTS(nsMacShellService, nsIMacShellService, nsIShellService,
                    nsIToolkitShellService, nsIWebProgressListener)
  
-@@ -101,6 +105,10 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
+@@ -120,6 +124,10 @@
  NS_IMETHODIMP
  nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
                                          const nsACString& aImageName) {
