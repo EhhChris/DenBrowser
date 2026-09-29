@@ -151,6 +151,7 @@ lives.
 | Context-menu search for selected/link text | 023 | — | — |
 | Windows process-memory dumps | 025 | — | — |
 | Web-platform capability APIs (Share / FS Access / Serial / MIDI / Payments / Push / Notifications / SpeechSynth / Battery / Sensors / WebTransport / file://) | — | — | `dom.webshare.enabled`, `dom.fs.enabled`, `dom.webserial.enabled`, `dom.webmidi.enabled`, `dom.payments.request.enabled`, `dom.push.enabled`, `dom.webnotifications.enabled`, `media.webspeech.synth.enabled`, `media.webspeech.recognition.enable`, `dom.battery.enabled`, `device.sensors.enabled`, `network.webtransport.enabled`, `network.protocol-handler.expose.file` |
+| File uploads (`<input type=file>`, drag-in, paste-in) — **allowed**, not a protected surface | — | — | — (see [File uploads](#file-uploads)) |
 
 Per-deployment configuration (`config/site-config.json`) drives the
 compile-time switches and the baked-in bookmarks:
@@ -184,6 +185,43 @@ compile-time switches and the baked-in bookmarks:
     { "title": "Docs", "url": "https://docs.example.com" }
   ]
   ```
+
+### File uploads
+
+DenBrowser blocks data leaving the browser (downloads, printing, copy-out,
+screen capture); it does **not** block data going *into* a site.  Nothing in
+the patch set, `policies.json`, `mozconfig`, or `mozilla.cfg` disables
+`<input type="file">`, the native file picker, dropping files onto a page, or
+the multipart/`fetch` request that carries the bytes.  Firefox's own
+`widget.disable_file_pickers` kill switch (set by the `AllowFileSelectionDialogs`
+enterprise policy) is intentionally *not* used.  When an upload does fail in a
+deployment, check these knobs, in order:
+
+- **`site_whitelist` (patch 014)** is enforced on *every* HTTP(S) channel, not
+  just top-level navigation.  Apps that upload straight to object storage or a
+  CDN (pre-signed S3/GCS/Azure URLs, `upload.<partner>.com`, …) need that host
+  in the list too; otherwise the `fetch`/XHR fails with
+  `NS_ERROR_BLOCKED_BY_POLICY`, which the page sees as a plain network error.
+- **Attestation (patch 006 + proxy)**: request bodies of 64 KiB or less are
+  hash-bound and buffered/verified by the proxy before the upstream is
+  contacted; larger bodies are sent with the `unbound` marker and stream
+  through with no size cap.  A body hash is computed from the normalized
+  upload stream in the parent process, so multipart file bodies are hashed
+  exactly as they are sent.  Proxy `403`/`413` log lines
+  (`rejected — …`) identify anything failing at this layer, as do the proxy's
+  mTLS and `machine_identity.required` checks, which apply to all requests.
+- **`HttpsOnlyMode: force_enabled`** upgrades plain-`http://` upload endpoints.
+- **`Cookies: reject-foreign`** withholds third-party cookies from cross-site
+  upload endpoints that authenticate with them.
+- **Local Network Access** (`LocalNetworkAccess` policy, `network.lna.*`)
+  gates requests from a public page to a private-address endpoint.
+- **Origin Private File System** is off (`dom.fs.enabled`); an app that stages
+  uploads in OPFS will fall back to memory or fail on its own terms.
+- Stock Firefox rules, unchanged here: a picker requested without a recent
+  user gesture is refused and the web console logs
+  `InputPickerBlockedNoUserActivation`; one requested from a background or
+  unfocused tab (`browser.disable_pickers_background_tabs`) is cancelled
+  silently.
 
 ### Attestation proxies (`site-config.json`)
 
