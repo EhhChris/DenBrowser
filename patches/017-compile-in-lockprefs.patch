@@ -54,7 +54,7 @@ diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
 index b6200c23171f..b9c05a574e9d 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3924,6 +3924,543 @@ void Preferences::SetupTelemetryPref() {
+@@ -3924,6 +3924,542 @@ void Preferences::SetupTelemetryPref() {
  
  #endif  // MOZ_WIDGET_ANDROID
  
