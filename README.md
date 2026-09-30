@@ -57,8 +57,8 @@ DenBrowser/
 ├── config/
 │   ├── mozconfig               # Firefox build flags + app identity
 │   ├── policies.json           # Enterprise policy enforcement (loaded at startup)
-│   ├── mozilla.cfg             # Hardened lockPref overrides (autoconfig-locked)
-│   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
+│   ├── mozilla.cfg             # Source for compiled production locks; dev AutoConfig
+│   ├── autoconfig.js           # Dev-only AutoConfig bootstrap
 │   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites /
 │                               #   attestation proxies / bookmarks
 ├── patches/
@@ -95,20 +95,19 @@ single bypass still leaves the rest in place:
 1. **Build-time flags** (`config/mozconfig`) — `--disable-crashreporter`,
    `--disable-updater`, `--disable-tests`, `--disable-parental-controls`,
    `--disable-profiling`, `--disable-accessibility`, `--disable-printing`,
+   `--disable-pref-extensions`,
    `--enable-hardening`,
    `--enable-strip` / `--enable-install-strip`.  Code paths and symbols are
    never compiled in.
-2. **Source patches** — applied to the Firefox source tree before build;
-   compiled into the binary and cannot be disabled at runtime by any
-   user-accessible mechanism.
+2. **Source patches** — applied to the Firefox source tree before build and
+   included in the build output.
 3. **Enterprise policies** (`config/policies.json`) — loaded at startup;
    lock UI surfaces and per-URL permissions.  Cannot be overridden by
    profile state.
-4. **Autoconfig prefs** (`config/mozilla.cfg` via `config/autoconfig.js`) —
-   `lockPref` values that override `prefs.js`, `about:config`, and all
-   profile state. Patch 017 additionally compiles the entire `mozilla.cfg`
-   set into `libxul`, so the same locks survive deletion or substitution
-   of the on-disk autoconfig files.
+4. **Compiled preference locks** (patch 017, generated from
+   `config/mozilla.cfg`) — lock values against profile and user preferences.
+   Production excludes AutoConfig and does not install its runtime files;
+   development builds retain AutoConfig because they skip patch 017.
 
 The categories below summarize what is protected and where the enforcement
 lives.
@@ -353,9 +352,13 @@ none of the others:
 
   The listener also advertises `client_ca` in the TLS `CertificateRequest`, so a
   browser holding more than one client certificate can filter its store to the
-  one identity this proxy accepts, rather than prompting with a picker or
-  offering the wrong certificate (which would then fail the handshake with
-  nothing to diagnose it by).
+  identity this proxy accepts. DenBrowser locks
+  `security.default_personal_cert` to `Select Automatically`. Provision only
+  one eligible certificate for each proxy: a CA list cannot distinguish two
+  certificates issued by the same CA, and Firefox may choose either one.
+  This preference applies to all allowed HTTPS sites, so any such site that
+  requests client authentication may receive an eligible certificate without
+  a picker.
 
   ```toml
   [mtls]
@@ -542,7 +545,7 @@ for navigation.
 | 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad` for the navigation error page and `nsHttpChannel::AsyncOpen` for all HTTP(S) requests; localize the "blocked page" message. |
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
-| 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
+| 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it before default preference files are loaded. Locks every pref directly in `libxul`; production builds exclude AutoConfig and do not install its runtime files. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox. Also stamps the build id next to the version — `153.0esr (64-bit) (build a1b2c3d)` — from the DenBrowser repo commit, injected into `aboutDialog.js` by `build.sh` Step 2.8 (`-dirty` suffix when the tree had uncommitted changes; hidden entirely when the build came from a non-git source tree). |
