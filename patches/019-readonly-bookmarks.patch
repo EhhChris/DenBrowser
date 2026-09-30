@@ -4,9 +4,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PATCH: 019-readonly-bookmarks
 #
-# Makes the bookmark store read-only: users cannot create, edit, move, reorder,
-# or remove bookmarks. DenBrowser's curated shortcuts live on the custom new-tab
-# page (patch 018) instead of the editable Firefox bookmark system.
+# Makes the bookmark store read-only and prevents profile-backed bookmark
+# keywords and bookmarklets from executing in the active page. DenBrowser's
+# curated shortcuts live on the custom new-tab page (patch 018).
 #
 # Enforcement is at the single service funnel — the public mutation methods of
 # toolkit/components/places/Bookmarks.sys.mjs (insert, insertTree, update,
@@ -16,14 +16,104 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # this build because nothing seeds bookmarks programmatically: the Bookmarks
 # enterprise policy is not used, Sync is disabled (patch 013), profile import is
 # disabled, and NoDefaultBookmarks is set. The default bookmark roots are
-# created by the Places database layer (C++), not these methods, so read paths
-# (fetch/observers) are unaffected.
+# created by the Places database layer (C++), not these methods, so ordinary
+# bookmark fetches and observers are unaffected.
+#
+# A user-writable places.sqlite can still contain keyword and bookmark rows.
+# Places keyword lookups therefore return no entries, keyword inserts reject,
+# and keyword cache checks return false. Places UI's single-bookmark opener
+# rejects javascript: URLs even for bookmarked profile rows. Browser windows
+# show DenBrowser's shared non-modal refusal notification; standalone Library
+# windows retain Firefox's alert.
 #
 # NOTE: this is the hard block / enforcement layer. Hiding the now non-functional
 # bookmark UI (star button, menus, context-menu items) is a separate cosmetic
 # change, tuned against a real build.
 
 
+diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
+index ba4697abc6bf..4becba4ed769 100644
+--- a/browser/base/content/browser-init.js
++++ b/browser/base/content/browser-init.js
+@@ -67,6 +67,12 @@ const DENBROWSER_BLOCKED_NOTIFICATION_DETAILS = new Map([
+       l10nId: "denbrowser-devtools-blocked-infobar",
+     },
+   ],
++  [
++    "DenBrowserBookmarkletBlocked",
++    {
++      l10nId: "denbrowser-bookmarklet-blocked-infobar",
++    },
++  ],
+ ]);
+ const gDenBrowserBlockedNotificationStates = new WeakMap();
+ 
+@@ -508,6 +514,10 @@ var gBrowserInit = {
+       "DenBrowserDevToolsBlocked",
+       queueDenBrowserBlockedNotification
+     );
++    document.addEventListener(
++      "DenBrowserBookmarkletBlocked",
++      queueDenBrowserBlockedNotification
++    );
+ 
+     gBrowser.addEventListener("DOMUpdateBlockedPopups", e =>
+       PopupAndRedirectBlockerObserver.handleEvent(e)
+diff --git a/browser/components/places/PlacesUIUtils.sys.mjs b/browser/components/places/PlacesUIUtils.sys.mjs
+index 7c11a2004c87..6d8895576689 100644
+--- a/browser/components/places/PlacesUIUtils.sys.mjs
++++ b/browser/components/places/PlacesUIUtils.sys.mjs
+@@ -646,22 +646,30 @@ export var PlacesUIUtils = {
+   },
+ 
+   /**
+-   * Allows opening of javascript/data URI only if the given node is
+-   * bookmarked (see bug 224521).
++   * Blocks javascript: nodes and unbookmarked data: nodes.
+    *
+    * @param {object} aURINode
+    *        a URI node
+    * @param {Window} aWindow
+-   *        a window on which a potential error alert is shown on.
++   *        The calling window, used for refusal feedback.
+    * @returns {boolean} true if it's safe to open the node in the browser, false otherwise.
+    */
+   checkURLSecurity(aURINode, aWindow) {
+-    if (lazy.PlacesUtils.nodeIsBookmark(aURINode)) {
+-      return true;
+-    }
+-
+     var uri = Services.io.newURI(aURINode.uri);
+-    if (uri.schemeIs("javascript") || uri.schemeIs("data")) {
++    let isJavaScriptURL = uri.schemeIs("javascript");
++    if (
++      isJavaScriptURL ||
++      (uri.schemeIs("data") && !lazy.PlacesUtils.nodeIsBookmark(aURINode))
++    ) {
++      let browser = isJavaScriptURL && aWindow?.gBrowser?.selectedBrowser;
++      if (browser?.localName == "browser" && browser.isConnected) {
++        browser.dispatchEvent(
++          new aWindow.CustomEvent("DenBrowserBookmarkletBlocked", {
++            bubbles: true,
++          })
++        );
++        return false;
++      }
+       const [title, errorStr] =
+         PlacesUIUtils.promptLocalization.formatValuesSync([
+           "places-error-title",
+diff --git a/browser/locales/en-US/browser/browser.ftl b/browser/locales/en-US/browser/browser.ftl
+index 657f7450f87c..3c51c3378ca6 100644
+--- a/browser/locales/en-US/browser/browser.ftl
++++ b/browser/locales/en-US/browser/browser.ftl
+@@ -1330,6 +1330,7 @@ denbrowser-saving-blocked-infobar = Saving files is not available in this browse
+ denbrowser-printing-blocked-infobar = Printing is not available in this browser.
+ denbrowser-copying-blocked-infobar = Copying is not available for this site.
+ denbrowser-devtools-blocked-infobar = Developer tools are not available in this browser.
++denbrowser-bookmarklet-blocked-infobar = JavaScript bookmarks are not available in this browser.
+ 
+ ## Mozilla data reporting notification (Telemetry, Firefox Health Report, etc)
+ 
 diff --git a/toolkit/components/places/Bookmarks.sys.mjs b/toolkit/components/places/Bookmarks.sys.mjs
 index acd57c4ab931..119ecb14a8a9 100644
 --- a/toolkit/components/places/Bookmarks.sys.mjs
@@ -92,3 +182,36 @@ index acd57c4ab931..119ecb14a8a9 100644
      let info = { guid: parentGuid };
      info = validateBookmarkObject("Bookmarks.sys.mjs: reorder", info, {
        guid: { required: true },
+diff --git a/toolkit/components/places/PlacesUtils.sys.mjs b/toolkit/components/places/PlacesUtils.sys.mjs
+index d2d38fe6ed64..fe1f3e430d94 100644
+--- a/toolkit/components/places/PlacesUtils.sys.mjs
++++ b/toolkit/components/places/PlacesUtils.sys.mjs
+@@ -2465,6 +2465,8 @@ export var PlacesUtils = {
+       if (hasKeyword) {
+         keywordOrEntry.keyword = keywordOrEntry.keyword.trim().toLowerCase();
+       }
++      // DenBrowser: profile-backed bookmark keywords are disabled.
++      return Promise.resolve(null);
+       /** @type {(entry: KeywordEntry) => void} */
+       let safeOnResult = entry => {
+         if (onResult) {
+@@ -2559,6 +2561,10 @@ export var PlacesUtils = {
+         throw new Error(url + " is not a valid URL");
+       }
+ 
++      // DenBrowser: bookmark keywords are disabled.
++      return Promise.reject(
++        new Error("DenBrowser: bookmark keywords are disabled.")
++      );
+       return PlacesUtils.withConnectionWrapper(
+         "PlacesUtils.keywords.insert",
+         async db => {
+@@ -2921,6 +2927,8 @@ export var PlacesUtils = {
+      *  Whether the given word is a keyword.
+      */
+     isKeywordFromCache(keyword) {
++      // DenBrowser: profile-backed bookmark keywords are disabled.
++      return false;
+       return this._cache?.has(keyword);
+     },
+   },
