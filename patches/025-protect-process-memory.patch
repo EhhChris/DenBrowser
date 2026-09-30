@@ -485,7 +485,7 @@ index 000000000000..31786e048fc0
 +
 +#endif  // mozilla_DenBrowserProcessSecurity_h
 diff --git a/mozglue/misc/moz.build b/mozglue/misc/moz.build
-index 2099a46a24e0..ded5af740283 100644
+index c205bca526a3..eb2bb67129ba 100644
 --- a/mozglue/misc/moz.build
 +++ b/mozglue/misc/moz.build
 @@ -33,6 +33,7 @@ EXPORTS.mozilla.glue += [
@@ -496,7 +496,7 @@ index 2099a46a24e0..ded5af740283 100644
          "GetKnownFolderPath.h",
          "PreXULSkeletonUI.h",
          "StackWalk_windows.h",
-@@ -88,6 +89,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
+@@ -89,6 +90,7 @@ if CONFIG["OS_ARCH"] == "WINNT":
          "WindowsUnicode.h",
      ]
      SOURCES += [

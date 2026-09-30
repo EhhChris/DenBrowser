@@ -399,7 +399,7 @@ index 2309c29fb6f4..e05a6c6820d4 100644
  
    async handleDeleteEvent() {
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
-index 0122df8a7f1f..70d4b67e2b64 100644
+index 90e61367637d..b57b0d0045e4 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
 @@ -5621,6 +5621,19 @@ bool Document::ExecCommand(const nsAString& aHTMLCommandName, bool aShowUI,
@@ -423,10 +423,10 @@ index 0122df8a7f1f..70d4b67e2b64 100644
    //  this might add some ugly JS dependencies?
  
 diff --git a/dom/base/nsCopySupport.cpp b/dom/base/nsCopySupport.cpp
-index 24edb094bf17..6bff6963a459 100644
+index ed0e4980760a..4b785ae2756b 100644
 --- a/dom/base/nsCopySupport.cpp
 +++ b/dom/base/nsCopySupport.cpp
-@@ -66,6 +66,40 @@ static NS_DEFINE_CID(kCClipboardCID, NS_CLIPBOARD_CID);
+@@ -67,6 +67,40 @@ static NS_DEFINE_CID(kCClipboardCID, NS_CLIPBOARD_CID);
  static NS_DEFINE_CID(kCTransferableCID, NS_TRANSFERABLE_CID);
  static NS_DEFINE_CID(kHTMLConverterCID, NS_HTMLFORMATCONVERTER_CID);
  
@@ -467,7 +467,7 @@ index 24edb094bf17..6bff6963a459 100644
  // copy string data onto the transferable
  static nsresult AppendString(nsITransferable* aTransferable,
                               const nsAString& aString, const char* aFlavor);
-@@ -819,6 +853,30 @@ bool nsCopySupport::FireClipboardEvent(
+@@ -839,6 +873,30 @@ bool nsCopySupport::FireClipboardEvent(
    BrowsingContext* bc = piWindow->GetBrowsingContext();
    const bool chromeShell = bc && bc->IsChrome();
  
@@ -498,7 +498,7 @@ index 24edb094bf17..6bff6963a459 100644
    // next, fire the cut, copy or paste event
    bool doDefault = true;
    RefPtr<DataTransfer> clipboardData;
-@@ -879,6 +937,22 @@ bool nsCopySupport::FireClipboardEvent(
+@@ -899,6 +957,22 @@ bool nsCopySupport::FireClipboardEvent(
      if (aActionTaken) {
        *aActionTaken = true;
      }
@@ -522,10 +522,10 @@ index 24edb094bf17..6bff6963a459 100644
    }
  
 diff --git a/dom/events/Clipboard.cpp b/dom/events/Clipboard.cpp
-index 432b2c11fae9..a0965818b39c 100644
+index 6fff861948ab..a8b139f87c04 100644
 --- a/dom/events/Clipboard.cpp
 +++ b/dom/events/Clipboard.cpp
-@@ -323,6 +323,9 @@ void Clipboard::RequestRead(Promise* aPromise, ReadRequestType aType,
+@@ -324,6 +324,9 @@ void Clipboard::RequestRead(Promise* aPromise, ReadRequestType aType,
  already_AddRefed<Promise> Clipboard::ReadHelper(nsIPrincipal& aSubjectPrincipal,
                                                  ReadRequestType aType,
                                                  ErrorResult& aRv) {
@@ -535,7 +535,7 @@ index 432b2c11fae9..a0965818b39c 100644
    // Create a new promise
    nsGlobalWindowInner* owner = GetOwnerWindow();
    RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
-@@ -673,6 +676,19 @@ NS_IMPL_ISUPPORTS(ClipboardWriteCallback, nsIAsyncClipboardRequestCallback)
+@@ -674,6 +677,19 @@ NS_IMPL_ISUPPORTS(ClipboardWriteCallback, nsIAsyncClipboardRequestCallback)
  already_AddRefed<Promise> Clipboard::Write(
      const Sequence<OwningNonNull<ClipboardItem>>& aData,
      nsIPrincipal& aSubjectPrincipal, ErrorResult& aRv) {
@@ -556,7 +556,7 @@ index 432b2c11fae9..a0965818b39c 100644
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
    RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index ffdec6acc45f..5560c0bcae99 100644
+index 448eb85acde2..dbaca20b21c3 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -135,6 +135,8 @@
@@ -829,7 +829,7 @@ index ffdec6acc45f..5560c0bcae99 100644
    nsresult rv;
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
    NS_ENSURE_SUCCESS(rv, IPC_OK());
-@@ -3522,6 +3749,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
+@@ -3521,6 +3748,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -853,7 +853,7 @@ index ffdec6acc45f..5560c0bcae99 100644
    nsresult rv;
    // Retrieve clipboard
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
-@@ -3559,6 +3803,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
+@@ -3558,6 +3802,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -882,7 +882,7 @@ index ffdec6acc45f..5560c0bcae99 100644
    if (!clipboard) {
      *aRequestOrError = NS_ERROR_FAILURE;
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index 4e7694702d76..8ee13b89efe4 100644
+index 1e1bf554e866..9e56d0d012ff 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
 @@ -975,7 +975,8 @@ class ContentParent final : public PContentParent,
@@ -908,7 +908,7 @@ index 4e7694702d76..8ee13b89efe4 100644
        nsTArray<nsCString>&& aTypes,
        const nsIClipboard::ClipboardType& aWhichClipboard,
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 23fb64851635..43a98404ca1f 100644
+index 1e6977f6672c..20224502928f 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
 @@ -1237,7 +1237,9 @@ parent:

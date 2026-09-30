@@ -51,10 +51,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
-index b6200c23171f..b9c05a574e9d 100644
+index b6200c23171f..171f60ce2a0b 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3924,6 +3924,545 @@ void Preferences::SetupTelemetryPref() {
+@@ -3924,6 +3924,542 @@ void Preferences::SetupTelemetryPref() {
  
  #endif  // MOZ_WIDGET_ANDROID
  
@@ -67,7 +67,7 @@ index b6200c23171f..b9c05a574e9d 100644
 +// on-disk mozilla.cfg cannot win — even one with the SAME pref names but
 +// different values is overwritten here.
 +//
-+// 175 prefs locked.
++// 174 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
@@ -592,15 +592,12 @@ index b6200c23171f..b9c05a574e9d 100644
 +  Preferences::SetBool("network.protocol-handler.expose.file", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("network.protocol-handler.expose.file");
-+  Preferences::SetBool("network.file.disable_unc_paths", true,
-+                       PrefValueKind::Default);
-+  Preferences::Lock("network.file.disable_unc_paths");
 +}
 +
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -3975,6 +4514,11 @@ already_AddRefed<Preferences> Preferences::GetInstanceForService() {
+@@ -3975,6 +4511,11 @@ already_AddRefed<Preferences> Preferences::GetInstanceForService() {
            "pref-config-startup");
      }
  

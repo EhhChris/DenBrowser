@@ -313,7 +313,7 @@ index 29c5b1510696..e45e09c1c0ee 100644
  
      if (
 diff --git a/docshell/base/CanonicalBrowsingContext.cpp b/docshell/base/CanonicalBrowsingContext.cpp
-index d96248fcc4ce..45aabd059eec 100644
+index 6773d17d8899..55cf84cd878c 100644
 --- a/docshell/base/CanonicalBrowsingContext.cpp
 +++ b/docshell/base/CanonicalBrowsingContext.cpp
 @@ -967,6 +967,8 @@ already_AddRefed<Promise> CanonicalBrowsingContext::PrintJS(
@@ -335,7 +335,7 @@ index d96248fcc4ce..45aabd059eec 100644
    return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
  #else
 diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
-index 89649eb2f2b3..251ae80523ad 100644
+index e6e2e98e3622..dc82b4be3798 100644
 --- a/dom/base/nsGlobalWindowOuter.cpp
 +++ b/dom/base/nsGlobalWindowOuter.cpp
 @@ -263,6 +263,8 @@ using mozilla::OriginAttributes;
