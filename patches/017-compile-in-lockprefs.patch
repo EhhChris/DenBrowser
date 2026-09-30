@@ -67,7 +67,7 @@ index b6200c23171f..b9c05a574e9d 100644
 +// on-disk mozilla.cfg cannot win — even one with the SAME pref names but
 +// different values is overwritten here.
 +//
-+// 175 prefs locked.
++// 174 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
