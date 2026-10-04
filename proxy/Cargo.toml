@@ -9,10 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 # `openssl` feature enables TLS termination at the listen socket.
-pingora-core   = { version = "0.8", features = ["openssl"] }
-pingora-proxy  = { version = "0.8", features = ["openssl"] }
-pingora-http   = "0.8"
-pingora-limits = "0.8"
+pingora-core   = { version = "0.9", features = ["openssl"] }
+pingora-proxy  = { version = "0.9", features = ["openssl"] }
+pingora-http   = "0.9"
+pingora-limits = "0.9"
 
 async-trait = "0.1"
 
