@@ -170,7 +170,8 @@ reasons! {
     BodyReadFailed               => "body_read_failed",                Downstream,         Low;
     /// The upstream could not be reached or failed mid-exchange.
     UpstreamError                => "upstream_error",                  Upstream,           Medium;
-    /// The client's connection failed mid-exchange.
+    /// The client's connection failed mid-exchange, or pingora refused the
+    /// forwarded request's `Connection` header (400).
     DownstreamError              => "downstream_error",                Downstream,         Low;
     /// The proxy failed, or the request ended before a decision was recorded.
     InternalError                => "internal_error",                  Internal,           Medium;

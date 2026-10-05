@@ -310,7 +310,7 @@
         },
         {
           "const": "downstream_error",
-          "description": "The request was forwarded (or bypassed) but the client's connection failed mid-exchange, typically a user closing a tab during a download. transfer shows how far it got.",
+          "description": "The request was forwarded (or bypassed) but the client's connection failed mid-exchange, typically a user closing a tab during a download. transfer shows how far it got. With status 400 instead: pingora refused the request's Connection header after attestation passed (it nominates Host or X-Forwarded-*, a non-token, or ten or more names), which browsers never send.",
           "x-stage": "downstream",
           "x-risk": "low"
         },

@@ -37,6 +37,14 @@ TLS handshake failures, such as a client with no certificate when `[mtls]` is
 on, happen before any HTTP request exists. They appear only as pingora `system`
 lines (`Downstream handshake error from <ip>:<port> …`), never as audit records.
 
+Requests pingora itself refuses before `request_filter` runs (a malformed
+request line, a duplicate or ambiguous `Host`, bad framing) get no audit record
+either: pingora answers them `400` without calling the proxy. Since pingora
+0.9.0 its `system` line for them is logged at `debug` only, so at `info` they
+leave no trace. That line carries the raw request, attestation token and
+machine certificate included, so keep `pingora_proxy` at `info` or above in
+production.
+
 ## Audit record fields
 
 Every audit record has every field below. A value that doesn't apply is `null`;
@@ -125,7 +133,7 @@ attestation failure exactly when its stage starts with `attestation_`.
 | `body_hash_mismatch` | `attestation_body` | **critical** | 403 | Body altered after it was attested. |
 | `body_read_failed` | `downstream` | low | 400 | Client didn't deliver the body. |
 | `upstream_error` | `upstream` | medium | 502 | Upstream unreachable or failed mid-exchange. |
-| `downstream_error` | `downstream` | low | — | Client disconnected mid-exchange. |
+| `downstream_error` | `downstream` | low | — / 400 | Client disconnected mid-exchange. `400`: pingora refused the forwarded request's `Connection` header (nominates `Host` or `X-Forwarded-*`, a non-token, or ten or more names); browsers never send one. |
 | `internal_error` | `internal` | medium | 500 | Proxy failure; pingora logs detail as a `system` line. |
 
 ## What is not recorded
