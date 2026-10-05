@@ -6,10 +6,14 @@
 1. **How many requests per second can one instance serve before it is
    overwhelmed?** — measured by ramping concurrency until latency blows up,
    connections start erroring/timing out, or throughput stops climbing.
-2. **Is rate limiting kicking in?** — detected via HTTP `429` / `Retry-After`,
-   or via otherwise-valid requests being refused while the transport stays
-   healthy. (The proxy has no rate limiting *yet*; this is here so the day it
-   is added, the script already flags it.)
+2. **Is rate limiting kicking in?** — the proxy's `[rate_limiting]` answers
+   `429` *before* attestation runs when a client IP exceeds its cap (the proxy
+   sends no `Retry-After`). Detected via `429`, or via otherwise-valid requests
+   being refused while the transport stays healthy.
+
+The tool speaks HTTP/1.1 (`requests`). The proxy offers HTTP/2 to browsers, so
+its numbers describe the HTTP/1.1 path; the HTTP/2 path is covered by
+`test/attestation/test_roundtrip.py`.
 
 It does **not** modify the proxy, and it never needs the proxy *private* key —
 only the public key (`build/proxy-public.pem`), exactly like a real DenBrowser
@@ -49,18 +53,38 @@ pip install cryptography requests
 # One-time key + cert material (writes to build/, gitignored):
 scripts/gen-attest-key.sh
 scripts/gen-proxy-tls.sh
-scripts/gen-user-cert.sh      # only if testing with [mtls] enabled
-
-# Build and start the containerized proxy and its private nginx upstream (see
-# test/minimal-proxy-stack/). The stack's config enables mTLS and mounts the
-# generated build/user-ca.crt into the proxy.
-docker compose -f test/minimal-proxy-stack/compose.yml up --build -d
+scripts/gen-user-cert.sh                      # only if testing with [mtls] enabled
+scripts/gen-machine-cert.sh --cn localhost    # only if [machine_identity] is enabled
 ```
 
 If the proxy is run with `[mtls]` enabled (client_ca = `build/user-ca.crt`), the
 stress client must present a user certificate. `scripts/gen-user-cert.sh` writes
 `build/user-cert.{crt,key}`, which the tester picks up automatically (see
-`--client-cert` below).
+`--client-cert` below). If `[machine_identity]` is enabled, every request must
+also carry a machine certificate whose Common Name resolves to the address the
+load comes from (see `--machine-cert`); `--cn localhost` fits a proxy run
+directly on this host.
+
+The minimal Compose stack (`test/minimal-proxy-stack/`) enables mTLS, machine
+identity *and* a 100 requests/second/IP cap. Driving it from the host through
+the published port fails the machine check (the proxy sees Docker's NAT
+gateway, which no certificate names), so run the tool inside the stack's
+network, where the `machine-client` alias resolves to the client container and
+the secrets are already mounted:
+
+```bash
+scripts/gen-proxy-tls.sh --name compose-proxy --host proxy --san localhost
+scripts/gen-machine-cert.sh --cn machine-client
+docker compose -f test/minimal-proxy-stack/compose.yml up --build -d
+docker compose -f test/minimal-proxy-stack/compose.yml run --use-aliases --rm \
+  -v "$PWD/proxy/stress:/stress:ro" --entrypoint python3 machine-client \
+  -u /stress/denbrowser_stress.py --host proxy -m valid -c 20 -d 10
+```
+
+Expect that run to report `rate-limiting: DETECTED` with most responses `429`:
+one container is one IP, and 20 workers exceed 100 requests/second. To measure
+capacity rather than the limiter, raise or disable `[rate_limiting]` in
+`test/minimal-proxy-stack/config.toml` first.
 
 ## Usage
 
@@ -103,6 +127,7 @@ python3 proxy/stress/denbrowser_stress.py -m reject -c 100 -d 10 --insecure
 - `-d/--duration SECS` — run for a wall-clock duration (default `10` if neither
   `-d` nor `-n` is given).
 - `-n/--requests N` — stop after N total requests (overrides `-d`).
+- `--timeout SECS` — per-request timeout (default `10`).
 - `--ramp` — step concurrency through `--ramp-steps`
   (default `10,25,50,100,200,400,800`), `--stage-duration` seconds each, and
   report the peak sustained throughput plus the saturation knee.
@@ -120,6 +145,11 @@ python3 proxy/stress/denbrowser_stress.py -m reject -c 100 -d 10 --insecure
   `scripts/gen-user-cert.sh`). Presented only when both files exist, so it is a
   no-op against a proxy without mTLS. Override with the `DENBROWSER_CLIENT_CERT`
   / `DENBROWSER_CLIENT_KEY` env vars.
+- `--machine-cert PATH` — machine certificate for the proxy's
+  `[machine_identity]` layer, sent as `X-DenBrowser-Machine-Cert` (default
+  `build/machine-cert.crt` from `scripts/gen-machine-cert.sh`; sent only if the
+  file exists). Its Common Name must resolve to the address the load is driven
+  from. Override with `DENBROWSER_MACHINE_CERT`.
 
 ### Detection thresholds
 
@@ -149,8 +179,11 @@ Each run prints:
   nonzero count means either the proxy misbehaved or (for valid traffic) it
   started refusing — see the rate-limit line.
 - **overwhelmed** — `YES` when error rate or p99 crosses the thresholds.
-- **rate-limiting** — `DETECTED` when `429`/`Retry-After` appears, or when valid
-  requests are refused while the transport is healthy.
+- **rate-limiting** — `DETECTED` when `429` appears (the proxy sends no
+  `Retry-After`), or when valid requests are refused while the transport is
+  healthy. Against a proxy with `[rate_limiting]` on, a single client that
+  exceeds its per-IP cap is *supposed* to see this; it is only a finding when
+  the configured cap should not have been reached.
 
 In `--ramp` mode the per-stage table ends with a summary giving **peak
 sustained throughput** and the **saturation knee** (the concurrency past which
@@ -160,7 +193,8 @@ single instance is overwhelmed" answer.
 ## Notes & caveats
 
 - **This Python generator is usually the bottleneck, not the proxy.** In local
-  measurement (4 vCPU Xeon @ 2.10 GHz, 16 GiB) the proxy stayed remarkably light
+  measurement (4 vCPU Xeon @ 2.10 GHz, 16 GiB; an earlier build, before rate
+  limiting and machine identity existed) the proxy stayed remarkably light
   while *the client* saturated:
 
   | Load (12s)              | req/s        | proxy CPU  | proxy RSS | box busy   |
@@ -185,11 +219,12 @@ single instance is overwhelmed" answer.
   reject throughput (~41 req/s here) sits an order of magnitude below valid
   keep-alive throughput and pegged the box at ~3.7/4 cores — almost all of it
   connection-churn cost, split between client and kernel. Security-relevant: a
-  flood of invalid tokens is a cheap way to force constant TLS handshakes, which
-  is exactly what future rate limiting (ideally rejecting *before* the
-  handshake, or per-source connection caps) should blunt. Use `-m reject` /
-  `-m attacks` to exercise this path and `-m valid` to exercise steady-state
-  compute.
+  flood of invalid tokens is a cheap way to force constant TLS handshakes.
+  `[rate_limiting]` sheds such a flood with `429` before attestation runs, but
+  by then the handshake has already been paid for; blunting the handshake cost
+  itself needs per-source connection limits in front of the proxy. Use
+  `-m reject` / `-m attacks` to exercise this path and `-m valid` to exercise
+  steady-state compute.
 - **Replay priming.** `replay` mode first sends a few real valid requests so the
   proxy commits their nonces, then resends them (re-priming every ~20s to stay
   inside the timestamp window) so the rejection is genuinely `NonceReplay` and
@@ -197,11 +232,12 @@ single instance is overwhelmed" answer.
 - **Memory is not the constraint for header traffic.** The proxy's footprint is
   dominated by fixed runtime, not per-request state. The nonce cache holds only
   a 16-byte key + timestamp per committed request and is swept on a 90s TTL, so
-  even sustained thousands-per-second valid traffic adds single-digit MB. The
-  one real memory vector is **request bodies**: `request_body_filter` buffers the
-  whole body (up to `MAX_BODY_BYTES`, 10 MB) before forwarding, so worst-case
-  memory ≈ concurrent-uploads × body size. This tool sends tiny bodies, so it
-  does not exercise that path — test it deliberately with large `-m tamper`-style
-  POSTs if body-buffer memory is a concern.
+  even sustained thousands-per-second valid traffic adds single-digit MB.
+  Request bodies are bounded too: a body whose hash is bound into the token is
+  buffered in Pingora's 64 KiB retry buffer and anything larger is answered
+  `413`, while an *unbound* upload streams straight through without buffering.
+  Worst-case body memory is therefore concurrent bound uploads × 64 KiB. This
+  tool sends tiny bodies and does not exercise either path; the body boundary
+  cases live in `test/attestation/test_roundtrip.py`.
 - **Attack templates refresh** every ~20s so their timestamps stay inside the
   drift window and keep tripping their *intended* check.
