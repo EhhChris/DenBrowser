@@ -24,6 +24,24 @@ upstream = "localhost:8443"
 tls_cert = "../build/proxy-tls.crt"
 tls_key = "../build/proxy-tls.key"
 
+# OPTIONAL. Passphrase for an encrypted tls_key, in either PEM form OpenSSL
+# writes: PKCS#8 ("BEGIN ENCRYPTED PRIVATE KEY") or the legacy
+# "Proc-Type: 4,ENCRYPTED". Leave both unset for a plaintext key, and set at
+# most one: startup rejects both. A passphrase set for a plaintext key is
+# logged as unused.
+#
+# Prefer the file. It keeps the secret out of this config, which is often
+# committed or widely readable, and suits Docker/Kubernetes secrets and systemd
+# credentials. Only its first line is read, without the line ending, as with
+# OpenSSL's `-passin file:`. Relative paths resolve against the proxy's working
+# directory. To encrypt an existing key with that file:
+#   openssl pkey -in proxy-tls.key -aes256 -passout file:proxy-tls.pass -out proxy-tls.key.enc
+#
+# An encrypted key with neither set aborts startup with an error naming these
+# settings, instead of waiting on OpenSSL's terminal passphrase prompt.
+# tls_key_passphrase_file = "/run/secrets/proxy_tls_key_passphrase"
+# tls_key_passphrase = "..."
+
 # ---------------------------------------------------------------------------
 
 [attestation]
