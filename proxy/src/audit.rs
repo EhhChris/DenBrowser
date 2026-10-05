@@ -119,7 +119,7 @@ reasons! {
     /// None of the attestation headers were sent: not DenBrowser, or a
     /// DenBrowser not configured for this proxy.
     NoAttestationHeaders         => "no_attestation_headers",          AttestationHeaders, Low;
-    /// Some attestation headers (or the Host header) are missing or unreadable,
+    /// Some attestation headers (or the host) are missing or unreadable,
     /// or a machine certificate arrived without any attestation.
     IncompleteAttestationHeaders => "incomplete_attestation_headers",  AttestationHeaders, High;
     /// Machine identity is required and no certificate was sent.
@@ -363,7 +363,8 @@ pub struct AttestationFields {
     pub body_binding: Option<Binding>,
 }
 
-/// The server the client asked for: the Host header, port removed.
+/// The server the client asked for: the Host header (`:authority` over
+/// HTTP/2), port removed.
 #[derive(Debug, Serialize)]
 pub struct ServerFields {
     pub address: Option<String>,
@@ -500,7 +501,7 @@ impl RequestAudit {
         }
     }
 
-    /// The method and Host header (port removed); never the path.
+    /// The method and host (Host or `:authority`, port removed); never the path.
     pub fn request(&mut self, method: &str, host: Option<&str>) {
         self.method = Some(bounded(method, MAX_METHOD_CHARS));
         self.host = host.map(|h| bounded(h, MAX_HOST_CHARS));

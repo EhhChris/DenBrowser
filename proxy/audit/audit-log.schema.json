@@ -143,7 +143,7 @@
       "enum": ["info", "low", "medium", "high", "critical"]
     },
     "stage": {
-      "description": "Where in the request pipeline a failure was detected, in the order the checks run (machine_identity's presence check runs before attestation_token, its verification after). rate_limit: per-IP caps. attestation_headers: presence of X-DenBrowser-Ts/-Nonce/-Token and Host. machine_identity: the workstation certificate. attestation_token: timestamp window, nonce, decryption, request binding. attestation_body: size limit and hash of a bound body. upstream / downstream / internal: a transport or proxy failure. A failure is an attestation failure exactly when its stage starts with attestation_.",
+      "description": "Where in the request pipeline a failure was detected, in the order the checks run (machine_identity's presence check runs before attestation_token, its verification after). rate_limit: per-IP caps. attestation_headers: presence of X-DenBrowser-Ts/-Nonce/-Token and the host (Host, or :authority over HTTP/2). machine_identity: the workstation certificate. attestation_token: timestamp window, nonce, decryption, request binding. attestation_body: size limit and hash of a bound body. upstream / downstream / internal: a transport or proxy failure. A failure is an attestation failure exactly when its stage starts with attestation_.",
       "enum": [
         "rate_limit",
         "attestation_headers",
@@ -172,7 +172,7 @@
         },
         {
           "const": "incomplete_attestation_headers",
-          "description": "Some attestation headers were sent but not all (or one is not readable as a header string, or the Host header is missing), or a machine certificate arrived without any attestation. DenBrowser always sends the full set, so this is a client that knows the protocol and is getting it wrong. HTTP 403.",
+          "description": "Some attestation headers were sent but not all (or one is not readable as a header string, or there is no host: no Host header and, over HTTP/2, no :authority), or a machine certificate arrived without any attestation. DenBrowser always sends the full set, so this is a client that knows the protocol and is getting it wrong. HTTP 403.",
           "x-stage": "attestation_headers",
           "x-risk": "high"
         },
@@ -458,7 +458,7 @@
       "required": ["address"],
       "properties": {
         "address": {
-          "description": "Host header with any port removed, cut to 256 characters; null when absent.",
+          "description": "Host header (over HTTP/2, the :authority pseudo-header) with any port removed, cut to 256 characters; null when absent.",
           "type": ["string", "null"]
         }
       }

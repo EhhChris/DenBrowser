@@ -177,9 +177,11 @@ single instance is overwhelmed" answer.
   real limit, drive it with a multi-process or multi-host generator (or a
   non-Python tool); `--calibrate` reports the single-thread mint rate so you can
   see the client ceiling coming.
-- **Rejections are far more expensive per request than accepts.** A `403` closes
-  the connection, so the client can't keep-alive and every *next* rejected
-  request re-handshakes (the proxy's RSA private-key op included). That's why
+- **Rejections are far more expensive per request than accepts.** For an
+  HTTP/1.1 client such as this tool a `403` closes the connection, so the client
+  can't keep-alive and every *next* rejected request re-handshakes (the proxy's
+  RSA private-key op included). (A browser on HTTP/2 keeps its connection: the
+  proxy resets only the rejected stream.) That's why
   reject throughput (~41 req/s here) sits an order of magnitude below valid
   keep-alive throughput and pegged the box at ~3.7/4 cores — almost all of it
   connection-churn cost, split between client and kernel. Security-relevant: a

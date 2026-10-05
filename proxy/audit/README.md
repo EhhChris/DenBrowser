@@ -66,7 +66,7 @@ the field is never omitted.
 | `message` | Human-readable account. Never contains the URL path. |
 | `proxy.ip`, `proxy.port` | The proxy's own address on this connection: the local socket the client reached, not the configured (possibly wildcard) listen address. |
 | `client.address`, `client.ip`, `client.port` | The connecting host. `address` and `ip` hold the same IP: `address` is the OTel and ECS name, `ip` the ECS one. |
-| `server.address` | The host the client asked for (Host header, port removed). |
+| `server.address` | The host the client asked for (Host header, or `:authority` over HTTP/2; port removed). |
 | `tls.client.subject` | Subject DN of the mTLS user certificate (verified at the handshake). `null` when `[mtls]` is off. |
 | `machine.subject_dn` | Subject DN of the presented machine certificate, **whenever one could be parsed**, including certificates that failed or never reached verification. Trust it only when `machine.chain_verified` is `true`. |
 | `machine.status` | `verified`, `failed`, `absent` (not sent, not required), `not_evaluated` (refused or bypassed first), or `disabled`. |
