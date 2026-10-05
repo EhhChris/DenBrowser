@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
-use pingora_core::tls::ssl::{SslFiletype, SslVerifyMode};
+use pingora_core::tls::ssl::{SslAcceptor, SslMethod, SslVerifyMode};
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_core::Result;
 use pingora_http::RequestHeader;
@@ -19,6 +19,7 @@ mod machine;
 mod mtls;
 mod passthrough;
 mod ratelimit;
+mod tls_key;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
 use machine::MachineIdentity;
@@ -544,48 +545,58 @@ fn main() {
     // a pin baked into the build (see DenBrowserAttest.cpp::kProxySpkiSha256),
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
-    let tls = match &mtls {
-        // mTLS on: build the acceptor with the identity-recording callback and
-        // hard-require a client cert — request one AND fail the handshake if it
-        // is absent or does not chain to the configured CA.  A client without a
-        // valid certificate never reaches the request path.
-        Some(m) => {
-            let mut tls = TlsSettings::with_callbacks(m.tls_callbacks())
-                .unwrap_or_else(|e| fatal(format!("TLS callback setup failed: {e}")));
-            tls.set_certificate_chain_file(&config.proxy.tls_cert)
-                .unwrap_or_else(|e| {
-                    fatal(format!("TLS cert load failed ({}): {e}", config.proxy.tls_cert))
-                });
-            tls.set_private_key_file(&config.proxy.tls_key, SslFiletype::PEM)
-                .unwrap_or_else(|e| {
-                    fatal(format!("TLS key load failed ({}): {e}", config.proxy.tls_key))
-                });
-            tls.set_ca_file(m.ca_path())
-                .unwrap_or_else(|e| fatal(format!("mTLS CA load failed ({}): {e}", m.ca_path())));
-            // Advertise the acceptable issuer(s) in the CertificateRequest.  The
-            // call above populates only the *verification* store
-            // (SSL_CTX_load_verify_locations) and leaves `certificate_authorities`
-            // empty, which tells the client "any certificate will do".  A browser
-            // whose store holds more than one client certificate then either
-            // prompts with a picker or offers the wrong one — and the wrong one
-            // fails the verification below, surfacing as a bare TLS error with no
-            // diagnostic.  Naming the CA lets the client filter to one identity.
-            for ca in m.ca_certs() {
-                tls.add_client_ca(ca)
-                    .unwrap_or_else(|e| fatal(format!("mTLS client CA list setup failed: {e}")));
-            }
-            tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-            tls
-        }
-        // mTLS off: the original listener, unchanged — no client cert requested.
-        None => TlsSettings::intermediate(&config.proxy.tls_cert, &config.proxy.tls_key)
-            .unwrap_or_else(|e| {
-                fatal(format!(
-                    "TLS cert/key load failed ({}, {}): {e}",
-                    config.proxy.tls_cert, config.proxy.tls_key
-                ))
-            }),
+    //
+    // The key is read and, when encrypted, decrypted here (see `tls_key`), then
+    // installed as a key rather than a path: OpenSSL's path-based loader has no
+    // way to be given a passphrase.
+    let listener_key = tls_key::load(&config.proxy).unwrap_or_else(|e| fatal(e));
+    // Both arms start from the Mozilla-intermediate acceptor that
+    // `TlsSettings::intermediate` builds, without its path-based key loading;
+    // mTLS adds the callback that records the verified client identity.
+    let mut tls = match &mtls {
+        Some(m) => TlsSettings::with_callbacks(m.tls_callbacks())
+            .unwrap_or_else(|e| fatal(format!("TLS callback setup failed: {e}"))),
+        None => SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
+            .map(TlsSettings::from)
+            .unwrap_or_else(|e| fatal(format!("TLS acceptor setup failed: {e}"))),
     };
+    tls.set_certificate_chain_file(&config.proxy.tls_cert)
+        .unwrap_or_else(|e| {
+            fatal(format!("TLS cert load failed ({}): {e}", config.proxy.tls_cert))
+        });
+    // Installed after the certificate, so OpenSSL checks the two belong
+    // together; the explicit check also catches a key of a different type,
+    // which OpenSSL would otherwise accept and leave the listener failing every
+    // handshake.
+    tls.set_private_key(&listener_key)
+        .and_then(|()| tls.check_private_key())
+        .unwrap_or_else(|e| {
+            fatal(format!(
+                "TLS key load failed ({}): {e} — is it the private key for {}?",
+                config.proxy.tls_key, config.proxy.tls_cert
+            ))
+        });
+    // mTLS on: hard-require a client cert — request one AND fail the handshake
+    // if it is absent or does not chain to the configured CA.  A client without
+    // a valid certificate never reaches the request path.  mTLS off: no client
+    // certificate is requested.
+    if let Some(m) = &mtls {
+        tls.set_ca_file(m.ca_path())
+            .unwrap_or_else(|e| fatal(format!("mTLS CA load failed ({}): {e}", m.ca_path())));
+        // Advertise the acceptable issuer(s) in the CertificateRequest.  The
+        // call above populates only the *verification* store
+        // (SSL_CTX_load_verify_locations) and leaves `certificate_authorities`
+        // empty, which tells the client "any certificate will do".  A browser
+        // whose store holds more than one client certificate then either
+        // prompts with a picker or offers the wrong one — and the wrong one
+        // fails the verification below, surfacing as a bare TLS error with no
+        // diagnostic.  Naming the CA lets the client filter to one identity.
+        for ca in m.ca_certs() {
+            tls.add_client_ca(ca)
+                .unwrap_or_else(|e| fatal(format!("mTLS client CA list setup failed: {e}")));
+        }
+        tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    }
     svc.add_tls_with_settings(&config.proxy.listen, None, tls);
 
     info!(

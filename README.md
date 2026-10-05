@@ -280,6 +280,23 @@ tls_key = "/etc/denbrowser/partner-a-tls.key"
 the certificate and key are PEM files, and the certificate's SPKI must match
 the pin compiled into DenBrowser for this proxy.
 
+The key may be passphrase-protected, in either PEM form OpenSSL writes (PKCS#8
+`ENCRYPTED PRIVATE KEY` or the legacy `Proc-Type: 4,ENCRYPTED`). Supply the
+passphrase with **one** of two optional settings: `tls_key_passphrase_file`, a
+file whose first line is the passphrase, or `tls_key_passphrase` inline. Prefer
+the file — it keeps the secret out of the config and fits Docker or Kubernetes
+secrets and systemd credentials:
+
+```toml
+[proxy]
+tls_key = "/etc/denbrowser/partner-a-tls.key"
+tls_key_passphrase_file = "/run/secrets/partner-a-tls-key-passphrase"
+```
+
+Setting both is a startup error, and so is an encrypted key with neither: the
+proxy names the missing setting rather than stopping at OpenSSL's interactive
+passphrase prompt, which would hang a foreground run and abort a service.
+
 **Attestation key** (`[attestation]`) is also required — it names
 this proxy's EC P-256 attestation private key, the private half of the public key
 baked into the browser build for it:
