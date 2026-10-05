@@ -653,6 +653,26 @@ fn main() {
         }
         tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
     }
+    // TLS session resumption.  OpenSSL resumes a session on a context that
+    // verifies client certificates only if the application has set a
+    // session-ID context: the tag stored in every session that stops a session
+    // established under one verification policy from being resumed under
+    // another.  Without it, every resumption attempt by a client that cached a
+    // session (Firefox does, for TLS 1.3 tickets and TLS 1.2 session IDs)
+    // fails the handshake with "session id context uninitialized" and costs a
+    // second, full handshake plus an error line here.  Set unconditionally so
+    // the behaviour does not depend on whether mTLS is on.
+    //
+    // What resumption means for mTLS: a resumed handshake does not re-verify
+    // the client certificate.  `mtls::Recorder` still runs and records the
+    // identity from the certificate stored in the session, which was verified
+    // at the full handshake.  Sessions and tickets live for OpenSSL's default
+    // 7200 s, there is no 0-RTT early data, and a restart clears every session
+    // and the ticket key.  The proxy performs no revocation checking, so
+    // nothing checked at a full handshake goes unchecked on a resumed one,
+    // except expiry inside that window.
+    tls.set_session_id_context(b"denbrowser-proxy")
+        .unwrap_or_else(|e| fatal(format!("TLS session-ID context setup failed: {e}")));
     tls.enable_h2();
     svc.add_tls_with_settings(&config.proxy.listen, None, tls);
 

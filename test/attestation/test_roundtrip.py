@@ -515,6 +515,27 @@ def _run_h2(pub_key):
         print(f"  FAIL  {label}  (expected '403 1 200 0', got {' '.join(lines)!r})")
         failed += 1
 
+    # Over HTTP/1.1 a 403 closes the connection, and curl's next transfer
+    # reconnects offering the cached TLS session.  The proxy must resume it:
+    # without a session-ID context OpenSSL refuses any resumption on a
+    # client-authenticated listener and curl fails with exit code 35.
+    label = "HTTP/1.1: reconnect after a 403 resumes the TLS session"
+    cmd = base("--http1.1") + ["--write-out", "%{http_code} %{num_connects}\n",
+                               f"{PROXY_URL}/", "--next"]
+    cmd += with_headers(base("--http1.1")[1:], attest("GET", "/"))
+    cmd += ["--write-out", "%{http_code} %{num_connects}\n", f"{PROXY_URL}/"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        lines, code = proc.stdout.split(), proc.returncode
+    except Exception as exc:
+        lines, code = [repr(exc)], -1
+    if lines == ["403", "1", "200", "1"] and code == 0:
+        print(f"  PASS  {label}  (403, then 200 on a new connection)")
+        passed += 1
+    else:
+        print(f"  FAIL  {label}  (expected '403 1 200 1' exit 0, got {' '.join(lines)!r} exit {code})")
+        failed += 1
+
     print(f"\n  {passed} passed, {failed} failed  (HTTP/2)")
     return failed == 0
 

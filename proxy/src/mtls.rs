@@ -13,6 +13,10 @@
 //! as a [`ClientCert`].  Because the handshake already enforced validity, the
 //! callback does not re-verify — it only extracts the identity so the request
 //! path can read it (for logging, and for the bypass subject allowlist).
+//! That includes resumed handshakes: `main` sets a session-ID context so
+//! client-authenticated sessions can be resumed, and on a resumed connection
+//! `peer_certificate()` returns the certificate stored in the session, which
+//! was verified at the full handshake that created it.
 //!
 //! mTLS is one orthogonal layer among four: it authenticates the *user* (client
 //! → proxy), TLS SPKI pinning authenticates the *proxy* to the browser (proxy →

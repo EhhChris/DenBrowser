@@ -446,6 +446,15 @@ none of the others:
   client_ca = "/etc/denbrowser/user-ca.pem"
   ```
 
+  TLS sessions are resumable.  The listener sets a session-ID context, which
+  OpenSSL requires before it will resume a client-authenticated session; without
+  one, every resumption attempt by a browser that cached a session failed its
+  handshake and cost a second, full handshake.  A resumed handshake does not
+  re-verify the client certificate: the identity recorded for the connection is
+  the one verified at the full handshake that created the session, and sessions
+  live for OpenSSL's default of two hours.  No 0-RTT data is accepted, and a
+  proxy restart invalidates every session.
+
 **Machine identity** (`[machine_identity]`) records *which workstation* a
 request came from.  The browser sends its machine certificate as base64 DER in
 `X-DenBrowser-Machine-Cert` on every request claimed by the configured
