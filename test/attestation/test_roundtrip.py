@@ -7,6 +7,7 @@ validates the full path: test client → denbrowser-proxy (Pingora) → upstream
 
 Requirements:
     pip install cryptography requests
+    curl        (for the HTTP/2 cases; they are skipped when it is absent)
 
 Usage (from repo root):
     scripts/gen-attest-key.sh
@@ -44,9 +45,13 @@ Machine identity:
 import base64
 import hashlib
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import warnings
+from urllib.parse import urlparse
 
 import requests
 from urllib3.exceptions import InsecureRequestWarning
@@ -388,6 +393,132 @@ def _run(pub_key):
     return failed == 0
 
 
+def _run_h2(pub_key):
+    """The HTTP/2 path, driven by curl.
+
+    ``requests`` speaks HTTP/1.1 only, but the proxy offers HTTP/2 first via
+    ALPN, so a browser lands here.  Over HTTP/2 there is no Host header: curl
+    derives ``:authority`` from the URL, which is also the host the token must
+    bind, exactly as the browser does.  Every attestation check is the same code
+    path as over HTTP/1.1; what these cases pin is that the negotiation happens,
+    that the checks still fire, and that a rejection no longer costs the
+    connection.
+    """
+    curl = shutil.which("curl")
+    if curl is None:
+        print("  SKIP  HTTP/2 cases (curl not found)")
+        return True
+    host = urlparse(PROXY_URL).hostname
+    passed = failed = 0
+
+    def base(http):
+        cmd = [curl, http, "--silent", "--output", os.devnull, "--max-time", "30"]
+        cmd += ["--cacert", VERIFY] if isinstance(VERIFY, str) else ["--insecure"]
+        if CLIENT_CERT:
+            cmd += ["--cert", CLIENT_CERT[0], "--key", CLIENT_CERT[1]]
+        return cmd
+
+    def with_headers(cmd, headers):
+        full = dict(headers)
+        if MACHINE_IDENTITY_ENABLED and MACHINE_CERT is not None:
+            full["X-DenBrowser-Machine-Cert"] = MACHINE_CERT
+        for k, v in full.items():
+            cmd += ["-H", f"{k}: {v}"]
+        return cmd
+
+    def check(label, *, method, path, body, headers, expect, http="--http2",
+              version="2"):
+        nonlocal passed, failed
+        cmd = with_headers(base(http), headers)
+        cmd += ["--request", method, "--write-out", "%{http_version} %{http_code}"]
+        tmp = None
+        if body is not None:
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            tmp.write(body)
+            tmp.close()
+            cmd += ["--data-binary", f"@{tmp.name}"]
+        try:
+            out = subprocess.run(cmd + [f"{PROXY_URL}{path}"], capture_output=True,
+                                 text=True, timeout=60).stdout.strip()
+        except Exception as exc:
+            print(f"  ERROR {label}: {exc}")
+            failed += 1
+            return
+        finally:
+            if tmp is not None:
+                os.unlink(tmp.name)
+        got_version, _, got_status = out.partition(" ")
+        if got_status == str(expect) and got_version == version:
+            print(f"  PASS  {label}  (HTTP/{got_version} {got_status})")
+            passed += 1
+        else:
+            print(f"  FAIL  {label}  (expected HTTP/{version} {expect}, got {out!r})")
+            failed += 1
+
+    def attest(method, path, body=b"", unbound=False):
+        return _make_attest(pub_key, nonce_b64=_fresh_nonce_b64(), ts=str(int(time.time())),
+                            host=host, method=method, path=path, body=body, unbound=unbound)
+
+    check("HTTP/2 negotiated: valid GET",
+          method="GET", path="/", body=None, headers=attest("GET", "/"), expect=200)
+
+    body = b'{"hello":"world"}'
+    check("HTTP/2: valid POST with hashed body",
+          method="POST", path="/echo", body=body,
+          headers=attest("POST", "/echo", body), expect=200)
+
+    edge = b"z" * (64 * 1024)
+    check("HTTP/2: bound body at 64 KB cap forwarded",
+          method="POST", path="/echo", body=edge,
+          headers=attest("POST", "/echo", edge), expect=200)
+
+    big = b"y" * (64 * 1024 + 1)
+    check("HTTP/2: bound body over 64 KB cap rejected",
+          method="POST", path="/echo", body=big,
+          headers=attest("POST", "/echo", big), expect=413)
+
+    upload = b"x" * (1024 * 1024)
+    check("HTTP/2: unbound upload streams through (1 MB)",
+          method="POST", path="/echo", body=upload,
+          headers=attest("POST", "/echo", upload, unbound=True), expect=200)
+
+    check("HTTP/2: missing attestation headers",
+          method="GET", path="/", body=None, headers={}, expect=403)
+
+    h = attest("GET", "/")
+    check("HTTP/2: first use of nonce",
+          method="GET", path="/", body=None, headers=h, expect=200)
+    check("HTTP/2: replayed nonce rejected",
+          method="GET", path="/", body=None, headers=h, expect=403)
+
+    check("HTTP/1.1 still negotiated when the client insists",
+          method="GET", path="/", body=None, headers=attest("GET", "/"),
+          expect=200, http="--http1.1", version="1.1")
+
+    # Two requests in one curl run share the connection.  Over HTTP/2 a 403
+    # resets only its stream, so the second request must not reconnect.
+    label = "HTTP/2: 403 resets the stream, connection stays usable"
+    cmd = base("--http2") + ["--write-out", "%{http_code} %{num_connects}\n",
+                             f"{PROXY_URL}/", "--next"]
+    # `base()` starts with the program name; the second segment must not.
+    cmd += with_headers(base("--http2")[1:], attest("GET", "/"))
+    cmd += ["--write-out", "%{http_code} %{num_connects}\n", f"{PROXY_URL}/"]
+    try:
+        lines = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=60).stdout.split()
+    except Exception as exc:
+        lines = [repr(exc)]
+    if lines == ["403", "1", "200", "0"]:
+        print(f"  PASS  {label}  (403 then 200 without reconnecting)")
+        passed += 1
+    else:
+        print(f"  FAIL  {label}  (expected '403 1 200 0', got {' '.join(lines)!r})")
+        failed += 1
+
+    print(f"\n  {passed} passed, {failed} failed  (HTTP/2)")
+    return failed == 0
+
+
 if __name__ == "__main__":
     if not os.path.exists(PUBLIC_KEY_PATH):
         print(f"ERROR: public key not found at {PUBLIC_KEY_PATH}")
@@ -412,4 +543,7 @@ if __name__ == "__main__":
         f"{'enabled' if MACHINE_IDENTITY_ENABLED else 'disabled'}\n"
     )
 
-    sys.exit(0 if _run(pub_key) else 1)
+    ok = _run(pub_key)
+    print()
+    ok = _run_h2(pub_key) and ok
+    sys.exit(0 if ok else 1)

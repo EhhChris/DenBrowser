@@ -199,9 +199,7 @@ impl ProxyHttp for DenBrowserProxy {
         {
             let target = {
                 let req = session.req_header();
-                let host = header_str(&req.headers, "host")
-                    .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
-                    .unwrap_or_default();
+                let host = request_host(req).unwrap_or_default();
                 let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
                 format!("{host}{path}")
             };
@@ -255,8 +253,7 @@ impl ProxyHttp for DenBrowserProxy {
         let ts = header_str(&req.headers, "x-denbrowser-ts");
         let nonce = header_str(&req.headers, "x-denbrowser-nonce");
         let token = header_str(&req.headers, "x-denbrowser-token");
-        let host = header_str(&req.headers, "host")
-            .map(|h| h.split(':').next().unwrap_or(&h).to_owned());
+        let host = request_host(req);
 
         let (ts, nonce, token, host) = match (ts, nonce, token, host) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
@@ -396,6 +393,21 @@ impl ProxyHttp for DenBrowserProxy {
 
 fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
+}
+
+/// The host the browser bound into its token, with any `:port` removed.
+///
+/// Over HTTP/1.1 that is the `Host` header.  Over HTTP/2 the browser sends the
+/// `:authority` pseudo-header and no `Host` at all; pingora surfaces it as the
+/// request URI's authority.  Both come from the same URL on the browser side
+/// (patch 006 signs the URL's host), so the token's `host` field matches
+/// whichever protocol was negotiated.  pingora refuses a request that carries
+/// both with different values before `request_filter` runs, so taking `Host`
+/// first is safe.
+fn request_host(req: &RequestHeader) -> Option<String> {
+    let authority = header_str(&req.headers, "host")
+        .or_else(|| req.uri.authority().map(|a| a.as_str().to_owned()))?;
+    Some(authority.split(':').next().unwrap_or(&authority).to_owned())
 }
 
 /// Drop the query string from a path for logging.
@@ -579,6 +591,17 @@ fn main() {
     // so a local sniffer on this machine sees ciphertext and a captured
     // attestation token cannot be replayed from outside this TLS channel.
     //
+    // The listener offers HTTP/2 with HTTP/1.1 as the fallback (ALPN
+    // "h2, http/1.1"), the mirror image of `upstream_peer`'s
+    // `set_http_version(2, 1)`.  The two legs negotiate independently and
+    // pingora translates between them, so a browser on HTTP/2 can be fronted
+    // for an HTTP/1.1-only upstream and vice versa.  Everything `request_filter`
+    // checks is protocol-agnostic apart from where the host lives (see
+    // `request_host`); the 64 KiB retry buffer that caps bound bodies exists
+    // for both protocols.  One visible difference: an error response over
+    // HTTP/2 resets only that stream, where over HTTP/1.1 it closes the
+    // connection.
+    //
     // The key is read and, when encrypted, decrypted here (see `tls_key`), then
     // installed as a key rather than a path: OpenSSL's path-based loader has no
     // way to be given a passphrase.
@@ -630,6 +653,7 @@ fn main() {
         }
         tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
     }
+    tls.enable_h2();
     svc.add_tls_with_settings(&config.proxy.listen, None, tls);
 
     info!(
@@ -782,6 +806,28 @@ mod tests {
         assert_eq!(bound(b"https://proxy.example:8081/p?q=1"), "/p?q=1");
         assert_eq!(bound(b"http://proxy.example"), "/");
         assert_eq!(bound(b"/p?q=1#frag"), "/p?q=1");
+    }
+
+    #[test]
+    fn request_host_reads_the_host_header_or_the_h2_authority() {
+        // HTTP/1.1: the Host header, port stripped.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.insert_header("Host", "proxy.example:8081").unwrap();
+        assert_eq!(request_host(&req).as_deref(), Some("proxy.example"));
+        req.insert_header("Host", "proxy.example").unwrap();
+        assert_eq!(request_host(&req).as_deref(), Some("proxy.example"));
+
+        // HTTP/2: no Host header; the authority rides on the request URI.
+        let mut req = RequestHeader::build("GET", b"/p?q=1", None).unwrap();
+        req.set_uri("https://proxy.example:8081/p?q=1".parse().unwrap());
+        assert!(req.headers.get("host").is_none());
+        assert_eq!(request_host(&req).as_deref(), Some("proxy.example"));
+        // The path binding is unaffected by where the host came from.
+        assert_eq!(req.uri.path_and_query().unwrap().as_str(), "/p?q=1");
+
+        // Neither: nothing to bind, so attestation fails closed.
+        let req = RequestHeader::build("GET", b"/", None).unwrap();
+        assert_eq!(request_host(&req), None);
     }
 
     #[tokio::test]

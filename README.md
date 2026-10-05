@@ -345,6 +345,19 @@ uploads *unbound* (the token carries the `unbound` marker instead of a hash) and
 those stream straight through with no size cap.  The 64 KiB boundary is pinned
 by `test/attestation/test_roundtrip.py`.
 
+**HTTP/2 to the browser.**  The listener offers HTTP/2 with HTTP/1.1 as the
+fallback (ALPN `h2, http/1.1`), the mirror image of the upstream leg, which
+prefers HTTP/2 and falls back to HTTP/1.1.  The two legs negotiate
+independently and Pingora translates between them, so a browser on HTTP/2 is
+fronted for an HTTP/1.1-only backend, and vice versa, with nothing to
+configure.  Attestation is protocol-agnostic: over HTTP/2 the host comes from
+`:authority`, which the browser derives from the same URL it signs.  Two things
+differ from HTTP/1.1: an error response such as `403` resets only that stream
+instead of closing the connection, and Pingora's HTTP/2 server defaults apply,
+100 concurrent streams per connection and a 64 KiB request-header list, which
+the machine certificate header fits comfortably.  The HTTP/2 path is covered
+by `test/attestation/test_roundtrip.py`, which drives it with `curl`.
+
 **Pingora 0.9.0 behaviour.**  The proxy inherits a few defaults from Pingora
 0.9.0 that were reviewed and accepted as-is:
 
