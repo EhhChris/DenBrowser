@@ -31,9 +31,14 @@ sha2    = "0.10"
 # `dh, error, hash, nid, pkey, ssl, x509` and not `stack`, which
 # `X509StoreContextRef::init` needs for its `cert_chain` argument.  Cargo unifies
 # this with the version pingora already pins, so `openssl::x509::X509` and
-# `pingora_core::tls::x509::X509` are the same type.  Deliberately WITHOUT the
-# `vendored` feature: that would build a second libssl and break the ABI shared
-# with the `openssl-sys` pingora links against.
+# `pingora_core::tls::x509::X509` are the same type.
+#
+# No features are requested here, and none are needed: `pingora-openssl` asks
+# for `openssl/vendored`, Cargo unions features across the graph, and there is
+# exactly one `openssl-sys` in it.  So libssl is always built from source (the
+# `openssl-src` crate pinned in Cargo.lock) and linked statically — the binary
+# links no system libssl, and OpenSSL security fixes reach it only by bumping
+# `openssl-src` in Cargo.lock and rebuilding, never via the image's packages.
 openssl = "0.10"
 
 # `tokio::net::lookup_host` for the machine-identity forward-DNS check.  Already
