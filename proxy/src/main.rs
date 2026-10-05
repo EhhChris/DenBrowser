@@ -35,9 +35,10 @@ use upstream_tls::UpstreamTls;
 /// is ever contacted, so the backend never sees an unverified byte.  To forward
 /// the body afterwards we rely on pingora's request retry buffer, which natively
 /// replays it to the upstream — and that buffer is a `FixedBuffer` hardcoded to
-/// `BODY_BUF_LIMIT` (64 KiB) that silently truncates past its capacity.  So the
-/// bound path is capped at exactly that limit: a bound request whose body exceeds
-/// it is rejected with 413.  The browser is expected to send anything larger as
+/// `BODY_BUF_LIMIT` (64 KiB).  Past its capacity it marks itself truncated and,
+/// since pingora 0.9.0, drops what it had buffered, so nothing can be replayed.
+/// So the bound path is capped at exactly that limit: a bound request whose body
+/// exceeds it is rejected with 413.  The browser is expected to send anything larger as
 /// an *unbound* upload (see `BodyBinding::Unbound`), which streams straight
 /// through with no size cap and no per-body hash.
 /// TODO: Revisit this... inspection before streaming should be possible per: https://github.com/cloudflare/pingora/issues/67
@@ -119,6 +120,27 @@ impl ProxyHttp for DenBrowserProxy {
 
     fn new_ctx(&self) -> Self::CTX {}
 
+    /// The single upstream, over TLS with HTTP/2 preferred.
+    ///
+    /// `PeerOptions` are otherwise left at pingora's defaults.  Two of those
+    /// defaults changed in pingora 0.9.0 and were accepted deliberately:
+    ///
+    /// * `http_upstream_request_policy` strips hop-by-hop headers (`Connection`,
+    ///   `TE`, `Keep-Alive`, `Upgrade`, …) and any header the client nominated
+    ///   in `Connection:` before the request reaches `upstream_request_filter`,
+    ///   and answers 400 to a `Connection` header that nominates a protected
+    ///   name (`Host`, `X-Forwarded-*`), a non-token, or ten or more names.
+    ///   That refusal comes *after* `request_filter` has accepted the request
+    ///   and committed its nonce; browsers never send such headers.  The
+    ///   attestation headers are end-to-end headers this policy never touches —
+    ///   `upstream_request_filter` below remains what strips them.
+    /// * `error_while_proxy` (not overridden here) never retries a request
+    ///   whose method is not idempotent: a POST that fails on a reused upstream
+    ///   connection is answered 502 instead of being replayed from the retry
+    ///   buffer.  A transparent replay could deliver a side-effecting request to
+    ///   the backend twice, and the browser mints a fresh token per request, so
+    ///   a user-level retry is never a nonce replay.  GET and the other
+    ///   idempotent methods are still retried once on a fresh connection.
     async fn upstream_peer(
         &self,
         _session: &mut Session,
@@ -143,7 +165,8 @@ impl ProxyHttp for DenBrowserProxy {
     /// Bound requests: the whole body is buffered (into pingora's retry buffer)
     /// and hashed here, then verified, all before `upstream_peer`.  Once
     /// verification passes, pingora replays the retry-buffered body to the
-    /// upstream on its own — so there is no `request_body_filter` to override and
+    /// upstream on its own (on the first attempt only for a POST — see
+    /// `upstream_peer`) — so there is no `request_body_filter` to override and
     /// no second copy of the body to carry.  The body is capped at
     /// `BOUND_BODY_MAX` (the retry buffer's own limit); larger bound bodies are
     /// rejected with 413.
@@ -377,8 +400,10 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
 
 /// Drop the query string from a path for logging.
 ///
-/// The accept path logs one line per *successful* request, so unlike the
-/// rejection logs it sees ordinary user traffic in bulk — and query strings
+/// The accept path logs one line per request that passed every check here
+/// (pingora can still refuse a malformed `Connection` header afterwards, see
+/// `upstream_peer`), so unlike the rejection logs it sees ordinary user traffic
+/// in bulk — and query strings
 /// routinely carry session tokens, search terms, and other content this product
 /// exists to keep from leaking.  Recording the path alone is enough to audit
 /// what was allowed through without turning the audit trail into its own
@@ -628,5 +653,180 @@ mod tests {
         assert_eq!(path_without_query("/a?b=1?2&token=shh"), "/a");
         // Empty query still drops the separator, so the line reads cleanly.
         assert_eq!(path_without_query("/a?"), "/a");
+    }
+
+    // ── Pins on the pingora behaviour the proxy depends on ──────────────────
+    //
+    // These exercise the real `ProxyHttp` impl over an in-memory HTTP/1.1
+    // session, so a future pingora bump that moves any of them fails here
+    // rather than in production.  Each one records a decision taken when
+    // moving to pingora 0.9.0 (see docs/pingora-0.9.0-upgrade-review.md).
+
+    use pingora_core::protocols::l4::stream::Stream as L4Stream;
+    use pingora_core::protocols::l4::virt::{VirtualSockOpt, VirtualSocket, VirtualSocketStream};
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// A socket that serves one canned request and keeps whatever is written
+    /// back, so the bytes a client would receive can be asserted on.
+    #[derive(Debug)]
+    struct MemSocket {
+        request: Vec<u8>,
+        read_pos: usize,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncRead for MemSocket {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let n = (self.request.len() - self.read_pos).min(buf.remaining());
+            if n > 0 {
+                let start = self.read_pos;
+                buf.put_slice(&self.request[start..start + n]);
+                self.read_pos += n;
+            }
+            // Exhausted: a clean EOF, as a client that has sent everything.
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for MemSocket {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl VirtualSocket for MemSocket {
+        fn set_socket_option(&self, _opt: VirtualSockOpt) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An HTTP/1.1 downstream session with `request` already parsed, plus the
+    /// buffer the proxy's response lands in.
+    async fn h1_session(request: &str) -> (Session, Arc<Mutex<Vec<u8>>>) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let socket = MemSocket {
+            request: request.as_bytes().to_vec(),
+            read_pos: 0,
+            written: written.clone(),
+        };
+        let stream = L4Stream::from(VirtualSocketStream::new(Box::new(socket)));
+        let mut session = Session::new_h1(Box::new(stream));
+        session.read_request().await.unwrap();
+        (session, written)
+    }
+
+    /// A proxy with attestation only: no rate limit, bypass or machine layer.
+    /// The key is a throwaway — none of these tests presents a token.
+    fn test_proxy() -> DenBrowserProxy {
+        let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)
+            .unwrap();
+        let pem = openssl::ec::EcKey::generate(&group)
+            .unwrap()
+            .private_key_to_pem()
+            .unwrap();
+        let verifier = Verifier::from_pem(std::str::from_utf8(&pem).unwrap()).unwrap();
+        DenBrowserProxy::new(verifier, "upstream.internal:443", false, None, None, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pingora_retries_idempotent_methods_only() {
+        // Decision 1 of the 0.9.0 review: the default `error_while_proxy` is
+        // kept.  A POST that fails on a reused upstream connection must not be
+        // replayed; GET and PUT still get one retry on a fresh connection.
+        let proxy = test_proxy();
+        let peer = HttpPeer::new("127.0.0.1:443", true, "upstream.internal".to_owned());
+        for (method, retried) in [("GET", true), ("PUT", true), ("POST", false), ("PATCH", false)] {
+            let request = format!(
+                "{method} / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"
+            );
+            let (mut session, _) = h1_session(&request).await;
+            let mut error = pingora_core::Error::new_up(pingora_core::ErrorType::ReadError);
+            error.retry = pingora_core::RetryType::Decided(true);
+            let decided = proxy.error_while_proxy(&peer, &mut session, error, &mut (), true);
+            assert_eq!(decided.retry(), retried, "{method}");
+        }
+    }
+
+    #[test]
+    fn request_target_forms_bind_path_and_query_only() {
+        // Decision 2: `request_filter` binds `req.uri.path_and_query()` into
+        // the token (and keys the rate limiter on it).  Since pingora 0.9.0 an
+        // absolute-form target yields only its path and query, which is what
+        // the browser signs; origin-form is unchanged and fragments are dropped.
+        let bound = |target: &[u8]| -> String {
+            let req = RequestHeader::build("GET", target, None).unwrap();
+            req.uri
+                .path_and_query()
+                .map(|p| p.as_str().to_owned())
+                .unwrap_or_else(|| "/".to_owned())
+        };
+        assert_eq!(bound(b"/p?q=1"), "/p?q=1");
+        assert_eq!(bound(b"https://proxy.example:8081/p?q=1"), "/p?q=1");
+        assert_eq!(bound(b"http://proxy.example"), "/");
+        assert_eq!(bound(b"/p?q=1#frag"), "/p?q=1");
+    }
+
+    #[tokio::test]
+    async fn upstream_request_filter_strips_every_attestation_header() {
+        // The one guarantee of `upstream_request_filter`: no attestation
+        // material reaches the backend, whatever case the client used.
+        let proxy = test_proxy();
+        let (mut session, _) = h1_session("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").await;
+        let mut upstream = RequestHeader::build("GET", b"/", None).unwrap();
+        for (name, value) in [
+            ("X-DENBROWSER-TS", "1"),
+            ("x-denbrowser-nonce", "n"),
+            ("X-DenBrowser-Token", "t"),
+            ("X-Denbrowser-Machine-Cert", "c"),
+            ("X-Keep", "k"),
+        ] {
+            upstream.insert_header(name, value).unwrap();
+        }
+        proxy
+            .upstream_request_filter(&mut session, &mut upstream, &mut ())
+            .await
+            .unwrap();
+        for name in [
+            "x-denbrowser-ts",
+            "x-denbrowser-nonce",
+            "x-denbrowser-token",
+            "x-denbrowser-machine-cert",
+        ] {
+            assert!(upstream.headers.get(name).is_none(), "{name} reached the upstream");
+        }
+        assert_eq!(upstream.headers.get("x-keep").unwrap(), "k");
+    }
+
+    #[tokio::test]
+    async fn a_request_without_attestation_headers_gets_403_and_close() {
+        // The error-response shape stress/README.md and the browser rely on:
+        // answered by the proxy itself, with the connection closed.
+        let proxy = test_proxy();
+        let (mut session, written) =
+            h1_session("GET /secret?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n").await;
+        let handled = proxy.request_filter(&mut session, &mut ()).await.unwrap();
+        assert!(handled, "request_filter must answer the client itself");
+        let response = String::from_utf8_lossy(&written.lock().unwrap()).to_ascii_lowercase();
+        assert!(response.starts_with("http/1.1 403 "), "{response}");
+        assert!(response.contains("connection: close"), "{response}");
+        assert!(response.contains("content-length: 0"), "{response}");
     }
 }

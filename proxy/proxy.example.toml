@@ -252,6 +252,12 @@ file_prefix = "denbrowser-proxy.log"
 #
 # `info` records both accepted and rejected requests.  Drop to `warn` to log
 # only rejections and rate limiting.
+#
+# Requests Pingora itself refuses before attestation runs (malformed request
+# line, duplicate or ambiguous Host, bad framing) get a 400 and are logged at
+# `debug` only.  Leave `pingora_proxy` at `info` or above in production: its
+# debug record includes the raw request, attestation token and machine
+# certificate included.
 level = "info"
 
 # How often to start a new file: "minutely", "hourly", "daily", or "never".

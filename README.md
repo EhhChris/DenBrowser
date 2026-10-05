@@ -338,6 +338,32 @@ key in its own config file, so one partner can never decrypt another's tokens,
 and a deployment that forgets the key fails loudly instead of silently picking
 up whatever happens to sit at a default location.
 
+**Request bodies.**  A request whose token binds a body hash is buffered and
+hashed before the upstream is contacted, so it is capped at Pingora's 64 KiB
+retry buffer: a larger bound body is answered `413`.  The browser sends bigger
+uploads *unbound* (the token carries the `unbound` marker instead of a hash) and
+those stream straight through with no size cap.  The 64 KiB boundary is pinned
+by `test/attestation/test_roundtrip.py`.
+
+**Pingora 0.9.0 behaviour.**  The proxy inherits a few defaults from Pingora
+0.9.0 that were reviewed and accepted as-is:
+
+- Hop-by-hop request headers (`Connection`, `TE`, `Keep-Alive`, `Upgrade`,
+  `Proxy-*`) and any header named in `Connection:` are stripped before the
+  upstream sees the request.  The attestation headers are end-to-end and are
+  stripped by the proxy itself, as before.
+- Malformed requests (two `Host` headers, userinfo in `Host`, an absolute-form
+  target whose authority differs from `Host`) are answered `400` *before*
+  attestation or rate limiting run.  A `Connection` header naming a protected
+  header such as `Host`, or ten or more names, is answered `400` *after*
+  attestation passed; that request's nonce is spent.
+- A `POST` that fails on a reused upstream connection is answered `502` rather
+  than retried, so the backend can never receive a side-effecting request
+  twice.  The browser mints a fresh token per request, so retrying is safe.
+- An absolute-form request target (`GET https://host/p?q HTTP/1.1`) is bound
+  as `/p?q`, matching what the browser signs.  Browsers send origin-form to an
+  origin server, so this only matters to hand-written clients.
+
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any
 applicable limit is answered `429` *before* attestation or the upstream is
@@ -552,6 +578,12 @@ The whole section is optional; omitting it logs at `info` to stderr only.
 
   Because the proxy logs through `tracing` and bridges the `log` facade into it,
   raising the level also surfaces Pingora's own internals in the same file.
+
+  Requests that Pingora refuses before attestation runs (malformed request line,
+  duplicate or ambiguous `Host`, bad framing) are answered `400` and, since
+  Pingora 0.9.0, logged at `debug` only, so at `info` they leave no trace.  Do
+  not enable `pingora_proxy=debug` in production to see them: that record
+  includes the raw request, attestation token and machine certificate included.
 
 > **Upgrade note.** Earlier builds initialised `env_logger` with no default
 > filter, so the effective level was `error` and — since the proxy emits nothing

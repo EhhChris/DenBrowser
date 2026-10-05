@@ -34,6 +34,12 @@
 //! * **Backpressure over loss.**  The writer is built with `lossy(false)`: when
 //!   the buffer fills, the logging call blocks instead of discarding the record.
 //!   For an audit log a stalled request is preferable to a hole in the trail.
+//! * **Pingora's own refusals are quiet.**  A request pingora rejects before
+//!   `request_filter` runs (malformed request line, duplicate or ambiguous
+//!   `Host`, bad framing) is answered 400 and, since pingora 0.9.0, logged at
+//!   `debug` only, so at `info` it leaves no trace.  That gap is accepted: the
+//!   debug record carries up to 2 KiB of the raw request, attestation token
+//!   and machine certificate included, which must never land in this file.
 
 use tracing::level_filters::LevelFilter;
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
