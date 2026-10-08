@@ -18,6 +18,17 @@ listen = "0.0.0.0:8081"
 # REQUIRED. TLS upstream endpoint to receive verified requests (host:port).
 upstream = "localhost:8443"
 
+# OPTIONAL. PEM CA bundle used to verify the upstream server's certificate.
+# Omit or leave empty to use Pingora/OpenSSL's default system trust store.
+# When set, ONLY this bundle is trusted for upstream connections; include all
+# required CA certificates. The upstream certificate must still match the host
+# in `upstream`. This is separate from the user and machine certificate CAs.
+# Loaded once at startup: restart after changing it. Relative paths resolve
+# against the proxy's working directory. An unreadable, invalid, or empty bundle
+# aborts startup. --insecure-upstream still disables certificate and hostname
+# verification, even when this bundle is configured.
+# upstream_ca = "/run/secrets/upstream_ca.pem"
+
 # REQUIRED. TLS identity presented to the browser. The browser pins the
 # certificate's SPKI, so rotating it requires rebuilding DenBrowser with the
 # new certificate or pin in config/site-config.json.

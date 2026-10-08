@@ -49,6 +49,13 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub upstream: String,
 
+    /// Optional PEM CA bundle for verifying the upstream server. Empty uses
+    /// Pingora/OpenSSL's default trust store; a supplied bundle replaces it for
+    /// upstream connections. Relative paths resolve from the working directory.
+    /// Loaded once at startup; hostname verification remains enabled.
+    #[serde(default)]
+    pub upstream_ca: String,
+
     /// Path to the TLS server certificate chain in PEM format.
     #[serde(default)]
     pub tls_cert: String,
@@ -486,6 +493,7 @@ mod tests {
         let c = Config::default();
         assert!(c.proxy.listen.is_empty());
         assert!(c.proxy.upstream.is_empty());
+        assert!(c.proxy.upstream_ca.is_empty());
         assert!(c.proxy.tls_cert.is_empty());
         assert!(c.proxy.tls_key.is_empty());
         // Optional: a plaintext key needs no passphrase.
@@ -510,8 +518,24 @@ mod tests {
         c.proxy.validate().unwrap();
         assert_eq!(c.proxy.listen, "127.0.0.1:9443");
         assert_eq!(c.proxy.upstream, "backend.internal:443");
+        assert!(c.proxy.upstream_ca.is_empty());
         assert_eq!(c.proxy.tls_cert, "/etc/denbrowser/proxy.crt");
         assert_eq!(c.proxy.tls_key, "/etc/denbrowser/proxy.key");
+    }
+
+    #[test]
+    fn parses_optional_upstream_ca() {
+        let c: Config = toml::from_str(
+            r#"
+            [proxy]
+            upstream_ca = "/run/secrets/upstream_ca.pem"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(c.proxy.upstream_ca, "/run/secrets/upstream_ca.pem");
+
+        let c: Config = toml::from_str("[proxy]\nupstream_ca = \"\"\n").unwrap();
+        assert!(c.proxy.upstream_ca.is_empty());
     }
 
     #[test]

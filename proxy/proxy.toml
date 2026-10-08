@@ -3,6 +3,9 @@
 [proxy]
 listen = "0.0.0.0:8081"
 upstream = "localhost:8443"
+# Optional upstream CA bundle; omit for system trust. A supplied PEM bundle
+# replaces system trust for upstream connections, with hostname checks retained.
+# upstream_ca = "/run/secrets/upstream_ca.pem"
 tls_cert = "../build/proxy-tls.crt"
 tls_key = "../build/proxy-tls.key"
 
