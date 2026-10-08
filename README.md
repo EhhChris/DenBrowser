@@ -277,8 +277,32 @@ tls_key = "/etc/denbrowser/partner-a-tls.key"
 ```
 
 `listen` and `upstream` use `host:port` form. The upstream connection is TLS;
-the certificate and key are PEM files, and the certificate's SPKI must match
-the pin compiled into DenBrowser for this proxy.
+`tls_cert` and `tls_key` are the PEM identity presented to the browser, and that
+certificate's SPKI must match the pin compiled into DenBrowser for this proxy.
+
+Upstream certificate and hostname verification are enabled by default, using
+Pingora/OpenSSL's system CA trust store. To trust a private upstream CA, set
+`upstream_ca` in `[proxy]`:
+
+```toml
+[proxy]
+upstream = "app-backend.partner-a.internal:443"
+upstream_ca = "/run/secrets/partner-a-upstream-ca.pem"
+```
+
+The PEM bundle should include the upstream's root CA and may contain multiple CA
+certificates. It **replaces** system trust for upstream connections, and the
+upstream certificate must still match the hostname in `upstream`.
+Omit `upstream_ca` or set it to `""` to retain the default
+trust store. This setting is independent of `[mtls].client_ca` and
+`[machine_identity].machine_ca`.
+
+The bundle is read once at startup; restart the proxy after changing it. An
+unreadable, invalid, or certificate-free bundle aborts startup. Relative paths
+resolve against the proxy's working directory. In Docker, mount the bundle into
+the proxy container and use its container path. The development-only
+`--insecure-upstream` / `DENBROWSER_INSECURE_UPSTREAM` switch still disables both
+upstream certificate and hostname verification, even with a CA bundle configured.
 
 The key may be passphrase-protected, in either PEM form OpenSSL writes (PKCS#8
 `ENCRYPTED PRIVATE KEY` or the legacy `Proc-Type: 4,ENCRYPTED`). Supply the

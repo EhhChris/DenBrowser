@@ -20,12 +20,14 @@ mod mtls;
 mod passthrough;
 mod ratelimit;
 mod tls_key;
+mod upstream_tls;
 use attest::{AttestInputs, BodyBinding, Verifier};
 use config::Config;
 use machine::MachineIdentity;
 use mtls::ClientCert;
 use passthrough::BypassPolicy;
 use ratelimit::RateLimiter;
+use upstream_tls::UpstreamTls;
 
 /// Maximum bytes of a *bound* (hash-verified) request body.
 ///
@@ -71,7 +73,7 @@ struct DenBrowserProxy {
     verifier: Arc<Verifier>,
     upstream_host: String,
     upstream_port: u16,
-    insecure_upstream: bool,
+    upstream_tls: UpstreamTls,
     /// `None` when rate limiting is disabled (no config or `enabled = false`).
     rate_limiter: Option<RateLimiter>,
     /// Attestation-bypass policy (source-IP ranges + subject allowlist); `None`
@@ -87,7 +89,7 @@ impl DenBrowserProxy {
     fn new(
         verifier: Verifier,
         upstream: &str,
-        insecure_upstream: bool,
+        upstream_tls: UpstreamTls,
         rate_limiter: Option<RateLimiter>,
         bypass: Option<BypassPolicy>,
         machine: Option<MachineIdentity>,
@@ -100,7 +102,7 @@ impl DenBrowserProxy {
             verifier: Arc::new(verifier),
             upstream_host: host.to_owned(),
             upstream_port: port,
-            insecure_upstream,
+            upstream_tls,
             rate_limiter,
             bypass,
             machine,
@@ -128,10 +130,7 @@ impl ProxyHttp for DenBrowserProxy {
             self.upstream_host.clone(),
         );
         peer.options.set_http_version(2, 1);
-        if self.insecure_upstream {
-            peer.options.verify_cert = false;
-            peer.options.verify_hostname = false;
-        }
+        self.upstream_tls.apply(&mut peer);
         Ok(Box::new(peer))
     }
 
@@ -445,6 +444,15 @@ fn main() {
         .validate()
         .unwrap_or_else(|e| fatal(format!("invalid proxy config: {e}")));
 
+    let upstream_tls = UpstreamTls::from_config(&config.proxy, args.insecure_upstream)
+        .unwrap_or_else(|e| fatal(e));
+    if !config.proxy.upstream_ca.is_empty() {
+        info!(
+            "upstream CA bundle loaded from {}",
+            config.proxy.upstream_ca
+        );
+    }
+
     // Attestation key: required, and validated here so a proxy that could
     // never decrypt a token refuses to start instead of 403-ing every request.
     let verifier = Verifier::from_config(&config.attestation).unwrap_or_else(|e| fatal(e));
@@ -526,7 +534,7 @@ fn main() {
     let proxy = DenBrowserProxy::new(
         verifier,
         &config.proxy.upstream,
-        args.insecure_upstream,
+        upstream_tls,
         rate_limiter,
         bypass,
         machine,
