@@ -122,8 +122,10 @@ impl ProxyHttp for DenBrowserProxy {
 
     /// The single upstream, over TLS with HTTP/2 preferred.
     ///
-    /// `PeerOptions` are otherwise left at pingora's defaults.  Two of those
-    /// defaults changed in pingora 0.9.0 and were accepted deliberately:
+    /// Beyond the protocol preference and the upstream trust settings that
+    /// `UpstreamTls::apply` installs, `PeerOptions` are left at pingora's
+    /// defaults.  Two of those defaults changed in pingora 0.9.0 and were
+    /// accepted deliberately:
     ///
     /// * `http_upstream_request_policy` strips hop-by-hop headers (`Connection`,
     ///   `TE`, `Keep-Alive`, `Upgrade`, …) and any header the client nominated
@@ -787,7 +789,10 @@ mod tests {
             .private_key_to_pem()
             .unwrap();
         let verifier = Verifier::from_pem(std::str::from_utf8(&pem).unwrap()).unwrap();
-        DenBrowserProxy::new(verifier, "upstream.internal:443", false, None, None, None).unwrap()
+        // Default upstream trust: system CA store, verification on.
+        let upstream_tls = UpstreamTls::from_config(&config::ProxyConfig::default(), false).unwrap();
+        DenBrowserProxy::new(verifier, "upstream.internal:443", upstream_tls, None, None, None)
+            .unwrap()
     }
 
     #[tokio::test]
