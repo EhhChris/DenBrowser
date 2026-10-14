@@ -323,20 +323,23 @@
       ]
     },
 
+    "ip": {
+      "description": "IPv4 or IPv6 address; null only if the socket has no IP address.",
+      "anyOf": [
+        { "type": "string", "format": "ipv4" },
+        { "type": "string", "format": "ipv6" },
+        { "type": "null" }
+      ]
+    },
+    "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 },
+
     "endpoint": {
       "type": "object",
       "additionalProperties": false,
       "required": ["ip", "port"],
       "properties": {
-        "ip": {
-          "description": "IPv4 or IPv6 address; null only if the socket has no IP address.",
-          "anyOf": [
-            { "type": "string", "format": "ipv4" },
-            { "type": "string", "format": "ipv6" },
-            { "type": "null" }
-          ]
-        },
-        "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 }
+        "ip": { "$ref": "#/$defs/ip" },
+        "port": { "$ref": "#/$defs/port" }
       }
     },
 
@@ -347,11 +350,11 @@
       "required": ["address", "ip", "port"],
       "properties": {
         "address": {
-          "description": "The client IP address as a string (OTel and ECS client.address).",
-          "type": ["string", "null"]
+          "$ref": "#/$defs/ip",
+          "description": "Always the same value as client.ip (OTel and ECS client.address)."
         },
-        "ip": { "$ref": "#/$defs/endpoint/properties/ip" },
-        "port": { "$ref": "#/$defs/endpoint/properties/port" }
+        "ip": { "$ref": "#/$defs/ip" },
+        "port": { "$ref": "#/$defs/port" }
       }
     },
 
@@ -367,6 +370,7 @@
       "required": ["client"],
       "properties": {
         "client": {
+          "description": "The client side of the TLS connection (OTel and ECS tls.client.*).",
           "type": "object",
           "additionalProperties": false,
           "required": ["subject"],

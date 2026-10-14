@@ -1031,6 +1031,20 @@ mod tests {
     }
 
     #[test]
+    fn client_address_always_equals_client_ip() {
+        for addr in ["10.4.2.17:52144", "[2001:db8::7]:443"] {
+            let c = ClientFields::from(Some(addr.parse::<SocketAddr>().unwrap()));
+            let v = serde_json::to_value(&c).unwrap();
+            assert_eq!(v["address"], v["ip"], "{addr}");
+        }
+        let none = serde_json::to_value(ClientFields::from(None)).unwrap();
+        assert_eq!(
+            none,
+            serde_json::json!({"address": null, "ip": null, "port": null})
+        );
+    }
+
+    #[test]
     fn a_presented_machine_cert_is_recorded_unverified() {
         let mut ctx = RequestAudit::new(true);
         ctx.machine_cert_presented(workstation(MACHINE_HOST));
@@ -1661,7 +1675,13 @@ mod tests {
 
         fn resolve<'a>(schema: &'a Value, node: &'a Value) -> &'a Value {
             match node["$ref"].as_str() {
-                Some(r) => resolve(schema, &schema["$defs"][r.trim_start_matches("#/$defs/")]),
+                Some(r) => {
+                    let pointer = r.strip_prefix('#').expect("only local $refs are used");
+                    let target = schema
+                        .pointer(pointer)
+                        .unwrap_or_else(|| panic!("unresolvable $ref {r}"));
+                    resolve(schema, target)
+                }
                 None => node,
             }
         }

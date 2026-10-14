@@ -71,6 +71,10 @@ class AuditLogSchemaTest(unittest.TestCase):
         actions = {r["event"]["action"] for r in self.audit}
         self.assertEqual(actions, set(self.schema["$defs"]["action"]["enum"]))
 
+    def test_client_address_matches_client_ip(self):
+        for record in self.audit:
+            self.assertEqual(record["client"]["address"], record["client"]["ip"])
+
     def test_no_record_carries_a_path(self):
         # No key at any depth may carry a URL path.
         def keys(value):
@@ -98,6 +102,7 @@ class AuditLogSchemaTest(unittest.TestCase):
                 path="/secret.docx"
             ),
             "url object added": lambda r: r.update(url={"path": "/secret.docx"}),
+            "client.address not an IP": lambda r: r["client"].update(address="not-an-ip"),
             "unverified machine with a hostname": lambda r: r["machine"].update(
                 status="failed", hostname="ws-1.example.com"
             ),
