@@ -512,7 +512,7 @@ mod tests {
                 &audit::Connection {
                     proxy: None,
                     client: None,
-                    user_subject_dn: None,
+                    tls_client_subject: None,
                     status_code: Some(403),
                     request_body_bytes: 0,
                     response_body_bytes: 0,

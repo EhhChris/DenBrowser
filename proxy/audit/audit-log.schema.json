@@ -29,7 +29,7 @@
       "additionalProperties": false,
       "required": [
         "timestamp", "schema_version", "level", "logger", "event", "message",
-        "proxy", "client", "server", "user", "machine", "attestation", "http", "transfer"
+        "proxy", "client", "server", "tls", "machine", "attestation", "http", "transfer"
       ],
       "properties": {
         "timestamp": {
@@ -55,11 +55,11 @@
           "description": "The proxy's own address on this connection: the local socket address the client connected to (not the configured listen address, which may be a wildcard)."
         },
         "client": {
-          "$ref": "#/$defs/endpoint",
+          "$ref": "#/$defs/client",
           "description": "The connecting host's address as the proxy sees it. Behind NAT or a load balancer this is the last hop, not the workstation."
         },
         "server": { "$ref": "#/$defs/server" },
-        "user": { "$ref": "#/$defs/user" },
+        "tls": { "$ref": "#/$defs/tls" },
         "machine": { "$ref": "#/$defs/machine" },
         "attestation": { "$ref": "#/$defs/attestation" },
         "http": { "$ref": "#/$defs/http" },
@@ -340,20 +340,42 @@
       }
     },
 
+    "client": {
+      "description": "The connecting host. address is the OTel and ECS name; ip carries the same value, typed by ECS as ip for CIDR queries.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "ip", "port"],
+      "properties": {
+        "address": {
+          "description": "The client IP address as a string (OTel and ECS client.address).",
+          "type": ["string", "null"]
+        },
+        "ip": { "$ref": "#/$defs/endpoint/properties/ip" },
+        "port": { "$ref": "#/$defs/endpoint/properties/port" }
+      }
+    },
+
     "dn": {
       "description": "A certificate subject as an RFC 4514 string, most specific RDN first (CN=...,OU=...,O=...,C=...), with RFC 4514 escaping and control characters hex-escaped (\\0A). Cut to 1024 characters, marked with a trailing ellipsis.",
       "type": "string"
     },
 
-    "user": {
-      "description": "The mTLS user certificate, verified against [mtls].client_ca during the TLS handshake.",
+    "tls": {
+      "description": "The TLS connection (OTel and ECS tls.*).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["subject_dn"],
+      "required": ["client"],
       "properties": {
-        "subject_dn": {
-          "description": "Subject DN of the user certificate. Always trusted when present; null when [mtls] is disabled.",
-          "anyOf": [{ "$ref": "#/$defs/dn" }, { "type": "null" }]
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject"],
+          "properties": {
+            "subject": {
+              "description": "Subject DN of the mTLS user certificate, verified against [mtls].client_ca during the TLS handshake. Always trusted when present; null when [mtls] is disabled.",
+              "anyOf": [{ "$ref": "#/$defs/dn" }, { "type": "null" }]
+            }
+          }
         }
       }
     },

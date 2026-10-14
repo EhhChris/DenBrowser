@@ -273,9 +273,9 @@ pub struct AuditRecord {
     /// The proxy's own address on this connection.
     pub proxy: Endpoint,
     /// The connecting host.
-    pub client: Endpoint,
+    pub client: ClientFields,
     pub server: ServerFields,
-    pub user: UserFields,
+    pub tls: TlsFields,
     pub machine: MachineFields,
     pub attestation: AttestationFields,
     pub http: HttpFields,
@@ -308,11 +308,35 @@ impl From<Option<SocketAddr>> for Endpoint {
     }
 }
 
-/// The mTLS user certificate, verified at the handshake; null when `[mtls]` is
-/// disabled.
+/// The connecting host.  `address` and `ip` carry the same value: `address` is
+/// the OTel and ECS name, `ip` the ECS one typed for CIDR queries.
+#[derive(Clone, Debug, Serialize)]
+pub struct ClientFields {
+    pub address: Option<String>,
+    pub ip: Option<IpAddr>,
+    pub port: Option<u16>,
+}
+
+impl From<Option<SocketAddr>> for ClientFields {
+    fn from(addr: Option<SocketAddr>) -> Self {
+        Self {
+            address: addr.map(|a| a.ip().to_string()),
+            ip: addr.map(|a| a.ip()),
+            port: addr.map(|a| a.port()),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
-pub struct UserFields {
-    pub subject_dn: Option<String>,
+pub struct TlsFields {
+    pub client: TlsClientFields,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TlsClientFields {
+    /// Subject DN of the mTLS user certificate, verified at the handshake; null
+    /// when `[mtls]` is disabled.
+    pub subject: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -416,7 +440,7 @@ impl<'a> SystemRecord<'a> {
 pub struct Connection {
     pub proxy: Option<SocketAddr>,
     pub client: Option<SocketAddr>,
-    pub user_subject_dn: Option<String>,
+    pub tls_client_subject: Option<String>,
     pub status_code: Option<u16>,
     pub request_body_bytes: usize,
     pub response_body_bytes: u64,
@@ -665,11 +689,13 @@ impl RequestAudit {
             server: ServerFields {
                 address: self.host.take(),
             },
-            user: UserFields {
-                subject_dn: conn
-                    .user_subject_dn
-                    .as_deref()
-                    .map(|dn| bounded(dn, MAX_DN_CHARS)),
+            tls: TlsFields {
+                client: TlsClientFields {
+                    subject: conn
+                        .tls_client_subject
+                        .as_deref()
+                        .map(|dn| bounded(dn, MAX_DN_CHARS)),
+                },
             },
             machine: self.machine.clone(),
             attestation: self.attestation.clone(),
@@ -827,7 +853,7 @@ mod tests {
         Connection {
             proxy: Some("10.20.0.5:8443".parse().unwrap()),
             client: Some("10.4.2.17:52144".parse().unwrap()),
-            user_subject_dn: Some(USER_DN.to_owned()),
+            tls_client_subject: Some(USER_DN.to_owned()),
             status_code: status,
             request_body_bytes: up,
             response_body_bytes: down,
@@ -1207,7 +1233,7 @@ mod tests {
                 ctx.bypass("health-checker");
                 let mut conn = conn(Some(200), 0, 2);
                 conn.client = Some("10.9.0.12:40112".parse().unwrap());
-                conn.user_subject_dn =
+                conn.tls_client_subject =
                     Some("CN=health-checker,OU=Operations,O=Example Corp,C=US".to_owned());
                 Example::new(ctx, conn, 6)
             })),

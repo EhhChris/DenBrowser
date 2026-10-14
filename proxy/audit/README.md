@@ -57,9 +57,9 @@ the field is never omitted.
 | `event.duration_ms` | Time from request head to record. |
 | `message` | Human-readable account. Never contains the URL path. |
 | `proxy.ip`, `proxy.port` | The proxy's own address on this connection: the local socket the client reached, not the configured (possibly wildcard) listen address. |
-| `client.ip`, `client.port` | The connecting host. |
+| `client.address`, `client.ip`, `client.port` | The connecting host. `address` and `ip` hold the same IP: `address` is the OTel and ECS name, `ip` the ECS one. |
 | `server.address` | The host the client asked for (Host header, port removed). |
-| `user.subject_dn` | Subject DN of the mTLS user certificate (verified at the handshake). `null` when `[mtls]` is off. |
+| `tls.client.subject` | Subject DN of the mTLS user certificate (verified at the handshake). `null` when `[mtls]` is off. |
 | `machine.subject_dn` | Subject DN of the presented machine certificate, **whenever one could be parsed**, including certificates that failed or never reached verification. Trust it only when `machine.chain_verified` is `true`. |
 | `machine.status` | `verified`, `failed`, `absent` (not sent, not required), `not_evaluated` (refused or bypassed first), or `disabled`. |
 | `machine.hostname` | The verified workstation hostname. Set only when `status` is `verified`. |
@@ -152,7 +152,7 @@ jq -c 'select(.event.risk == "high" or .event.risk == "critical")' denbrowser-pr
 jq -r 'select(.event.stage // "" | startswith("attestation_")) | .event.reason' denbrowser-proxy.log.* | sort | uniq -c
 
 # Bytes downloaded per user
-jq -r 'select(.event.kind == "audit") | [.user.subject_dn, .transfer.response_body_bytes] | @tsv' denbrowser-proxy.log.* \
+jq -r 'select(.event.kind == "audit") | [.tls.client.subject, .transfer.response_body_bytes] | @tsv' denbrowser-proxy.log.* \
   | awk -F'\t' '{s[$1] += $2} END {for (u in s) print s[u], u}' | sort -rn
 
 # Follow one transaction

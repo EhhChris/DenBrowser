@@ -443,7 +443,7 @@ impl ProxyHttp for DenBrowserProxy {
         let conn = audit::Connection {
             proxy: session.server_addr().and_then(|a| a.as_inet()).copied(),
             client: session.client_addr().and_then(|a| a.as_inet()).copied(),
-            user_subject_dn: client_cert(session).map(|c| c.subject_dn.clone()),
+            tls_client_subject: client_cert(session).map(|c| c.subject_dn.clone()),
             status_code: session.response_written().map(|r| r.status.as_u16()),
             request_body_bytes: session.body_bytes_read(),
             response_body_bytes: ctx.response_body_bytes(),
