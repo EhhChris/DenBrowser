@@ -41,6 +41,14 @@
 //! * **Backpressure over loss.**  The writer is built with `lossy(false)`: when
 //!   the buffer fills, the logging call blocks instead of discarding the record.
 //!   For an audit log a stalled request is preferable to a hole in the trail.
+//! * **Pingora's own refusals are quiet.**  A request pingora rejects before
+//!   `request_filter` runs (malformed request line, duplicate or ambiguous
+//!   `Host`, bad framing) is answered 400 without reaching any `ProxyHttp`
+//!   hook, so it gets no audit record, and since pingora 0.9.0 its `system`
+//!   line is logged at `debug` only, so at `info` it leaves no trace.  That gap
+//!   is accepted: the debug line carries up to 2 KiB of the raw request,
+//!   attestation token and machine certificate included, which must never
+//!   land in this file.
 
 use std::fmt::Write as _;
 use std::time::SystemTime;

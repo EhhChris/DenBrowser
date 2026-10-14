@@ -37,6 +37,14 @@ TLS handshake failures, such as a client with no certificate when `[mtls]` is
 on, happen before any HTTP request exists. They appear only as pingora `system`
 lines (`Downstream handshake error from <ip>:<port> …`), never as audit records.
 
+Requests pingora itself refuses before `request_filter` runs (a malformed
+request line, a duplicate or ambiguous `Host`, bad framing) get no audit record
+either: pingora answers them `400` without calling the proxy. Since pingora
+0.9.0 its `system` line for them is logged at `debug` only, so at `info` they
+leave no trace. That line carries the raw request, attestation token and
+machine certificate included, so keep `pingora_proxy` at `info` or above in
+production.
+
 ## Audit record fields
 
 Every audit record has every field below. A value that doesn't apply is `null`;
@@ -58,7 +66,7 @@ the field is never omitted.
 | `message` | Human-readable account. Never contains the URL path. |
 | `proxy.ip`, `proxy.port` | The proxy's own address on this connection: the local socket the client reached, not the configured (possibly wildcard) listen address. |
 | `client.address`, `client.ip`, `client.port` | The connecting host. `address` and `ip` hold the same IP: `address` is the OTel and ECS name, `ip` the ECS one. |
-| `server.address` | The host the client asked for (Host header, port removed). |
+| `server.address` | The host the client asked for (Host header, or `:authority` over HTTP/2; port removed). |
 | `tls.client.subject` | Subject DN of the mTLS user certificate (verified at the handshake). `null` when `[mtls]` is off. |
 | `machine.subject_dn` | Subject DN of the presented machine certificate, **whenever one could be parsed**, including certificates that failed or never reached verification. Trust it only when `machine.chain_verified` is `true`. |
 | `machine.status` | `verified`, `failed`, `absent` (not sent, not required), `not_evaluated` (refused or bypassed first), or `disabled`. |
@@ -89,7 +97,7 @@ because ECS defines that field as a number.
 | `info` | Not a failure. |
 | `low` | Benign: no attestation headers at all (someone on a browser that isn't DenBrowser), or a client that went away. |
 | `medium` | Operational: clock skew, a missing or lapsed machine certificate, DNS trouble, rate limits, upstream failures. Track in aggregate. |
-| `high` | Something a correctly configured DenBrowser should never send: partial or malformed attestation, tokens that don't decrypt, replayed nonces, machine certificates outside policy or presented from the wrong address. Investigate. |
+| `high` | Something a correctly configured DenBrowser should never send: partial or malformed attestation, tokens that don't decrypt, replayed nonces, machine certificates outside policy or presented from the wrong address, requests pingora refuses as malformed. Investigate. |
 | `critical` | A well-formed token for this proxy that commits to a *different* request or body: a lifted token or a request altered in transit. Investigate immediately. |
 
 ## Reasons
@@ -124,6 +132,7 @@ attestation failure exactly when its stage starts with `attestation_`.
 | `body_too_large` | `attestation_body` | medium | 413 | Bound body over 64 KiB. |
 | `body_hash_mismatch` | `attestation_body` | **critical** | 403 | Body altered after it was attested. |
 | `body_read_failed` | `downstream` | low | 400 | Client didn't deliver the body. |
+| `request_malformed` | `downstream` | high | 400 | pingora refused the request after attestation passed: a `Connection` header nominating `Host` or `X-Forwarded-*`, a non-token, or ten or more names. |
 | `upstream_error` | `upstream` | medium | 502 | Upstream unreachable or failed mid-exchange. |
 | `downstream_error` | `downstream` | low | — | Client disconnected mid-exchange. |
 | `internal_error` | `internal` | medium | 500 | Proxy failure; pingora logs detail as a `system` line. |
