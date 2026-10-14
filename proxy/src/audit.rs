@@ -344,7 +344,7 @@ pub struct ServerFields {
     pub address: Option<String>,
 }
 
-/// The request, without its path — see the module docs.
+/// The request and response, without the path — see the module docs.
 #[derive(Debug, Serialize)]
 pub struct HttpFields {
     pub request: HttpRequestFields,
@@ -353,6 +353,7 @@ pub struct HttpFields {
 
 #[derive(Debug, Serialize)]
 pub struct HttpRequestFields {
+    /// As sent (case kept, not normalized), cut to 32 characters.
     pub method: Option<String>,
 }
 
@@ -474,7 +475,7 @@ impl RequestAudit {
         }
     }
 
-    /// The request line, minus its path.
+    /// The method and Host header (port removed); never the path.
     pub fn request(&mut self, method: &str, host: Option<&str>) {
         self.method = Some(bounded(method, MAX_METHOD_CHARS));
         self.host = host.map(|h| bounded(h, MAX_HOST_CHARS));
@@ -1629,22 +1630,55 @@ mod tests {
 
     #[test]
     fn schema_lists_every_record_field_the_code_writes() {
-        // Catches a field the schema documents but the code no longer writes.
+        // Every leaf path, at any depth, in both directions.
+        use std::collections::BTreeSet;
+
+        fn resolve<'a>(schema: &'a Value, node: &'a Value) -> &'a Value {
+            match node["$ref"].as_str() {
+                Some(r) => resolve(schema, &schema["$defs"][r.trim_start_matches("#/$defs/")]),
+                None => node,
+            }
+        }
+
+        fn documented(schema: &Value, node: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+            let node = resolve(schema, node);
+            // A nullable object is written as `anyOf: [{$ref}, {type: null}]`.
+            let object = std::iter::once(node)
+                .chain(node["anyOf"].as_array().into_iter().flatten())
+                .map(|n| resolve(schema, n))
+                .find_map(|n| n["properties"].as_object());
+            match object {
+                Some(props) => {
+                    for (key, child) in props {
+                        documented(schema, child, &format!("{prefix}{key}."), out);
+                    }
+                }
+                None => {
+                    out.insert(prefix.trim_end_matches('.').to_owned());
+                }
+            }
+        }
+
+        fn written(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+            match value.as_object() {
+                Some(map) => {
+                    for (key, child) in map {
+                        written(child, &format!("{prefix}{key}."), out);
+                    }
+                }
+                None => {
+                    out.insert(prefix.trim_end_matches('.').to_owned());
+                }
+            }
+        }
+
         let schema = schema();
-        let documented: Vec<&String> = schema["$defs"]["auditRecord"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .collect();
-        let example = examples()
-            .into_iter()
-            .find(|e| e["event"]["kind"] == "audit")
-            .unwrap();
-        let written: Vec<&String> = example.as_object().unwrap().keys().collect();
-        let mut documented = documented;
-        let mut written = written;
-        documented.sort();
-        written.sort();
-        assert_eq!(documented, written);
+        let mut in_schema = BTreeSet::new();
+        documented(&schema, &schema["$defs"]["auditRecord"], "", &mut in_schema);
+        let mut in_examples = BTreeSet::new();
+        for example in examples().iter().filter(|e| e["event"]["kind"] == "audit") {
+            written(example, "", &mut in_examples);
+        }
+        assert_eq!(in_schema, in_examples);
     }
 }

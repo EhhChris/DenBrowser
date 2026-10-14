@@ -30,7 +30,8 @@ python3 test/audit_log/test_audit_log_schema.py             # from the repo root
   `event.duration_ms`.
 - **`system`**: everything else: startup and configuration messages, fatal
   errors, and pingora's own diagnostics. Same envelope (`timestamp`,
-  `schema_version`, `level`, `logger`, `event`, `message`), no request fields.
+  `schema_version`, `level`, `logger`, `event`, `message`), no request fields,
+  plus an optional `fields` object for any extra structured values.
 
 TLS handshake failures, such as a client with no certificate when `[mtls]` is
 on, happen before any HTTP request exists. They appear only as pingora `system`
@@ -44,7 +45,10 @@ the field is never omitted.
 | Field | Meaning |
 |---|---|
 | `timestamp` | When the record was written (the end of the exchange): ISO 8601 UTC, millisecond precision, fixed width (`2026-10-14T13:04:05.250Z`). |
+| `schema_version` | Record layout version, currently `1.0`. |
+| `logger` | Always `denbrowser_proxy::audit` for audit records. |
 | `level` | `INFO` for a request that was forwarded and completed, `WARN` for every refusal and failure. `[logging].level = "warn"` keeps exactly the refusals and failures. |
+| `event.kind` | `audit` (this table) or `system`. |
 | `event.action` | What the proxy did: `forward`, `bypass`, `reject`, `rate_limit`, or `error` (failed before a decision). |
 | `event.outcome` | `success` or `failure`. A forwarded request whose upstream then fails is `forward` + `failure`. |
 | `event.stage` | *When* it failed: which check in the pipeline (table below). |
@@ -59,11 +63,12 @@ the field is never omitted.
 | `machine.subject_dn` | Subject DN of the presented machine certificate, **whenever one could be parsed**, including certificates that failed or never reached verification. Trust it only when `machine.chain_verified` is `true`. |
 | `machine.status` | `verified`, `failed`, `absent` (not sent, not required), `not_evaluated` (refused or bypassed first), or `disabled`. |
 | `machine.hostname` | The verified workstation hostname. Set only when `status` is `verified`. |
+| `machine.chain_verified` | Whether `machine.subject_dn` chained to `machine_ca`. Also `true` for `machine_hostname_unresolvable` and `machine_address_mismatch`, which are checked after the chain. |
 | `attestation.status` | `verified`, `failed`, `bypassed`, `incomplete` (token passed, then another control refused), or `not_evaluated`. |
 | `attestation.nonce` | `X-DenBrowser-Nonce` as sent: the transaction's unique identifier. Recorded even when invalid (cut to 64 characters). |
 | `attestation.client_timestamp` | `X-DenBrowser-Ts` as ISO 8601: the workstation's clock at attestation. Compare with `timestamp` to spot clock skew. |
 | `attestation.body_binding` | `bound` (body hash verified) or `unbound` (large upload, body not hashed). |
-| `http.request.method` | The request method. The path is never recorded. |
+| `http.request.method` | The request method as sent (case kept, cut to 32 characters). The path is never recorded. |
 | `http.response.status_code` | Status sent to the client. |
 | `transfer.request_body_bytes` | Body bytes read from the client (uploaded). |
 | `transfer.response_body_bytes` | Body bytes relayed to the client (downloaded). |
@@ -71,8 +76,8 @@ the field is never omitted.
 Both `transfer` counts are body bytes only, without headers or TLS framing.
 DNs are RFC 4514 strings, most specific first (`CN=…,OU=…,O=…,C=…`), with
 control characters hex-escaped (`\0A`). Client-supplied strings are capped
-(DN 1024, host 256, method 32, nonce 64 characters) and marked with `…` when
-cut.
+(DNs 1024, `server.address` 256, `http.request.method` 32, `attestation.nonce`
+64 characters) and marked with `…` when cut.
 
 ## Risk
 
@@ -127,7 +132,8 @@ attestation failure exactly when its stage starts with `attestation_`.
 
 **URL paths and query strings.** They name the documents, files, and searches a
 user touched, which is the data this product exists to keep from leaking.
-Records keep the method and host only. pingora's own error lines would
+Records keep only the method and host (`http.request.method`,
+`server.address`). pingora's own error lines would
 otherwise append `METHOD /path?query, Host: …`; the proxy overrides that summary
 to `METHOD host`. Rate-limit rules still *match* on the path; they just never
 log it.

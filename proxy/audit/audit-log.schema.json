@@ -439,7 +439,7 @@
     },
 
     "http": {
-      "description": "The request and response, without the path: paths and query strings name the files and searches a user touched, so they are never recorded. Names follow the OTel semantic conventions (http.request.method, http.response.status_code), which ECS shares.",
+      "description": "The request and response, without the path: paths and query strings name the files and searches a user touched, so they are never recorded. Names match ECS; http.response.status_code also matches OTel. http.request.method keeps the method as sent, as ECS defines it; OTel's equivalent for that value is http.request.method_original.",
       "type": "object",
       "additionalProperties": false,
       "required": ["request", "response"],
@@ -449,7 +449,7 @@
           "additionalProperties": false,
           "required": ["method"],
           "properties": {
-            "method": { "description": "HTTP method, cut to 32 characters.", "type": ["string", "null"] }
+            "method": { "description": "HTTP method as sent (case kept, not normalized), cut to 32 characters.", "type": ["string", "null"] }
           }
         },
         "response": {

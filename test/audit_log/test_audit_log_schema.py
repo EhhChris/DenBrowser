@@ -94,6 +94,10 @@ class AuditLogSchemaTest(unittest.TestCase):
             "success with a reason": lambda r: r["event"].update(reason="nonce_replay"),
             "unknown reason": lambda r: r["event"].update(reason="made_up"),
             "path smuggled into http": lambda r: r["http"].update(path="/secret.docx"),
+            "path smuggled into http.request": lambda r: r["http"]["request"].update(
+                path="/secret.docx"
+            ),
+            "url object added": lambda r: r.update(url={"path": "/secret.docx"}),
             "unverified machine with a hostname": lambda r: r["machine"].update(
                 status="failed", hostname="ws-1.example.com"
             ),
