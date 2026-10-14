@@ -6,6 +6,13 @@
 //! in an operator-chosen directory and, by default, mirrors the same events to
 //! stderr.
 //!
+//! # Every line is JSON
+//!
+//! Both outputs use [`JsonLines`].  Per-request audit records arrive already
+//! serialized (see [`crate::audit`]) and are written verbatim; every other
+//! event — startup messages, `fatal`, pingora's own diagnostics — is wrapped in
+//! a `system` record.  The layout is defined by `audit/audit-log.schema.json`.
+//!
 //! # Why `tracing` rather than a plain `log` backend
 //!
 //! File writes go through [`tracing_appender::non_blocking`], which hands the
@@ -35,13 +42,22 @@
 //!   the buffer fills, the logging call blocks instead of discarding the record.
 //!   For an audit log a stalled request is preferable to a hole in the trail.
 
+use std::fmt::Write as _;
+use std::time::SystemTime;
+
+use tracing::field::{Field, Visit};
 use tracing::level_filters::LevelFilter;
+use tracing::{Event, Subscriber};
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
+use crate::audit;
 use crate::config::LoggingConfig;
 
 /// Environment variable that overrides `[logging].level` when set.
@@ -68,12 +84,13 @@ pub fn init(cfg: &LoggingConfig) -> anyhow::Result<Option<WorkerGuard>> {
     let (file_layer, guard) = match cfg.file_enabled() {
         true => {
             let (writer, guard) = build_file_writer(cfg)?;
-            // ANSI escapes are for terminals; a log file should stay greppable.
-            (Some(fmt::layer().with_ansi(false).with_writer(writer)), Some(guard))
+            (Some(fmt::layer().event_format(JsonLines).with_writer(writer)), Some(guard))
         }
         false => (None, None),
     };
-    let stderr_layer = cfg.stderr.then(|| fmt::layer().with_writer(std::io::stderr));
+    let stderr_layer = cfg
+        .stderr
+        .then(|| fmt::layer().event_format(JsonLines).with_writer(std::io::stderr));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -85,6 +102,119 @@ pub fn init(cfg: &LoggingConfig) -> anyhow::Result<Option<WorkerGuard>> {
     sync_log_bridge_level();
 
     Ok(guard)
+}
+
+/// Formats every event as one JSON line.
+///
+/// An event on [`audit::TARGET`] has its [`audit::RECORD_FIELD`] written
+/// verbatim; anything else is wrapped in an [`audit::SystemRecord`].  JSON
+/// escaping stops hostile values (DNs, Host headers) from injecting newlines.
+pub struct JsonLines;
+
+impl<S, N> FormatEvent<S, N> for JsonLines
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        let meta = event.metadata();
+        let mut fields = Fields::new(meta.target() == audit::TARGET);
+        event.record(&mut fields);
+
+        if let Some(line) = fields.audit_record {
+            return writeln!(writer, "{line}");
+        }
+
+        // Records bridged from `log` (all of pingora) have target "log"; the
+        // real origin is in the `log.target` field.
+        let logger = fields.log_target.as_deref().unwrap_or(meta.target());
+        let record = audit::SystemRecord::new(
+            audit::timestamp(SystemTime::now()),
+            meta.level(),
+            logger,
+            &fields.message,
+            fields.extra,
+        );
+        let line = serde_json::to_string(&record).map_err(|_| std::fmt::Error)?;
+        writeln!(writer, "{line}")
+    }
+}
+
+/// Collects an event's fields for [`JsonLines`].
+struct Fields {
+    /// Only an event on the audit target may supply a verbatim record.
+    audit: bool,
+    audit_record: Option<String>,
+    message: String,
+    log_target: Option<String>,
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Fields {
+    fn new(audit: bool) -> Self {
+        Self {
+            audit,
+            audit_record: None,
+            message: String::new(),
+            log_target: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    fn put(&mut self, field: &Field, value: serde_json::Value) {
+        match field.name() {
+            "message" => {
+                self.message = match value {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                }
+            }
+            // Source location added by the `log` bridge; not logged.
+            "log.module_path" | "log.file" | "log.line" => {}
+            name => {
+                self.extra.insert(name.to_owned(), value);
+            }
+        }
+    }
+}
+
+impl Visit for Fields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            audit::RECORD_FIELD if self.audit => self.audit_record = Some(value.to_owned()),
+            "log.target" => self.log_target = Some(value.to_owned()),
+            _ => self.put(field, value.into()),
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        // `message` arrives here as `fmt::Arguments`, whose Debug is the text.
+        let mut text = String::new();
+        let _ = write!(text, "{value:?}");
+        self.record_str(field, &text);
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.put(field, value.into());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.put(field, value.into());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.put(field, value.into());
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        // NaN and infinities have no JSON form; they become null.
+        self.put(field, serde_json::Number::from_f64(value).map_or(serde_json::Value::Null, Into::into));
+    }
 }
 
 /// Resolve the filter from `RUST_LOG` if present, otherwise `[logging].level`.
@@ -301,6 +431,121 @@ mod tests {
             !log::log_enabled!(log::Level::Trace),
             "trace should stay closed so pingora's trace! records cost nothing"
         );
+    }
+
+    /// Run `f` under a thread-local [`JsonLines`] subscriber and return the
+    /// lines it wrote.  Must stay thread-local: another test installs the
+    /// global subscriber.
+    fn capture(f: impl FnOnce()) -> Vec<serde_json::Value> {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .event_format(JsonLines)
+                .with_writer(move || writer.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, f);
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        out.lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+            .collect()
+    }
+
+    #[test]
+    fn plain_events_become_system_records() {
+        let lines = capture(|| {
+            tracing::info!(port = 8443u64, "listening on {}", "0.0.0.0:8443");
+        });
+        assert_eq!(lines.len(), 1);
+        let l = &lines[0];
+        assert_eq!(l["event"]["kind"], "system");
+        assert_eq!(l["level"], "INFO");
+        assert_eq!(l["schema_version"], audit::SCHEMA_VERSION);
+        assert_eq!(l["logger"], "denbrowser_proxy::logging::tests");
+        assert_eq!(l["message"], "listening on 0.0.0.0:8443");
+        assert_eq!(l["fields"]["port"], 8443);
+        assert!(l["timestamp"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn bridged_log_records_keep_their_origin_and_drop_source_locations() {
+        // The shape tracing-log gives a pingora `log` record.
+        let lines = capture(|| {
+            tracing::event!(
+                target: "log",
+                tracing::Level::ERROR,
+                log.target = "pingora_proxy",
+                log.module_path = "pingora_proxy",
+                log.file = "src/lib.rs",
+                log.line = 917u64,
+                "Fail to proxy: Upstream ConnectRefused"
+            );
+        });
+        let l = &lines[0];
+        assert_eq!(l["logger"], "pingora_proxy");
+        assert_eq!(l["level"], "ERROR");
+        assert!(l.get("fields").is_none(), "source location should be dropped: {l}");
+    }
+
+    #[test]
+    fn audit_records_are_written_verbatim() {
+        let lines = capture(|| {
+            let mut ctx = audit::RequestAudit::new(false);
+            ctx.request("GET", Some("app.example.com"));
+            ctx.reject(audit::Reason::NoAttestationHeaders, "none");
+            ctx.finish(
+                &audit::Connection {
+                    proxy: None,
+                    client: None,
+                    tls_client_subject: None,
+                    status_code: Some(403),
+                    request_body_bytes: 0,
+                    response_body_bytes: 0,
+                },
+                None,
+            );
+        });
+        assert_eq!(lines.len(), 1);
+        let l = &lines[0];
+        assert_eq!(l["event"]["kind"], "audit");
+        assert_eq!(l["logger"], audit::TARGET);
+        assert_eq!(l["level"], "WARN");
+        assert_eq!(l["event"]["reason"], "no_attestation_headers");
+        assert!(l.get(audit::RECORD_FIELD).is_none(), "record must not be wrapped");
+    }
+
+    #[test]
+    fn only_the_audit_target_can_supply_a_verbatim_line() {
+        let lines = capture(|| {
+            tracing::warn!(audit_record = "{\"forged\":true}", "hello");
+        });
+        let l = &lines[0];
+        assert_eq!(l["event"]["kind"], "system");
+        assert_eq!(l["fields"][audit::RECORD_FIELD], "{\"forged\":true}");
+    }
+
+    #[test]
+    fn newlines_in_values_cannot_split_a_line() {
+        let lines = capture(|| {
+            tracing::warn!("evil\n{{\"event\":{{\"kind\":\"audit\"}}}}");
+        });
+        assert_eq!(lines.len(), 1, "an embedded newline must stay escaped");
+        assert_eq!(lines[0]["event"]["kind"], "system");
     }
 
     #[test]

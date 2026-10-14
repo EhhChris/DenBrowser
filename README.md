@@ -67,9 +67,12 @@ DenBrowser/
 ├── proxy/
 │   ├── Cargo.toml
 │   ├── proxy.example.toml      # Example operational config (attestation key, rate limiting, …)
+│   ├── audit/                  # JSON log schema (mapping) + an example of every audit event
 │   └── src/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
 │       ├── attest.rs           # ECIES verification + replay cache
+│       ├── audit.rs            # Structured JSON audit records, reasons, severities
+│       ├── logging.rs          # Log subscriber setup + JSON line formatter
 │       ├── config.rs           # Operational TOML config loader
 │       ├── ratelimit.rs        # Per-origin-IP request rate limiting
 │       ├── mtls.rs             # Baseline mutual-TLS client authentication
@@ -519,6 +522,17 @@ browser build has telemetry and diagnostics patched out (patch 010), so the prox
 is the only component that records anything and this output is the audit trail.
 The whole section is optional; omitting it logs at `info` to stderr only.
 
+Every line, in the file and on stderr, is one JSON object.  Each HTTP request
+produces exactly one **audit** record when it finishes, carrying the proxy and
+client IPs, the user and machine certificate DNs, the attestation nonce, an
+ISO 8601 UTC timestamp, the request and response body bytes, and, for a refusal,
+the pipeline stage it failed at, a reason code, and a risk level (`low` for a
+browser that sent no DenBrowser headers at all, up to `critical` for a token
+bound to a different request or body).  URL paths and query strings are never
+recorded.  Everything else (startup, pingora diagnostics) is a **system** record
+with the same envelope.  The schema, an example of every event type, the
+risk table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
+
 - `dir` — directory for rotating log files.  **Empty (the default) means stderr
   only.**  Created at startup if absent; if it is set but cannot be created or
   written the proxy **exits** rather than run with no audit trail.  Relative
@@ -528,12 +542,14 @@ The whole section is optional; omitting it logs at `info` to stderr only.
 - `level` — `RUST_LOG` syntax: a bare level (`trace`/`debug`/`info`/`warn`/
   `error`/`off`) or directives such as `"info,denbrowser_proxy=debug"`.  Default
   `info`, which records accepted *and* rejected requests; `warn` records only
-  rejections and rate limiting.
+  refusals and failed requests.  Audit records use the target
+  `denbrowser_proxy::audit`, so `"warn,denbrowser_proxy::audit=info"` keeps every
+  audit record while quieting everything else.
 - `rotation` — `"minutely"`, `"hourly"`, `"daily"` (default), or `"never"`.
 - `max_files` — rotated files to keep, oldest deleted first.  Default 14.  `0`
   keeps everything, leaving disk growth unbounded.
 - `stderr` — mirror to stderr as well (default `true`), for journald capture and
-  local development.  The file itself never contains terminal colour codes.
+  local development.  Both outputs carry the same JSON lines.
 
   ```toml
   [logging]
@@ -558,6 +574,11 @@ The whole section is optional; omitting it logs at `info` to stderr only.
 > at that level — a stock deployment logged *nothing at all*.  Existing config
 > files keep working untouched, but they will start producing `info` output on
 > stderr where they were previously silent.
+
+> **Upgrade note (JSON audit log).** The free-text `accepted — …` / `rejected — …`
+> lines are replaced by JSON records; anything parsing them needs updating.
+> [`proxy/audit/README.md`](proxy/audit/README.md#migrating-from-the-plain-text-log)
+> maps each old line to its new reason code.
 
 ---
 

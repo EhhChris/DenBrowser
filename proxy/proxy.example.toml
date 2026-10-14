@@ -231,6 +231,10 @@ allowed_subjects = ["health-checker", "ops.internal"]
 # telemetry and diagnostics patched out, so the proxy is the only component that
 # records anything — this output IS the audit trail.
 #
+# Every line is one JSON object: one audit record per request plus system
+# records for everything else.  URL paths are never logged.  The schema and an
+# example of every event are in proxy/audit/.
+#
 # Every setting below is optional and the defaults shown are what applies when
 # the whole section is omitted.
 
@@ -251,7 +255,9 @@ file_prefix = "denbrowser-proxy.log"
 # convenient way to turn up detail for one run without editing this file.
 #
 # `info` records both accepted and rejected requests.  Drop to `warn` to log
-# only rejections and rate limiting.
+# only refusals and failed requests.  Audit records use the target
+# denbrowser_proxy::audit, so "warn,denbrowser_proxy::audit=info" keeps every
+# audit record while quieting everything else.
 level = "info"
 
 # How often to start a new file: "minutely", "hourly", "daily", or "never".
@@ -262,6 +268,5 @@ rotation = "daily"
 max_files = 14
 
 # Also mirror everything to stderr.  Keep this on for systemd/journald capture
-# and for local development; the file stays free of terminal colour codes either
-# way.
+# and for local development; both outputs carry the same JSON lines.
 stderr = true

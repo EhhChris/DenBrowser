@@ -9,10 +9,11 @@
 //!
 //! This module supplies the other half: a [`TlsAccept`] callback that runs
 //! *after* a successful handshake and records the verified peer's identity
-//! (Common Name + SubjectAltName DNS entries) into the connection's TLS digest
-//! as a [`ClientCert`].  Because the handshake already enforced validity, the
-//! callback does not re-verify — it only extracts the identity so the request
-//! path can read it (for logging, and for the bypass subject allowlist).
+//! (subject DN, Common Name, and SubjectAltName DNS entries) into the
+//! connection's TLS digest as a [`ClientCert`].  Because the handshake already
+//! enforced validity, the callback does not re-verify — it only extracts the
+//! identity so the request path can read it (for the audit record, and for the
+//! bypass subject allowlist).
 //!
 //! mTLS is one orthogonal layer among four: it authenticates the *user* (client
 //! → proxy), TLS SPKI pinning authenticates the *proxy* to the browser (proxy →
@@ -28,7 +29,7 @@ use async_trait::async_trait;
 use pingora_core::listeners::{TlsAccept, TlsAcceptCallbacks};
 use pingora_core::tls::nid::Nid;
 use pingora_core::tls::ssl::SslRef;
-use pingora_core::tls::x509::{X509, X509Ref};
+use pingora_core::tls::x509::{X509, X509NameRef, X509Ref};
 
 use crate::config::MtlsConfig;
 
@@ -37,6 +38,8 @@ use crate::config::MtlsConfig;
 /// `SslDigestExtension::get::<ClientCert>()`.
 #[derive(Debug, Clone)]
 pub struct ClientCert {
+    /// The full subject, as an RFC 4514 string (see [`distinguished_name`]).
+    pub subject_dn: String,
     /// Subject Common Name, if the cert carries one.
     pub common_name: Option<String>,
     /// SubjectAltName DNS entries, in certificate order.
@@ -60,12 +63,14 @@ impl ClientCert {
 
     /// Extract the identity from a certificate.
     ///
-    /// Shared with [`crate::machine`], which needs the same Common Name and
-    /// SubjectAltName semantics for the machine certificate — keeping one
-    /// implementation stops the two identity paths from drifting apart.  Note
-    /// this only *reads* the subject; the caller is responsible for having
+    /// Shared with [`crate::machine`], which needs the same subject DN, Common
+    /// Name, and SubjectAltName semantics for the machine certificate — keeping
+    /// one implementation stops the two identity paths from drifting apart.
+    /// Note this only *reads* the subject; the caller is responsible for having
     /// established that the certificate is trusted.
     pub fn from_cert(cert: &X509Ref) -> Self {
+        let subject_dn = distinguished_name(cert.subject_name());
+
         let common_name = cert
             .subject_name()
             .entries_by_nid(Nid::COMMONNAME)
@@ -84,8 +89,62 @@ impl ClientCert {
             .unwrap_or_default();
 
         ClientCert {
+            subject_dn,
             common_name,
             san_dns,
+        }
+    }
+}
+
+/// Render a certificate name as an RFC 4514 string, most specific RDN first,
+/// e.g. `CN=alice,OU=Staff,O=Example Corp,C=US`.
+///
+/// Unknown attributes are named by dotted OID.  Control characters are always
+/// hex-escaped, so a hostile certificate cannot smuggle a line break through.
+/// Each entry is rendered as its own RDN, so multi-valued RDNs use `,`, not `+`.
+pub fn distinguished_name(name: &X509NameRef) -> String {
+    let mut out = String::new();
+    let entries: Vec<_> = name.entries().collect();
+    for (i, entry) in entries.iter().rev().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let object = entry.object();
+        let nid = object.nid();
+        match nid.short_name() {
+            Ok(short) if nid != Nid::UNDEF => out.push_str(short),
+            _ => out.push_str(&object.to_string()),
+        }
+        out.push('=');
+        let value = match entry.data().as_utf8() {
+            Ok(utf8) => utf8.to_string(),
+            Err(_) => String::from_utf8_lossy(entry.data().as_slice()).into_owned(),
+        };
+        escape_dn_value(&value, &mut out);
+    }
+    out
+}
+
+/// Escape one attribute value per RFC 4514 §2.4.
+fn escape_dn_value(value: &str, out: &mut String) {
+    use std::fmt::Write as _;
+
+    let last = value.chars().count().saturating_sub(1);
+    for (i, c) in value.chars().enumerate() {
+        match c {
+            '"' | '+' | ',' | ';' | '<' | '>' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '#' if i == 0 => out.push_str("\\#"),
+            ' ' if i == 0 || i == last => out.push_str("\\ "),
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    let _ = write!(out, "\\{b:02X}");
+                }
+            }
+            c => out.push(c),
         }
     }
 }
@@ -167,6 +226,7 @@ mod tests {
 
     fn cert(cn: Option<&str>, sans: &[&str]) -> ClientCert {
         ClientCert {
+            subject_dn: cn.map(|c| format!("CN={c}")).unwrap_or_default(),
             common_name: cn.map(str::to_owned),
             san_dns: sans.iter().map(|s| s.to_string()).collect(),
         }
@@ -189,6 +249,54 @@ mod tests {
         let c = cert(Some("cn"), &["a", "b"]);
         assert_eq!(c.matched(&["trusted".into()]), None);
         assert_eq!(cert(None, &[]).matched(&["x".into()]), None);
+    }
+
+    fn name(entries: &[(&str, &str)]) -> pingora_core::tls::x509::X509Name {
+        let mut b = pingora_core::tls::x509::X509NameBuilder::new().unwrap();
+        for (field, value) in entries {
+            b.append_entry_by_text(field, value).unwrap();
+        }
+        b.build()
+    }
+
+    #[test]
+    fn dn_is_rfc4514_most_specific_first() {
+        let n = name(&[("C", "US"), ("O", "Example Corp"), ("OU", "Staff"), ("CN", "alice")]);
+        assert_eq!(distinguished_name(&n), "CN=alice,OU=Staff,O=Example Corp,C=US");
+    }
+
+    #[test]
+    fn dn_escapes_rfc4514_specials() {
+        let n = name(&[("O", "Smith, Jones + Co; \"Ltd\" <x>"), ("CN", "#1 user ")]);
+        assert_eq!(
+            distinguished_name(&n),
+            r#"CN=\#1 user\ ,O=Smith\, Jones \+ Co\; \"Ltd\" \<x\>"#
+        );
+    }
+
+    #[test]
+    fn dn_hex_escapes_control_characters() {
+        // A CA that signs a name containing a newline must not be able to
+        // break a line in whatever renders the DN.
+        let n = name(&[("CN", "ws-1\naccepted")]);
+        assert_eq!(distinguished_name(&n), r"CN=ws-1\0Aaccepted");
+    }
+
+    #[test]
+    fn dn_keeps_non_ascii_text() {
+        let n = name(&[("CN", "Zoë Ångström")]);
+        assert_eq!(distinguished_name(&n), "CN=Zoë Ångström");
+    }
+
+    #[test]
+    fn dn_names_unknown_attributes_by_oid() {
+        let n = name(&[("1.3.6.1.4.1.55555.1", "x"), ("CN", "a")]);
+        assert_eq!(distinguished_name(&n), "CN=a,1.3.6.1.4.1.55555.1=x");
+    }
+
+    #[test]
+    fn dn_of_an_empty_name_is_empty() {
+        assert_eq!(distinguished_name(&name(&[])), "");
     }
 
     #[test]

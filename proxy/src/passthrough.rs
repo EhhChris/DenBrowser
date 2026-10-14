@@ -97,6 +97,7 @@ mod tests {
 
     fn cert(cn: &str) -> ClientCert {
         ClientCert {
+            subject_dn: format!("CN={cn}"),
             common_name: Some(cn.to_owned()),
             san_dns: vec![],
         }

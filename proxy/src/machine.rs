@@ -41,6 +41,10 @@
 //! Steps 2 and 3 inspect an untrusted certificate only to reject it early; its
 //! claimed name is not returned or resolved until step 4 establishes trust.
 //! This means an allowlist miss reaches neither signature verification nor DNS.
+//!
+//! The audit record does carry the subject DN of an unverified certificate,
+//! flagged `chain_verified: false`.  JSON encoding keeps its content from
+//! forging a record.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -54,8 +58,23 @@ use openssl::x509::store::{X509Store, X509StoreBuilder};
 use openssl::x509::verify::X509VerifyFlags;
 use openssl::x509::{X509, X509StoreContext};
 
+use crate::audit::Reason;
 use crate::config::MachineIdentityConfig;
 use crate::mtls::ClientCert;
+
+// OpenSSL `X509_V_ERR_*` codes (stable ABI) for a certificate outside its
+// validity period.
+const X509_V_ERR_CERT_NOT_YET_VALID: i32 = 9;
+const X509_V_ERR_CERT_HAS_EXPIRED: i32 = 10;
+
+/// The identity of a machine certificate that chained to `machine_ca`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedMachine {
+    /// The certificate's Common Name, lowercased: the workstation hostname.
+    pub hostname: String,
+    /// The certificate's full subject, as an RFC 4514 string.
+    pub subject_dn: String,
+}
 
 /// Why a machine certificate was rejected.  One variant per failure so the
 /// audit line names the actual cause, as [`crate::attest::AttestError`] does.
@@ -69,6 +88,10 @@ pub enum MachineError {
     NotDer,
     /// The certificate does not chain to `machine_ca`, with OpenSSL's reason.
     UntrustedChain(String),
+    /// The certificate (or a CA above it) is past its notAfter date.
+    CertExpired,
+    /// The certificate (or a CA above it) is before its notBefore date.
+    CertNotYetValid,
     /// The certificate carries no Common Name to identify the machine by.
     NoCommonName,
     /// The Common Name contains characters that must never reach a log line.
@@ -95,6 +118,12 @@ impl std::fmt::Display for MachineError {
             Self::UntrustedChain(r) => {
                 write!(f, "machine certificate does not chain to machine_ca: {r}")
             }
+            Self::CertExpired => {
+                write!(f, "machine certificate (or its issuing CA) has expired")
+            }
+            Self::CertNotYetValid => {
+                write!(f, "machine certificate (or its issuing CA) is not yet valid")
+            }
             Self::NoCommonName => write!(f, "machine certificate has no Common Name"),
             Self::UnsafeCommonName => {
                 write!(f, "machine certificate Common Name contains illegal characters")
@@ -114,6 +143,46 @@ impl std::fmt::Display for MachineError {
             }
         }
     }
+}
+
+impl MachineError {
+    /// The audit reason this failure is recorded under.
+    pub fn reason(&self) -> Reason {
+        match self {
+            Self::Missing => Reason::MachineCertMissing,
+            Self::NotBase64 | Self::NotDer => Reason::MachineCertMalformed,
+            Self::UntrustedChain(_) => Reason::MachineCertUntrusted,
+            Self::CertExpired => Reason::MachineCertExpired,
+            Self::CertNotYetValid => Reason::MachineCertNotYetValid,
+            Self::NoCommonName => Reason::MachineCertNoCommonName,
+            Self::UnsafeCommonName => Reason::MachineCertUnsafeCommonName,
+            Self::HostnameNotAllowed(_) => Reason::MachineHostnameNotAllowed,
+            Self::HostnameAddressMismatch { .. } => Reason::MachineAddressMismatch,
+            Self::HostnameUnresolvable(_) => Reason::MachineHostnameUnresolvable,
+            Self::NoClientAddress => Reason::MachineNoClientAddress,
+        }
+    }
+
+    /// Whether the certificate had already chained to `machine_ca` when this
+    /// failure was found (true only for the forward-DNS failures).
+    pub fn chain_verified(&self) -> bool {
+        matches!(
+            self,
+            Self::HostnameAddressMismatch { .. } | Self::HostnameUnresolvable(_)
+        )
+    }
+}
+
+/// The *unverified* subject DN of a presented machine certificate, for the
+/// audit record only.  `None` if the header holds no parseable certificate.
+pub fn presented_subject_dn(cert_b64: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(cert_b64.trim())
+        .ok()?;
+    let cert = X509::from_der(&der).ok()?;
+    Some(crate::mtls::distinguished_name(cert.subject_name()))
 }
 
 /// Resolves a hostname to its addresses.
@@ -278,9 +347,9 @@ impl MachineIdentity {
 
     /// Steps 1–4: decode, extract and sanitize the Common Name, match it against
     /// the allowlist, then chain-verify.  Returns the normalized (lowercase)
-    /// hostname only after trust is established.  The forward-DNS check is
-    /// applied separately by the caller.
-    pub fn verify_cert(&self, cert_b64: &str) -> Result<String, MachineError> {
+    /// hostname and the subject DN only after trust is established.  The
+    /// forward-DNS check is applied separately by the caller.
+    pub fn verify_cert(&self, cert_b64: &str) -> Result<VerifiedMachine, MachineError> {
         use base64::Engine as _;
 
         let der = base64::engine::general_purpose::STANDARD
@@ -290,7 +359,7 @@ impl MachineIdentity {
 
         // Inspect the claimed identity before doing signature verification, but
         // use it only for rejection at this stage.  An untrusted name must never
-        // be returned, logged, or sent to the resolver.
+        // be returned as the machine's identity or sent to the resolver.
         // Reuse the mTLS layer's subject extraction so CN/SAN semantics cannot
         // drift between the two certificate-identity paths.
         let identity = ClientCert::from_cert(&cert);
@@ -324,33 +393,41 @@ impl MachineIdentity {
         // `init` installs a guard that calls X509_STORE_CTX_cleanup when the
         // closure returns, so `error()` has to be read *inside* it — afterwards
         // the context has already been torn down.
-        let (ok, reason) = ctx
+        let (ok, code, reason) = ctx
             .init(&self.store, &cert, &empty, |c| {
                 let ok = c.verify_cert()?;
-                Ok((ok, c.error().to_string()))
+                Ok((ok, c.error().as_raw(), c.error().to_string()))
             })
             .map_err(|e| MachineError::UntrustedChain(e.to_string()))?;
         if !ok {
-            return Err(MachineError::UntrustedChain(reason));
+            return Err(match code {
+                X509_V_ERR_CERT_HAS_EXPIRED => MachineError::CertExpired,
+                X509_V_ERR_CERT_NOT_YET_VALID => MachineError::CertNotYetValid,
+                _ => MachineError::UntrustedChain(reason),
+            });
         }
 
-        Ok(cn)
+        Ok(VerifiedMachine {
+            hostname: cn,
+            subject_dn: identity.subject_dn,
+        })
     }
 
     /// The whole check: verify the certificate, then confirm the name it claims
     /// forward-resolves to the address the client actually connected from.
-    /// Returns the verified hostname for the audit trail.
+    /// Returns the verified identity for the audit trail.
     pub async fn verify(
         &self,
         cert_b64: &str,
         client_ip: Option<IpAddr>,
-    ) -> Result<String, MachineError> {
+    ) -> Result<VerifiedMachine, MachineError> {
         let ip = client_ip.ok_or(MachineError::NoClientAddress)?;
-        let cn = self.verify_cert(cert_b64)?;
+        let machine = self.verify_cert(cert_b64)?;
 
-        let addrs = self.resolve_cached(&cn).await;
+        let addrs = self.resolve_cached(&machine.hostname).await;
+        let cn = machine.hostname.clone();
         match addrs {
-            Some(addrs) if addrs.contains(&ip) => Ok(cn),
+            Some(addrs) if addrs.contains(&ip) => Ok(machine),
             Some(addrs) if addrs.is_empty() => Err(MachineError::HostnameUnresolvable(cn)),
             Some(_) => Err(MachineError::HostnameAddressMismatch { cn, ip }),
             None => Err(MachineError::HostnameUnresolvable(cn)),
@@ -524,7 +601,10 @@ mod tests {
         let leaf = make_leaf("ws-4417.corp.example.com", &ca);
         assert_eq!(
             v.verify_cert(&b64(&leaf)).unwrap(),
-            "ws-4417.corp.example.com"
+            VerifiedMachine {
+                hostname: "ws-4417.corp.example.com".into(),
+                subject_dn: "CN=ws-4417.corp.example.com".into(),
+            }
         );
     }
 
@@ -553,9 +633,11 @@ mod tests {
         );
         let err = v.verify_cert(&b64(&leaf)).unwrap_err();
         assert!(
-            matches!(&err, MachineError::UntrustedChain(r) if r.contains("expired")),
-            "expected an expiry reason, got: {err}"
+            matches!(&err, MachineError::CertExpired),
+            "expected an expiry, got: {err}"
         );
+        assert_eq!(err.reason(), Reason::MachineCertExpired);
+        assert!(!err.chain_verified());
     }
 
     #[test]
@@ -570,7 +652,7 @@ mod tests {
         );
         assert!(matches!(
             v.verify_cert(&b64(&leaf)),
-            Err(MachineError::UntrustedChain(_))
+            Err(MachineError::CertNotYetValid)
         ));
     }
 
@@ -633,12 +715,14 @@ mod tests {
 
         assert_eq!(
             v.verify_cert(&b64(&make_leaf("ws-4417.corp.example.com", &ca)))
-                .unwrap(),
+                .unwrap()
+                .hostname,
             "ws-4417.corp.example.com"
         );
         assert_eq!(
             v.verify_cert(&b64(&make_leaf("kiosk-9.corp.example.com", &ca)))
-                .unwrap(),
+                .unwrap()
+                .hostname,
             "kiosk-9.corp.example.com"
         );
 
@@ -678,7 +762,8 @@ mod tests {
         let v = verifier(&ca, &["ws-*.corp.example.com"]);
         assert_eq!(
             v.verify_cert(&b64(&make_leaf("WS-4417.CORP.EXAMPLE.COM", &ca)))
-                .unwrap(),
+                .unwrap()
+                .hostname,
             "ws-4417.corp.example.com"
         );
     }
@@ -688,7 +773,7 @@ mod tests {
         let ca = make_ca("Test Machine CA");
         let v = verifier(&ca, &[]);
         assert_eq!(
-            v.verify_cert(&b64(&make_leaf("anything.internal", &ca))).unwrap(),
+            v.verify_cert(&b64(&make_leaf("anything.internal", &ca))).unwrap().hostname,
             "anything.internal"
         );
     }
@@ -783,7 +868,7 @@ mod tests {
         let v = verifier_with(&ca, r.clone(), 300, 30, 3600);
         let leaf = make_leaf("ws-4417.corp.example.com", &ca);
         assert_eq!(
-            v.verify(&b64(&leaf), ip("10.4.2.17")).await.unwrap(),
+            v.verify(&b64(&leaf), ip("10.4.2.17")).await.unwrap().hostname,
             "ws-4417.corp.example.com"
         );
     }
