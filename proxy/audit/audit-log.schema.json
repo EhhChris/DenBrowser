@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:denbrowser:proxy:audit-log:1.0",
   "title": "DenBrowser proxy log record",
-  "description": "One line of the DenBrowser attestation proxy's log (file and stderr alike). Every line is a single JSON object of one of two kinds, distinguished by event.kind: an 'audit' record, written exactly once per HTTP request when the exchange ends, or a 'system' record for everything else (startup, configuration, fatal errors, and pingora's own diagnostics). URL paths and query strings are never recorded. Reason codes carry two annotations consumers may rely on: x-stage (where in the pipeline the failure is detected) and x-severity (how seriously to take it). Kept in step with proxy/src/audit.rs by that module's tests.",
+  "description": "One line of the DenBrowser attestation proxy's log (file and stderr alike). Every line is a single JSON object of one of two kinds, distinguished by event.kind: an 'audit' record, written exactly once per HTTP request when the exchange ends, or a 'system' record for everything else (startup, configuration, fatal errors, and pingora's own diagnostics). URL paths and query strings are never recorded. Reason codes carry two annotations consumers may rely on: x-stage (where in the pipeline the failure is detected) and x-risk (how seriously to take it). Kept in step with proxy/src/audit.rs by that module's tests.",
   "oneOf": [
     { "$ref": "#/$defs/auditRecord" },
     { "$ref": "#/$defs/systemRecord" }
@@ -29,7 +29,7 @@
       "additionalProperties": false,
       "required": [
         "timestamp", "schema_version", "level", "logger", "event", "message",
-        "proxy", "client", "user", "machine", "attestation", "http", "transfer"
+        "proxy", "client", "server", "user", "machine", "attestation", "http", "transfer"
       ],
       "properties": {
         "timestamp": {
@@ -58,6 +58,7 @@
           "$ref": "#/$defs/endpoint",
           "description": "The connecting host's address as the proxy sees it. Behind NAT or a load balancer this is the last hop, not the workstation."
         },
+        "server": { "$ref": "#/$defs/server" },
         "user": { "$ref": "#/$defs/user" },
         "machine": { "$ref": "#/$defs/machine" },
         "attestation": { "$ref": "#/$defs/attestation" },
@@ -66,7 +67,7 @@
       },
       "allOf": [
         {
-          "description": "A success has no reason and severity info; every failure has a reason, a stage, and a severity above info.",
+          "description": "A success has no reason and risk info; every failure has a reason, a stage, and a risk above info.",
           "if": {
             "required": ["event"],
             "properties": { "event": { "required": ["outcome"], "properties": { "outcome": { "const": "success" } } } }
@@ -79,7 +80,7 @@
                   "action": { "enum": ["forward", "bypass"] },
                   "stage": { "type": "null" },
                   "reason": { "type": "null" },
-                  "severity": { "const": "info" }
+                  "risk": { "const": "info" }
                 }
               }
             }
@@ -91,7 +92,7 @@
                 "properties": {
                   "stage": { "type": "string" },
                   "reason": { "type": "string" },
-                  "severity": { "not": { "const": "info" } }
+                  "risk": { "not": { "const": "info" } }
                 }
               }
             }
@@ -101,10 +102,10 @@
     },
 
     "auditEvent": {
-      "description": "The decision. action says what the proxy did; outcome whether the exchange completed; stage and reason say where and how it failed (the when and how of an attestation failure); severity how seriously to take it.",
+      "description": "The decision. action says what the proxy did; outcome whether the exchange completed; stage and reason say where and how it failed (the when and how of an attestation failure); risk how seriously to take it.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "action", "outcome", "stage", "reason", "severity", "duration_ms"],
+      "required": ["kind", "action", "outcome", "stage", "reason", "risk", "duration_ms"],
       "properties": {
         "kind": { "const": "audit" },
         "action": { "$ref": "#/$defs/action" },
@@ -117,9 +118,9 @@
           "description": "Machine-readable failure code; null on success.",
           "anyOf": [{ "$ref": "#/$defs/reason" }, { "type": "null" }]
         },
-        "severity": {
-          "$ref": "#/$defs/severity",
-          "description": "info on success; otherwise always equals the x-severity of event.reason."
+        "risk": {
+          "$ref": "#/$defs/risk",
+          "description": "How severe the event is: info on success; otherwise always equals the x-risk of event.reason. Not event.severity, which ECS defines as a number."
         },
         "duration_ms": {
           "description": "Milliseconds from the request head arriving to the record being written. Includes the upstream exchange and the time to stream the response.",
@@ -137,7 +138,7 @@
       "description": "success: forwarded (or bypassed) and the exchange completed — whatever status the upstream returned. failure: refused, or forwarded and then failed (upstream unreachable, client disconnected).",
       "enum": ["success", "failure"]
     },
-    "severity": {
+    "risk": {
       "description": "info: not a failure. low: benign — no attestation headers at all (someone on a browser that isn't DenBrowser), or a client that went away. medium: operational — clock skew, a missing or lapsed machine certificate, DNS trouble, rate limits, upstream failures; track in aggregate. high: something a correctly configured DenBrowser should never send — partial or malformed attestation, tokens that do not decrypt, replayed nonces, machine certificates outside policy or presented from the wrong address; investigate. critical: a well-formed token for this proxy that commits to a different request or body — a lifted token or a request altered in transit; investigate immediately.",
       "enum": ["info", "low", "medium", "high", "critical"]
     },
@@ -155,169 +156,169 @@
       ]
     },
     "reason": {
-      "description": "Why a request was refused or failed. Each code's stage and severity are fixed, and given here as the x-stage and x-severity annotations.",
+      "description": "Why a request was refused or failed. Each code's stage and risk are fixed, and given here as the x-stage and x-risk annotations.",
       "oneOf": [
         {
           "const": "rate_limited",
           "description": "The client IP exceeded a [rate_limiting] cap (the universal cap or a per-URL-pattern rule). HTTP 429.",
           "x-stage": "rate_limit",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "no_attestation_headers",
           "description": "None of the attestation headers (and no machine certificate) were sent: the user is on a browser that isn't DenBrowser, or a DenBrowser whose build does not list this proxy. HTTP 403.",
           "x-stage": "attestation_headers",
-          "x-severity": "low"
+          "x-risk": "low"
         },
         {
           "const": "incomplete_attestation_headers",
           "description": "Some attestation headers were sent but not all (or one is not readable as a header string, or the Host header is missing), or a machine certificate arrived without any attestation. DenBrowser always sends the full set, so this is a client that knows the protocol and is getting it wrong. HTTP 403.",
           "x-stage": "attestation_headers",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_cert_missing",
           "description": "[machine_identity] is required and no X-DenBrowser-Machine-Cert was sent: a workstation without an enrolled machine certificate, or a non-Windows DenBrowser build (which never sends one). HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "machine_cert_malformed",
           "description": "X-DenBrowser-Machine-Cert is not base64, or does not decode to a DER certificate. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_cert_no_common_name",
           "description": "The machine certificate has no Common Name to identify the workstation by. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_cert_unsafe_common_name",
           "description": "The machine certificate's Common Name contains spaces, control characters, or non-ASCII — nothing a hostname may hold, and the shape of a log-injection attempt. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_hostname_not_allowed",
           "description": "The machine certificate names a host outside [machine_identity].allowed_hostnames. Checked before chain verification, so the certificate may not be from machine_ca at all. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_cert_expired",
           "description": "The machine certificate (or a CA above it) is past its notAfter date: a renewal that did not happen, or DenBrowser still holding the old certificate (it caches the DER until restart). HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "machine_cert_not_yet_valid",
           "description": "The machine certificate (or a CA above it) is before its notBefore date — usually a clock that is wrong on the proxy or the issuing CA. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "machine_cert_untrusted",
           "description": "The machine certificate does not chain to [machine_identity].machine_ca; the message carries OpenSSL's reason. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_hostname_unresolvable",
           "description": "The (trusted) machine hostname does not resolve, and no usable cached answer covers it: an unprovisioned DNS record or a resolver outage on a cold cache. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "machine_address_mismatch",
           "description": "A trusted machine certificate was presented from an address its hostname does not resolve to: a copied certificate, NAT in front of the proxy, or DNS lagging a DHCP change. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "machine_no_client_address",
           "description": "The connection has no peer IP address to check the machine hostname against. Should not happen for TCP. HTTP 403.",
           "x-stage": "machine_identity",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "timestamp_invalid",
           "description": "X-DenBrowser-Ts is not an integer. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "timestamp_out_of_window",
           "description": "The attestation timestamp is more than 30 seconds from the proxy's clock — almost always a workstation (or proxy) clock that has drifted. Compare attestation.client_timestamp with timestamp. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "nonce_invalid",
           "description": "X-DenBrowser-Nonce is not base64 or is not 16 bytes. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "nonce_replay",
           "description": "The nonce was already accepted within the replay window: a captured request replayed. High rather than critical because it is checked before the token is authenticated, and the browser's network stack can resend an already-processed request with the same headers after a dropped connection. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "token_malformed",
           "description": "X-DenBrowser-Token is not base64, is too short, or does not carry a valid EC point. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "token_decrypt_failed",
           "description": "The token did not decrypt with this proxy's attestation key: forged, corrupted, or built for a different proxy's key. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "high"
+          "x-risk": "high"
         },
         {
           "const": "token_request_mismatch",
           "description": "The token decrypted but commits to a different method, host, path, timestamp, or nonce than the request carrying it — a token lifted from another request, or a request altered in transit. HTTP 403.",
           "x-stage": "attestation_token",
-          "x-severity": "critical"
+          "x-risk": "critical"
         },
         {
           "const": "body_too_large",
           "description": "A body bound to the token exceeded the 64 KiB that can be verified before forwarding; DenBrowser sends larger bodies as unbound uploads. HTTP 413.",
           "x-stage": "attestation_body",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "body_hash_mismatch",
           "description": "The request body does not match the hash the token commits to: the body was altered after the browser attested it. HTTP 403.",
           "x-stage": "attestation_body",
-          "x-severity": "critical"
+          "x-risk": "critical"
         },
         {
           "const": "body_read_failed",
           "description": "The client did not deliver the body being verified (disconnected, timed out, or sent a malformed encoding). HTTP 400 when the client is still there to receive it.",
           "x-stage": "downstream",
-          "x-severity": "low"
+          "x-risk": "low"
         },
         {
           "const": "upstream_error",
           "description": "The request was forwarded (or bypassed) but the upstream could not be reached or failed mid-exchange; the message names pingora's error type. Usually HTTP 502.",
           "x-stage": "upstream",
-          "x-severity": "medium"
+          "x-risk": "medium"
         },
         {
           "const": "downstream_error",
           "description": "The request was forwarded (or bypassed) but the client's connection failed mid-exchange, typically a user closing a tab during a download. transfer shows how far it got.",
           "x-stage": "downstream",
-          "x-severity": "low"
+          "x-risk": "low"
         },
         {
           "const": "internal_error",
           "description": "The proxy itself failed, or the request ended before a decision was recorded. Always worth a look; pingora logs the detail as a system record.",
           "x-stage": "internal",
-          "x-severity": "medium"
+          "x-risk": "medium"
         }
       ]
     },
@@ -424,22 +425,45 @@
       "enum": ["bound", "unbound"]
     },
 
-    "http": {
-      "description": "The request line without its path: paths and query strings name the files and searches a user touched, so they are never recorded.",
+    "server": {
+      "description": "The server the client asked for (OTel semantic convention server.address).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["method", "host", "status_code"],
+      "required": ["address"],
       "properties": {
-        "method": { "description": "HTTP method, cut to 32 characters.", "type": ["string", "null"] },
-        "host": {
+        "address": {
           "description": "Host header with any port removed, cut to 256 characters; null when absent.",
           "type": ["string", "null"]
+        }
+      }
+    },
+
+    "http": {
+      "description": "The request and response, without the path: paths and query strings name the files and searches a user touched, so they are never recorded. Names follow the OTel semantic conventions (http.request.method, http.response.status_code), which ECS shares.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "response"],
+      "properties": {
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method"],
+          "properties": {
+            "method": { "description": "HTTP method, cut to 32 characters.", "type": ["string", "null"] }
+          }
         },
-        "status_code": {
-          "description": "Status sent to the client — the proxy's own refusal code, or the upstream's. null when the connection failed before any status was sent.",
-          "type": ["integer", "null"],
-          "minimum": 100,
-          "maximum": 999
+        "response": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status_code"],
+          "properties": {
+            "status_code": {
+              "description": "Status sent to the client — the proxy's own refusal code, or the upstream's. null when the connection failed before any status was sent.",
+              "type": ["integer", "null"],
+              "minimum": 100,
+              "maximum": 999
+            }
+          }
         }
       }
     },

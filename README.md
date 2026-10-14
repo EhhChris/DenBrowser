@@ -526,12 +526,12 @@ Every line, in the file and on stderr, is one JSON object.  Each HTTP request
 produces exactly one **audit** record when it finishes, carrying the proxy and
 client IPs, the user and machine certificate DNs, the attestation nonce, an
 ISO 8601 UTC timestamp, the request and response body bytes, and, for a refusal,
-the pipeline stage it failed at, a reason code, and a severity (`low` for a
+the pipeline stage it failed at, a reason code, and a risk level (`low` for a
 browser that sent no DenBrowser headers at all, up to `critical` for a token
 bound to a different request or body).  URL paths and query strings are never
 recorded.  Everything else (startup, pingora diagnostics) is a **system** record
 with the same envelope.  The schema, an example of every event type, the
-severity table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
+risk table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
 
 - `dir` — directory for rotating log files.  **Empty (the default) means stderr
   only.**  Created at startup if absent; if it is set but cannot be created or

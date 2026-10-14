@@ -6,7 +6,7 @@
 //! everything else, wrapped by [`crate::logging`].
 //!
 //! `audit/audit-log.schema.json` defines the format and `audit/README.md` the
-//! severity scale.  The tests below regenerate `audit/audit-log.examples.jsonl`
+//! risk scale.  The tests below regenerate `audit/audit-log.examples.jsonl`
 //! and check the schema against this code.
 //!
 //! Records must never contain the URL path or query string.
@@ -40,7 +40,7 @@ const MAX_NONCE_CHARS: usize = 64;
 /// `info` is only for requests that were not refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Severity {
+pub enum Risk {
     Info,
     Low,
     Medium,
@@ -81,9 +81,9 @@ impl Stage {
     }
 }
 
-/// Defines [`Reason`] with each variant's code, stage, and severity.
+/// Defines [`Reason`] with each variant's code, stage, and risk.
 macro_rules! reasons {
-    ($( $(#[$doc:meta])* $variant:ident => $code:literal, $stage:ident, $severity:ident; )*) => {
+    ($( $(#[$doc:meta])* $variant:ident => $code:literal, $stage:ident, $risk:ident; )*) => {
         /// Why a request was refused or failed.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum Reason {
@@ -106,8 +106,8 @@ macro_rules! reasons {
             }
 
             /// How seriously to take it.
-            pub fn severity(self) -> Severity {
-                match self { $(Reason::$variant => Severity::$severity,)* }
+            pub fn risk(self) -> Risk {
+                match self { $(Reason::$variant => Risk::$risk,)* }
             }
         }
     };
@@ -274,6 +274,7 @@ pub struct AuditRecord {
     pub proxy: Endpoint,
     /// The connecting host.
     pub client: Endpoint,
+    pub server: ServerFields,
     pub user: UserFields,
     pub machine: MachineFields,
     pub attestation: AttestationFields,
@@ -288,7 +289,7 @@ pub struct AuditEvent {
     pub outcome: Outcome,
     pub stage: Option<Stage>,
     pub reason: Option<Reason>,
-    pub severity: Severity,
+    pub risk: Risk,
     pub duration_ms: u64,
 }
 
@@ -337,11 +338,26 @@ pub struct AttestationFields {
     pub body_binding: Option<Binding>,
 }
 
+/// The server the client asked for: the Host header, port removed.
+#[derive(Debug, Serialize)]
+pub struct ServerFields {
+    pub address: Option<String>,
+}
+
 /// The request, without its path — see the module docs.
 #[derive(Debug, Serialize)]
 pub struct HttpFields {
+    pub request: HttpRequestFields,
+    pub response: HttpResponseFields,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HttpRequestFields {
     pub method: Option<String>,
-    pub host: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HttpResponseFields {
     /// Status sent to the client; null when the connection died before one was.
     pub status_code: Option<u16>,
 }
@@ -639,12 +655,15 @@ impl RequestAudit {
                 outcome,
                 stage: self.reason.map(Reason::stage),
                 reason: self.reason,
-                severity: self.reason.map_or(Severity::Info, Reason::severity),
+                risk: self.reason.map_or(Risk::Info, Reason::risk),
                 duration_ms,
             },
             message: self.message.take().unwrap_or_default(),
             proxy: conn.proxy.into(),
             client: conn.client.into(),
+            server: ServerFields {
+                address: self.host.take(),
+            },
             user: UserFields {
                 subject_dn: conn
                     .user_subject_dn
@@ -654,9 +673,12 @@ impl RequestAudit {
             machine: self.machine.clone(),
             attestation: self.attestation.clone(),
             http: HttpFields {
-                method: self.method.take(),
-                host: self.host.take(),
-                status_code: conn.status_code,
+                request: HttpRequestFields {
+                    method: self.method.take(),
+                },
+                response: HttpResponseFields {
+                    status_code: conn.status_code,
+                },
             },
             transfer: TransferFields {
                 request_body_bytes: conn.request_body_bytes as u64,
@@ -825,7 +847,7 @@ mod tests {
         assert_eq!(r["level"], "INFO");
         assert_eq!(r["event"]["action"], "forward");
         assert_eq!(r["event"]["outcome"], "success");
-        assert_eq!(r["event"]["severity"], "info");
+        assert_eq!(r["event"]["risk"], "info");
         assert_eq!(r["event"]["stage"], Value::Null);
         assert_eq!(r["event"]["reason"], Value::Null);
         assert_eq!(r["attestation"]["status"], "verified");
@@ -834,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn attestation_failures_carry_their_reason_and_severity() {
+    fn attestation_failures_carry_their_reason_and_risk() {
         for e in [
             AttestError::BadTimestamp,
             AttestError::TimestampDrift(95),
@@ -853,8 +875,8 @@ mod tests {
             assert_eq!(r["event"]["outcome"], "failure", "{e}");
             assert_eq!(r["event"]["reason"], e.reason().code(), "{e}");
             assert_eq!(
-                r["event"]["severity"],
-                serde_json::to_value(e.reason().severity()).unwrap()
+                r["event"]["risk"],
+                serde_json::to_value(e.reason().risk()).unwrap()
             );
             assert_eq!(r["attestation"]["status"], "failed", "{e}");
             assert_eq!(r["message"], e.to_string());
@@ -863,20 +885,17 @@ mod tests {
 
     #[test]
     fn missing_headers_are_low_but_partial_headers_are_high() {
-        assert_eq!(Reason::NoAttestationHeaders.severity(), Severity::Low);
-        assert_eq!(
-            Reason::IncompleteAttestationHeaders.severity(),
-            Severity::High
-        );
+        assert_eq!(Reason::NoAttestationHeaders.risk(), Risk::Low);
+        assert_eq!(Reason::IncompleteAttestationHeaders.risk(), Risk::High);
         // Every other refusal is more than low, bar the client going away.
         for r in Reason::ALL {
             if !matches!(
                 r,
                 Reason::NoAttestationHeaders | Reason::BodyReadFailed | Reason::DownstreamError
             ) {
-                assert_ne!(r.severity(), Severity::Low, "{r:?}");
+                assert_ne!(r.risk(), Risk::Low, "{r:?}");
             }
-            assert_ne!(r.severity(), Severity::Info, "{r:?} is a failure");
+            assert_ne!(r.risk(), Risk::Info, "{r:?} is a failure");
         }
     }
 
@@ -1018,11 +1037,15 @@ mod tests {
         );
         let r = json(&mut ctx, &conn(Some(403), 0, 0), None);
         assert_eq!(
-            r["http"]["host"].as_str().unwrap().chars().count(),
+            r["server"]["address"].as_str().unwrap().chars().count(),
             MAX_HOST_CHARS + 1
         );
         assert_eq!(
-            r["http"]["method"].as_str().unwrap().chars().count(),
+            r["http"]["request"]["method"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
             MAX_METHOD_CHARS + 1
         );
         assert_eq!(
@@ -1507,7 +1530,7 @@ mod tests {
                 (
                     r["const"].clone(),
                     r["x-stage"].clone(),
-                    r["x-severity"].clone(),
+                    r["x-risk"].clone(),
                 )
             })
             .collect();
@@ -1517,7 +1540,7 @@ mod tests {
                 (
                     Value::from(r.code()),
                     serde_json::to_value(r.stage()).unwrap(),
-                    serde_json::to_value(r.severity()).unwrap(),
+                    serde_json::to_value(r.risk()).unwrap(),
                 )
             })
             .collect();
@@ -1537,10 +1560,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("$defs.{name}.enum missing"))
                 .clone()
         };
-        use Severity as Sv;
         assert_eq!(
-            enum_of("severity"),
-            names(&[Sv::Info, Sv::Low, Sv::Medium, Sv::High, Sv::Critical])
+            enum_of("risk"),
+            names(&[
+                Risk::Info,
+                Risk::Low,
+                Risk::Medium,
+                Risk::High,
+                Risk::Critical
+            ])
         );
         use Stage as St;
         assert_eq!(

@@ -5,7 +5,7 @@ Every line it writes — to the log file and to stderr — is one JSON object.
 
 | File | What it is |
 |---|---|
-| [`audit-log.schema.json`](audit-log.schema.json) | The mapping: a JSON Schema (draft 2020-12) defining every field, its type, and what it means, plus every failure reason with its pipeline stage and severity (`x-stage`, `x-severity`). |
+| [`audit-log.schema.json`](audit-log.schema.json) | The mapping: a JSON Schema (draft 2020-12) defining every field, its type, and what it means, plus every failure reason with its pipeline stage and risk (`x-stage`, `x-risk`). |
 | [`audit-log.examples.jsonl`](audit-log.examples.jsonl) | One line of real output for every type of audit event and for both kinds of system line, exactly as the proxy writes them. |
 
 Neither file is maintained by hand. `src/audit.rs` defines the records, and its
@@ -49,11 +49,12 @@ the field is never omitted.
 | `event.outcome` | `success` or `failure`. A forwarded request whose upstream then fails is `forward` + `failure`. |
 | `event.stage` | *When* it failed: which check in the pipeline (table below). |
 | `event.reason` | *How* it failed: machine-readable code (table below). |
-| `event.severity` | `info` for successes; otherwise the reason's fixed severity. |
+| `event.risk` | How severe the event is: `info` for successes; otherwise the reason's fixed risk level. |
 | `event.duration_ms` | Time from request head to record. |
 | `message` | Human-readable account. Never contains the URL path. |
 | `proxy.ip`, `proxy.port` | The proxy's own address on this connection: the local socket the client reached, not the configured (possibly wildcard) listen address. |
 | `client.ip`, `client.port` | The connecting host. |
+| `server.address` | The host the client asked for (Host header, port removed). |
 | `user.subject_dn` | Subject DN of the mTLS user certificate (verified at the handshake). `null` when `[mtls]` is off. |
 | `machine.subject_dn` | Subject DN of the presented machine certificate, **whenever one could be parsed**, including certificates that failed or never reached verification. Trust it only when `machine.chain_verified` is `true`. |
 | `machine.status` | `verified`, `failed`, `absent` (not sent, not required), `not_evaluated` (refused or bypassed first), or `disabled`. |
@@ -62,8 +63,8 @@ the field is never omitted.
 | `attestation.nonce` | `X-DenBrowser-Nonce` as sent: the transaction's unique identifier. Recorded even when invalid (cut to 64 characters). |
 | `attestation.client_timestamp` | `X-DenBrowser-Ts` as ISO 8601: the workstation's clock at attestation. Compare with `timestamp` to spot clock skew. |
 | `attestation.body_binding` | `bound` (body hash verified) or `unbound` (large upload, body not hashed). |
-| `http.method`, `http.host` | The request line **without its path**. The host has any port removed. |
-| `http.status_code` | Status sent to the client. |
+| `http.request.method` | The request method. The path is never recorded. |
+| `http.response.status_code` | Status sent to the client. |
 | `transfer.request_body_bytes` | Body bytes read from the client (uploaded). |
 | `transfer.response_body_bytes` | Body bytes relayed to the client (downloaded). |
 
@@ -73,9 +74,12 @@ control characters hex-escaped (`\0A`). Client-supplied strings are capped
 (DN 1024, host 256, method 32, nonce 64 characters) and marked with `…` when
 cut.
 
-## Severity
+## Risk
 
-| Severity | Meaning |
+`event.risk` is how severe an event is. It is not called `event.severity`
+because ECS defines that field as a number.
+
+| Risk | Meaning |
 |---|---|
 | `info` | Not a failure. |
 | `low` | Benign: no attestation headers at all (someone on a browser that isn't DenBrowser), or a client that went away. |
@@ -89,7 +93,7 @@ Stages run top to bottom, except that `machine_identity` checks presence before
 `attestation_token` and verifies the certificate after it. A failure is an
 attestation failure exactly when its stage starts with `attestation_`.
 
-| Reason | Stage | Severity | HTTP | Typical cause |
+| Reason | Stage | Risk | HTTP | Typical cause |
 |---|---|---|---|---|
 | `rate_limited` | `rate_limit` | medium | 429 | Client IP over a `[rate_limiting]` cap. |
 | `no_attestation_headers` | `attestation_headers` | **low** | 403 | Not DenBrowser, or a DenBrowser build that doesn't list this proxy. |
@@ -136,7 +140,7 @@ retention on the log directory accordingly.
 
 ```sh
 # Everything worth a look
-jq -c 'select(.event.severity == "high" or .event.severity == "critical")' denbrowser-proxy.log.*
+jq -c 'select(.event.risk == "high" or .event.risk == "critical")' denbrowser-proxy.log.*
 
 # Attestation failures by reason
 jq -r 'select(.event.stage // "" | startswith("attestation_")) | .event.reason' denbrowser-proxy.log.* | sort | uniq -c

@@ -240,8 +240,8 @@ impl ProxyHttp for DenBrowserProxy {
         let nonce = header_str(&req.headers, NONCE_HEADER);
         let token = header_str(&req.headers, TOKEN_HEADER);
 
-        // No DenBrowser headers at all is likely another browser (low
-        // severity); a partial set is a client getting the protocol wrong.
+        // No DenBrowser headers at all is likely another browser (low risk);
+        // a partial set is a client getting the protocol wrong.
         let (ts, nonce, token, host) = match (ts, nonce, token, host) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             (_, _, _, host) => {
