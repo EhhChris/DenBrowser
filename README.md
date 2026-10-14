@@ -373,7 +373,8 @@ by `test/attestation/test_roundtrip.py`, which drives it with `curl`.
   attestation or rate limiting run.  A `Connection` header naming a protected
   header such as `Host`, or ten or more names, is answered `400` *after*
   attestation passed; that request's nonce is spent, and its audit record is a
-  failed `forward` with reason `downstream_error` and status `400`.
+  failed `forward` with reason `request_malformed` (risk `high`) and status
+  `400`.
 - A `POST` that fails on a reused upstream connection is answered `502` rather
   than retried, so the backend can never receive a side-effecting request
   twice.  The browser mints a fresh token per request, so retrying is safe.

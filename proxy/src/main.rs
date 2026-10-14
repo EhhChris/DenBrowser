@@ -146,7 +146,7 @@ impl ProxyHttp for DenBrowserProxy {
     ///   name (`Host`, `X-Forwarded-*`), a non-token, or ten or more names.
     ///   That refusal comes *after* `request_filter` has accepted the request
     ///   and committed its nonce, so its audit record is the `forward` failing
-    ///   with `downstream_error`; browsers never send such headers.  The
+    ///   with `request_malformed`; browsers never send such headers.  The
     ///   attestation headers are end-to-end headers this policy never touches —
     ///   `upstream_request_filter` below remains what strips them.
     /// * `error_while_proxy` (not overridden here) never retries a request

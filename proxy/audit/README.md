@@ -97,7 +97,7 @@ because ECS defines that field as a number.
 | `info` | Not a failure. |
 | `low` | Benign: no attestation headers at all (someone on a browser that isn't DenBrowser), or a client that went away. |
 | `medium` | Operational: clock skew, a missing or lapsed machine certificate, DNS trouble, rate limits, upstream failures. Track in aggregate. |
-| `high` | Something a correctly configured DenBrowser should never send: partial or malformed attestation, tokens that don't decrypt, replayed nonces, machine certificates outside policy or presented from the wrong address. Investigate. |
+| `high` | Something a correctly configured DenBrowser should never send: partial or malformed attestation, tokens that don't decrypt, replayed nonces, machine certificates outside policy or presented from the wrong address, requests pingora refuses as malformed. Investigate. |
 | `critical` | A well-formed token for this proxy that commits to a *different* request or body: a lifted token or a request altered in transit. Investigate immediately. |
 
 ## Reasons
@@ -132,8 +132,9 @@ attestation failure exactly when its stage starts with `attestation_`.
 | `body_too_large` | `attestation_body` | medium | 413 | Bound body over 64 KiB. |
 | `body_hash_mismatch` | `attestation_body` | **critical** | 403 | Body altered after it was attested. |
 | `body_read_failed` | `downstream` | low | 400 | Client didn't deliver the body. |
+| `request_malformed` | `downstream` | high | 400 | pingora refused the request after attestation passed: a `Connection` header nominating `Host` or `X-Forwarded-*`, a non-token, or ten or more names. |
 | `upstream_error` | `upstream` | medium | 502 | Upstream unreachable or failed mid-exchange. |
-| `downstream_error` | `downstream` | low | — / 400 | Client disconnected mid-exchange. `400`: pingora refused the forwarded request's `Connection` header (nominates `Host` or `X-Forwarded-*`, a non-token, or ten or more names); browsers never send one. |
+| `downstream_error` | `downstream` | low | — | Client disconnected mid-exchange. |
 | `internal_error` | `internal` | medium | 500 | Proxy failure; pingora logs detail as a `system` line. |
 
 ## What is not recorded
