@@ -94,8 +94,7 @@ impl std::fmt::Display for AttestError {
 }
 
 impl AttestError {
-    /// The audit reason this failure is recorded under.  The severity that
-    /// goes with each reason is fixed in `audit`'s reason table.
+    /// The audit reason this failure is recorded under.
     pub fn reason(&self) -> Reason {
         match self {
             Self::BadTimestamp => Reason::TimestampInvalid,

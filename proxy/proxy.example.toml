@@ -231,8 +231,7 @@ allowed_subjects = ["health-checker", "ops.internal"]
 # telemetry and diagnostics patched out, so the proxy is the only component that
 # records anything — this output IS the audit trail.
 #
-# Every line is one JSON object: one audit record per request (IPs, certificate
-# DNs, nonce, bytes, and for refusals a stage, reason, and severity) plus system
+# Every line is one JSON object: one audit record per request plus system
 # records for everything else.  URL paths are never logged.  The schema and an
 # example of every event are in proxy/audit/.
 #

@@ -8,12 +8,10 @@
 //!
 //! # Every line is JSON
 //!
-//! Both outputs use [`JsonLines`], so a consumer never has to parse two
-//! formats.  Per-request audit records arrive already serialized (see
-//! [`crate::audit`]) and are written as they are; every other event — startup
-//! messages, `fatal`, pingora's own diagnostics — is wrapped in a `system`
-//! record with the same envelope.  The layout is defined by
-//! `audit/audit-log.schema.json`.
+//! Both outputs use [`JsonLines`].  Per-request audit records arrive already
+//! serialized (see [`crate::audit`]) and are written verbatim; every other
+//! event — startup messages, `fatal`, pingora's own diagnostics — is wrapped in
+//! a `system` record.  The layout is defined by `audit/audit-log.schema.json`.
 //!
 //! # Why `tracing` rather than a plain `log` backend
 //!
@@ -108,11 +106,9 @@ pub fn init(cfg: &LoggingConfig) -> anyhow::Result<Option<WorkerGuard>> {
 
 /// Formats every event as one JSON line.
 ///
-/// An event on [`audit::TARGET`] carries its finished record in
-/// [`audit::RECORD_FIELD`], which is written verbatim.  Anything else is
-/// wrapped in an [`audit::SystemRecord`].  JSON encoding is also what keeps a
-/// hostile value — a certificate DN, a Host header — from forging a line: no
-/// string field can contain a raw newline.
+/// An event on [`audit::TARGET`] has its [`audit::RECORD_FIELD`] written
+/// verbatim; anything else is wrapped in an [`audit::SystemRecord`].  JSON
+/// escaping stops hostile values (DNs, Host headers) from injecting newlines.
 pub struct JsonLines;
 
 impl<S, N> FormatEvent<S, N> for JsonLines
@@ -134,8 +130,8 @@ where
             return writeln!(writer, "{line}");
         }
 
-        // A record bridged from the `log` facade (all of pingora) has the
-        // target "log"; its real origin rides in the `log.target` field.
+        // Records bridged from `log` (all of pingora) have target "log"; the
+        // real origin is in the `log.target` field.
         let logger = fields.log_target.as_deref().unwrap_or(meta.target());
         let record = audit::SystemRecord::new(
             audit::timestamp(SystemTime::now()),
@@ -178,7 +174,7 @@ impl Fields {
                     other => other.to_string(),
                 }
             }
-            // The `log` bridge's source location: noise in an audit trail.
+            // Source location added by the `log` bridge; not logged.
             "log.module_path" | "log.file" | "log.line" => {}
             name => {
                 self.extra.insert(name.to_owned(), value);
@@ -216,7 +212,7 @@ impl Visit for Fields {
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {
-        // NaN and infinities have no JSON form; null rather than a bad line.
+        // NaN and infinities have no JSON form; they become null.
         self.put(field, serde_json::Number::from_f64(value).map_or(serde_json::Value::Null, Into::into));
     }
 }
@@ -437,9 +433,9 @@ mod tests {
         );
     }
 
-    /// Run `f` under a subscriber that formats with [`JsonLines`] into a
-    /// buffer, and return the lines it wrote.  Thread-local, so it does not
-    /// collide with the one test that installs the global subscriber.
+    /// Run `f` under a thread-local [`JsonLines`] subscriber and return the
+    /// lines it wrote.  Must stay thread-local: another test installs the
+    /// global subscriber.
     fn capture(f: impl FnOnce()) -> Vec<serde_json::Value> {
         use std::sync::{Arc, Mutex};
 
@@ -535,8 +531,6 @@ mod tests {
 
     #[test]
     fn only_the_audit_target_can_supply_a_verbatim_line() {
-        // Anything else naming the field is just another field, wrapped and
-        // escaped like the rest.
         let lines = capture(|| {
             tracing::warn!(audit_record = "{\"forged\":true}", "hello");
         });

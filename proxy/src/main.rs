@@ -122,9 +122,9 @@ impl DenBrowserProxy {
 
 #[async_trait]
 impl ProxyHttp for DenBrowserProxy {
-    // The audit record for this request.  Bound bodies are verified and
-    // captured in `request_filter` and pingora forwards them; unbound bodies
-    // stream through untouched — neither needs state beyond the audit trail.
+    // The audit record for this request.  No other per-request state is
+    // needed: bound bodies are verified and captured in `request_filter`, and
+    // pingora forwards them; unbound bodies stream through untouched.
     type CTX = RequestAudit;
 
     fn new_ctx(&self) -> Self::CTX {
@@ -168,17 +168,15 @@ impl ProxyHttp for DenBrowserProxy {
     /// contacted; only per-body integrity is intentionally skipped for these
     /// uploads.
     ///
-    /// Every exit records its decision in `ctx`; the audit line itself is
-    /// written by `logging` once the exchange is over.
+    /// Every exit records its decision in `ctx`; `logging` writes the audit line.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         // Origin IP, keyed on by both rate limiting and bypass.  Owned copy so
         // the immutable borrow of `session` ends before any `respond_error`.
         let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
 
-        // What the checks below read from the request head, taken once and
-        // recorded before any check can refuse the request.  The host has its
-        // port stripped: that is the form the attestation token binds, the
-        // rate-limit globs match, and the audit record keeps.
+        // Read once and recorded before any check can refuse the request.  The
+        // host is port-stripped: the form the token binds and the rate-limit
+        // globs match.
         let (host, machine_present) = {
             let req = session.req_header();
             let host = header_str(&req.headers, "host")
@@ -242,10 +240,8 @@ impl ProxyHttp for DenBrowserProxy {
         let nonce = header_str(&req.headers, NONCE_HEADER);
         let token = header_str(&req.headers, TOKEN_HEADER);
 
-        // Header presence, classified before anything is verified.  A request
-        // carrying *none* of the DenBrowser headers is someone on another
-        // browser: refused, but low severity.  Anything partial is a client
-        // that knows the protocol and is getting it wrong, which is not.
+        // No DenBrowser headers at all is likely another browser (low
+        // severity); a partial set is a client getting the protocol wrong.
         let (ts, nonce, token, host) = match (ts, nonce, token, host) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             (_, _, _, host) => {
@@ -331,8 +327,7 @@ impl ProxyHttp for DenBrowserProxy {
         {
             let verified = match ctx.presented_machine_cert() {
                 Some(cert_b64) => verifier.verify(cert_b64, client_ip).await,
-                // Present, but not a visible-ASCII header value — so it cannot
-                // be base64.
+                // Present but not visible ASCII, so not base64.
                 None => Err(MachineError::NotBase64),
             };
             match verified {
@@ -423,8 +418,7 @@ impl ProxyHttp for DenBrowserProxy {
         Ok(())
     }
 
-    /// Count response body bytes for the audit record (see
-    /// `RequestAudit::response_body` for why this is not read off the session).
+    /// Count response body bytes for the audit record.
     fn response_body_filter(
         &self,
         _session: &mut Session,
@@ -439,9 +433,7 @@ impl ProxyHttp for DenBrowserProxy {
     }
 
     /// Write the request's audit record.  pingora calls this exactly once per
-    /// request — after a response from `request_filter`, after a completed
-    /// proxy exchange, and after a fatal error — so every request gets one line
-    /// carrying the final status and the body bytes moved each way.
+    /// request, including after a `request_filter` response or a fatal error.
     async fn logging(
         &self,
         session: &mut Session,
@@ -459,9 +451,8 @@ impl ProxyHttp for DenBrowserProxy {
         ctx.finish(&conn, e.map(audit::classify_proxy_error));
     }
 
-    /// The request description pingora appends to its own error lines.  Its
-    /// default includes the path and query; this keeps them out of the log, as
-    /// the audit record does (see `audit`).
+    /// The request description pingora appends to its own error lines.  Must
+    /// not include the path or query (pingora's default does).
     fn request_summary(&self, session: &Session, _ctx: &Self::CTX) -> String {
         let req = session.req_header();
         let host = header_str(&req.headers, "host");

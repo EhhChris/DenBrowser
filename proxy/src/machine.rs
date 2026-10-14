@@ -42,10 +42,9 @@
 //! claimed name is not returned or resolved until step 4 establishes trust.
 //! This means an allowlist miss reaches neither signature verification nor DNS.
 //!
-//! The audit record does carry the subject DN of a certificate that failed (or
-//! never reached) verification, because "which machine claimed to be calling"
-//! is the first question about a refusal.  It is flagged `chain_verified:
-//! false` there, and JSON encoding keeps its content from forging a record.
+//! The audit record does carry the subject DN of an unverified certificate,
+//! flagged `chain_verified: false`.  JSON encoding keeps its content from
+//! forging a record.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -63,13 +62,12 @@ use crate::audit::Reason;
 use crate::config::MachineIdentityConfig;
 use crate::mtls::ClientCert;
 
-// OpenSSL `X509_V_ERR_*` codes for a certificate outside its validity period.
-// Named here because the safe `openssl` API exposes no constants for them;
-// they are part of OpenSSL's stable ABI.
+// OpenSSL `X509_V_ERR_*` codes (stable ABI) for a certificate outside its
+// validity period.
 const X509_V_ERR_CERT_NOT_YET_VALID: i32 = 9;
 const X509_V_ERR_CERT_HAS_EXPIRED: i32 = 10;
 
-/// A machine certificate that passed every check.
+/// The identity of a machine certificate that chained to `machine_ca`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedMachine {
     /// The certificate's Common Name, lowercased: the workstation hostname.
@@ -90,12 +88,9 @@ pub enum MachineError {
     NotDer,
     /// The certificate does not chain to `machine_ca`, with OpenSSL's reason.
     UntrustedChain(String),
-    /// The certificate (or a CA above it) is past its notAfter date.  Split out
-    /// from [`Self::UntrustedChain`] because a lapsed renewal is an operational
-    /// problem, not an attack.
+    /// The certificate (or a CA above it) is past its notAfter date.
     CertExpired,
-    /// The certificate (or a CA above it) is before its notBefore date —
-    /// usually a clock that is wrong on one side.
+    /// The certificate (or a CA above it) is before its notBefore date.
     CertNotYetValid,
     /// The certificate carries no Common Name to identify the machine by.
     NoCommonName,
@@ -169,8 +164,7 @@ impl MachineError {
     }
 
     /// Whether the certificate had already chained to `machine_ca` when this
-    /// failure was found — true only for the forward-DNS failures, which run
-    /// after chain verification.
+    /// failure was found (true only for the forward-DNS failures).
     pub fn chain_verified(&self) -> bool {
         matches!(
             self,
@@ -179,9 +173,8 @@ impl MachineError {
     }
 }
 
-/// The subject DN of a presented machine certificate, *without* verifying it,
-/// for the audit record of a request refused before (or without) machine
-/// verification.  `None` when the header does not hold a parseable certificate.
+/// The *unverified* subject DN of a presented machine certificate, for the
+/// audit record only.  `None` if the header holds no parseable certificate.
 pub fn presented_subject_dn(cert_b64: &str) -> Option<String> {
     use base64::Engine as _;
 

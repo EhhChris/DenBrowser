@@ -96,19 +96,12 @@ impl ClientCert {
     }
 }
 
-/// Render a certificate name as an RFC 4514 string, e.g.
-/// `CN=alice,OU=Staff,O=Example Corp,C=US`.
+/// Render a certificate name as an RFC 4514 string, most specific RDN first,
+/// e.g. `CN=alice,OU=Staff,O=Example Corp,C=US`.
 ///
-/// RFC 4514 lists the relative distinguished names in *reverse* of their
-/// encoded order, most specific first — the form `openssl x509 -nameopt
-/// RFC2253` and LDAP tools print.  Known attributes use their short names;
-/// anything else falls back to its dotted OID.  Values are escaped per the RFC,
-/// and control characters are always hex-escaped, so a hostile certificate
-/// cannot smuggle a line break through the string even before JSON encoding.
-///
-/// One simplification: OpenSSL's safe API does not expose which entries share
-/// a multi-valued RDN, so each entry is rendered as its own RDN (`,` rather
-/// than `+`).  Multi-valued RDNs are vanishingly rare in practice.
+/// Unknown attributes are named by dotted OID.  Control characters are always
+/// hex-escaped, so a hostile certificate cannot smuggle a line break through.
+/// Each entry is rendered as its own RDN, so multi-valued RDNs use `,`, not `+`.
 pub fn distinguished_name(name: &X509NameRef) -> String {
     let mut out = String::new();
     let entries: Vec<_> = name.entries().collect();

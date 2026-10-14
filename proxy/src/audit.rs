@@ -1,50 +1,15 @@
 //! Structured JSON audit records — the proxy's log schema.
 //!
-//! The browser half of DenBrowser records nothing, so this proxy's log is the
-//! audit trail, and every line of it is one JSON object.  There are two kinds,
-//! told apart by `event.kind`:
+//! Every log line is one JSON object, told apart by `event.kind`: `audit` is
+//! one per HTTP request, collected in a [`RequestAudit`] and emitted from
+//! pingora's `logging` hook once the exchange has finished; `system` is
+//! everything else, wrapped by [`crate::logging`].
 //!
-//! * **`audit`** — exactly one per HTTP request.  A [`RequestAudit`] (pingora's
-//!   per-request `CTX`) collects the access decision as `request_filter` makes
-//!   it, and the record is emitted from pingora's `logging` hook once the
-//!   exchange has finished.  Emitting at the end rather than at the decision is
-//!   what lets the record carry the final status code and the body bytes that
-//!   actually moved in each direction.
-//! * **`system`** — everything else (startup, configuration, fatal errors, and
-//!   pingora's own diagnostics), wrapped into the same envelope by the
-//!   formatter in [`crate::logging`].
+//! `audit/audit-log.schema.json` defines the format and `audit/README.md` the
+//! severity scale.  The tests below regenerate `audit/audit-log.examples.jsonl`
+//! and check the schema against this code.
 //!
-//! The formal definition is `audit/audit-log.schema.json`, and
-//! `audit/audit-log.examples.jsonl` holds one example of every audit type.  The
-//! tests at the bottom of this file regenerate the examples from this code and
-//! check the schema's reason table against [`Reason`], so the three cannot
-//! drift apart.
-//!
-//! # Severity
-//!
-//! Every refusal has a [`Reason`], and the reason table below fixes each
-//! reason's pipeline [`Stage`] and [`Severity`] in one place.  The scale is
-//! about what the event most plausibly *means*:
-//!
-//! * `low` — benign: no attestation headers at all (someone on a browser that
-//!   isn't DenBrowser), or a client that went away mid-request.
-//! * `medium` — operational: clock skew, a machine certificate that is missing
-//!   or has lapsed, DNS trouble, rate limits, upstream failures.
-//! * `high` — something a correctly configured DenBrowser should never send:
-//!   partial or malformed attestation, tokens that do not decrypt, replayed
-//!   nonces, machine certificates outside policy or presented from the wrong
-//!   address.
-//! * `critical` — a well-formed token for this proxy that commits to a
-//!   *different* request or body: a lifted token or a request altered in
-//!   transit.
-//!
-//! # What is deliberately not recorded
-//!
-//! The URL path and query string.  Paths name the documents, files, and
-//! searches a user touched — precisely what this product exists to keep from
-//! leaking — so the audit trail records the method and host and stops there.
-//! pingora's own error lines are kept path-free the same way, through the
-//! `request_summary` override in `main`.
+//! Records must never contain the URL path or query string.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Instant, SystemTime};
@@ -54,32 +19,25 @@ use tracing::Level;
 
 use crate::machine::{MachineError, VerifiedMachine};
 
-/// Version of the record layout, carried on every line as `schema_version`.
-/// Bump the minor version for additive changes and the major version for
-/// anything a consumer would have to adapt to; `audit/audit-log.schema.json`
-/// pins the same value.
+/// Record layout version, written as `schema_version` and pinned in the schema.
+/// Bump the minor version for additive changes, the major for breaking ones.
 pub const SCHEMA_VERSION: &str = "1.0";
 
-/// `tracing` target audit records are emitted under, and therefore the
-/// `logger` they carry.  Filter directives can address it directly, e.g.
-/// `RUST_LOG=warn,denbrowser_proxy::audit=info`.
+/// `tracing` target for audit records, and the `logger` they carry.
 pub const TARGET: &str = "denbrowser_proxy::audit";
 
-/// Field an audit event carries its pre-serialized record in.  The formatter in
-/// `logging` writes that field verbatim instead of wrapping the event.  The
-/// emitting macros in [`emit`] spell the same name as an identifier.
+/// Field carrying an audit event's pre-serialized record, which `logging`
+/// writes verbatim.  [`emit`] spells the same name as an identifier.
 pub const RECORD_FIELD: &str = "audit_record";
 
-// Caps on the client-influenced strings copied into a record.  The values are
-// JSON-escaped, so no content can forge a line, but nothing stops a client from
-// sending a 60 KiB header; these keep one request's record from doing the same.
+// Length caps on client-influenced strings copied into a record.
 const MAX_DN_CHARS: usize = 1024;
 const MAX_HOST_CHARS: usize = 256;
 const MAX_METHOD_CHARS: usize = 32;
 const MAX_NONCE_CHARS: usize = 64;
 
-/// How much attention an audit event deserves.  See the module docs for what
-/// each level means; `info` is reserved for requests that were not refused.
+/// How much attention an audit event deserves (see `audit/README.md`).
+/// `info` is only for requests that were not refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
@@ -90,7 +48,7 @@ pub enum Severity {
     Critical,
 }
 
-/// Where in the request pipeline a failure happened — the "when" of a refusal.
+/// Where in the request pipeline a failure happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
@@ -123,12 +81,10 @@ impl Stage {
     }
 }
 
-/// Defines [`Reason`] together with its code, stage, and severity, so the
-/// whole severity policy reads as one table and a new reason cannot be added
-/// without deciding all three.
+/// Defines [`Reason`] with each variant's code, stage, and severity.
 macro_rules! reasons {
     ($( $(#[$doc:meta])* $variant:ident => $code:literal, $stage:ident, $severity:ident; )*) => {
-        /// Why a request was refused or failed — the "how" of a failure.
+        /// Why a request was refused or failed.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub enum Reason {
             $( $(#[$doc])* $variant, )*
@@ -196,9 +152,7 @@ reasons! {
     TimestampOutOfWindow         => "timestamp_out_of_window",         AttestationToken,   Medium;
     /// `X-DenBrowser-Nonce` is not 16 bytes of base64.
     NonceInvalid                 => "nonce_invalid",                   AttestationToken,   High;
-    /// The nonce was already used.  High rather than critical: it is checked
-    /// before the token is authenticated, and the browser's network stack can
-    /// resend an already-processed request with the same headers.
+    /// The nonce was already used: a replay, or a network-stack resend.
     NonceReplay                  => "nonce_replay",                    AttestationToken,   High;
     /// The token is not base64, is too short, or carries no valid EC point.
     TokenMalformed               => "token_malformed",                 AttestationToken,   High;
@@ -353,8 +307,8 @@ impl From<Option<SocketAddr>> for Endpoint {
     }
 }
 
-/// The mTLS user certificate.  Verified at the handshake, so when present it is
-/// always trusted; null when `[mtls]` is disabled.
+/// The mTLS user certificate, verified at the handshake; null when `[mtls]` is
+/// disabled.
 #[derive(Debug, Serialize)]
 pub struct UserFields {
     pub subject_dn: Option<String>,
@@ -363,9 +317,8 @@ pub struct UserFields {
 #[derive(Clone, Debug, Serialize)]
 pub struct MachineFields {
     pub status: MachineStatus,
-    /// Subject DN of the presented machine certificate, whenever one could be
-    /// parsed — even if it was never verified.  `chain_verified` says whether
-    /// it can be trusted.
+    /// Subject DN of the presented machine certificate, even if unverified;
+    /// `chain_verified` says whether to trust it.
     pub subject_dn: Option<String>,
     /// The verified workstation hostname; only set when `status` is `verified`.
     pub hostname: Option<String>,
@@ -464,13 +417,11 @@ pub struct RequestAudit {
     method: Option<String>,
     host: Option<String>,
     attestation: AttestationFields,
-    /// Set once the token passes, so a refusal by another control afterwards
-    /// reads as `incomplete` rather than `not_evaluated`.
+    /// Set once the token passes; a later refusal then reads as `incomplete`.
     token_verified: bool,
     machine: MachineFields,
-    /// The machine certificate header as sent.  Held so the request can verify
-    /// it, and so its DN can still be recorded when the request is refused
-    /// before verification.  Parsed for the DN only at [`Self::finish`].
+    /// The machine certificate header as sent, kept so its DN can be recorded
+    /// even if it is never verified.
     presented_machine_cert: Option<String>,
     /// Response body bytes relayed to the client; see [`Self::response_body`].
     response_body_bytes: u64,
@@ -598,13 +549,8 @@ impl RequestAudit {
         ));
     }
 
-    /// Count a chunk of response body on its way to the client.
-    ///
-    /// Counted here, from pingora's `response_body_filter`, rather than taken
-    /// from the session: pingora's HTTP/1 `body_bytes_sent` also counts the
-    /// serialized response header, which would make the two directions of
-    /// `transfer` measure different things.  The proxy's own refusals carry no
-    /// body, so they correctly count zero.
+    /// Count a chunk of response body on its way to the client.  pingora's
+    /// HTTP/1 `body_bytes_sent` includes the response header.
     pub fn response_body(&mut self, len: usize) {
         self.response_body_bytes = self.response_body_bytes.saturating_add(len as u64);
     }
@@ -617,8 +563,7 @@ impl RequestAudit {
     /// exchange failed after the decision (see [`classify_proxy_error`]).
     pub fn finish(&mut self, conn: &Connection, error: Option<(Reason, String)>) {
         let level = self.level(error.is_some());
-        // Skip building the record (and parsing an unverified machine
-        // certificate for it) when the filter would discard it anyway.
+        // Skip building the record when the filter would discard it.
         let enabled = if level == Level::INFO {
             tracing::enabled!(target: TARGET, Level::INFO)
         } else {
@@ -639,8 +584,8 @@ impl RequestAudit {
         }
     }
 
-    /// Successes at `info`, everything else at `warn`, so `level = "warn"`
-    /// keeps exactly the refusals and failures.
+    /// Successes at `info`, everything else at `warn`, so that
+    /// `[logging].level = "warn"` keeps exactly the refusals and failures.
     fn level(&self, failed: bool) -> Level {
         match self.outcome(failed) {
             Outcome::Success => Level::INFO,
@@ -648,8 +593,7 @@ impl RequestAudit {
         }
     }
 
-    /// Build the record.  Split from [`Self::finish`] so the examples test can
-    /// fix the timestamp and duration.
+    /// Build the record with the given timestamp and duration.
     fn record(
         &mut self,
         conn: &Connection,
@@ -658,8 +602,7 @@ impl RequestAudit {
         duration_ms: u64,
     ) -> AuditRecord {
         if self.action.is_none() && error.is_none() {
-            // Every path through `request_filter` records a decision, so this
-            // is a proxy bug — but it still gets a line rather than nothing.
+            // `request_filter` always records a decision, so this is a bug.
             error = Some((
                 Reason::InternalError,
                 "request ended before an access decision was recorded".to_owned(),
@@ -669,9 +612,7 @@ impl RequestAudit {
         let level = self.level(failed);
         let outcome = self.outcome(failed);
 
-        // A terminal error matters only for a request that was let through: a
-        // refusal already says why it failed, and the transport error that may
-        // follow it (the client hanging up on a 403) adds nothing.
+        // A refusal keeps its own reason over any later transport error.
         if let Some((reason, message)) = error
             && matches!(self.action, None | Some(Action::Forward | Action::Bypass))
         {
@@ -734,8 +675,7 @@ pub fn classify_proxy_error(e: &pingora_core::Error) -> (Reason, String) {
         ErrorSource::Downstream => (Reason::DownstreamError, "client connection"),
         ErrorSource::Internal | ErrorSource::Unset => (Reason::InternalError, "internal"),
     };
-    // The error *type* only.  pingora's context strings are free-form, and
-    // nothing should be able to carry a URL path into the record.
+    // The error type only: pingora's context strings are free-form text.
     (reason, format!("{side} error: {}", e.etype().as_str()))
 }
 
@@ -755,8 +695,8 @@ fn emit(level: Level, record: &AuditRecord) {
     }
 }
 
-/// ISO 8601 / RFC 3339 UTC with millisecond precision, always the same width
-/// so the strings sort in time order: `2026-10-14T13:04:05.123Z`.
+/// Fixed-width RFC 3339 UTC with milliseconds, so the strings sort in time
+/// order: `2026-10-14T13:04:05.123Z`.
 pub fn timestamp(t: SystemTime) -> String {
     format_utc(time::OffsetDateTime::from(t))
 }
@@ -1097,13 +1037,10 @@ mod tests {
 
     // ── The examples file ────────────────────────────────────────────────────
     //
-    // `audit/audit-log.examples.jsonl` is generated from the code below, which
-    // drives `RequestAudit` through the same calls `request_filter` makes for
-    // each outcome.  Regenerate after a deliberate change with:
+    // `audit/audit-log.examples.jsonl` is generated below by making the same
+    // `RequestAudit` calls `request_filter` makes.  Regenerate with:
     //
     //     DENBROWSER_UPDATE_AUDIT_EXAMPLES=1 cargo test examples_file
-    //
-    // Messages come from the real error types, so rewording one shows up here.
 
     const USER_DN: &str = "CN=alice.nguyen,OU=Staff,O=Example Corp,C=US";
     const HOST: &str = "intranet.example.com";
@@ -1112,8 +1049,7 @@ mod tests {
     /// 2026-10-14T13:04:05.250Z; each example is one second after the last.
     const EXAMPLE_EPOCH_MS: u64 = 1_791_983_045_250;
 
-    /// A self-signed certificate with the given subject, base64 DER — the
-    /// header form.  Only its DN reaches a record, so the key is irrelevant.
+    /// A self-signed certificate with the given subject, as base64 DER.
     fn cert_b64(subject: &[(&str, &str)]) -> String {
         let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
         let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
@@ -1408,8 +1344,7 @@ mod tests {
             System(
                 Level::ERROR,
                 "pingora_proxy",
-                // pingora's own wording; the request summary at the end is
-                // `request_summary` in main, which never includes the path.
+                // pingora's wording, ending in the path-free `request_summary`.
                 "Fail to proxy: Upstream ConnectRefused context: Fail to connect to addr: \
                  10.30.0.8:443, scheme: HTTPS, sni: backend.internal cause:  context: Fail to \
                  connect to 10.30.0.8:443 cause: Connection refused (os error 111), status: 502, \
@@ -1666,9 +1601,7 @@ mod tests {
 
     #[test]
     fn schema_lists_every_record_field_the_code_writes() {
-        // `additionalProperties: false` in the schema would reject a field the
-        // code adds; this catches the reverse — a field the schema documents
-        // but the code no longer writes — on the audit record.
+        // Catches a field the schema documents but the code no longer writes.
         let schema = schema();
         let documented: Vec<&String> = schema["$defs"]["auditRecord"]["properties"]
             .as_object()
