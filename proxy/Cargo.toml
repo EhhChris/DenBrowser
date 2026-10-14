@@ -57,6 +57,14 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender   = "0.2"
 
+# Structured audit records (see `audit.rs` and `audit/audit-log.schema.json`).
+# Every log line is one JSON object, serialized here rather than through
+# tracing-subscriber's `json` feature, whose fixed layout cannot express the
+# nested audit schema.  `time` is already in the tree via tracing-appender; it is
+# named here for UTC calendar conversion of the ISO 8601 timestamps.
+serde_json = "1"
+time       = "0.3"
+
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }
 tempfile  = "3"

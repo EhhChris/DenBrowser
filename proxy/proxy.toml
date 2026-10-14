@@ -116,7 +116,8 @@ allowed_subjects = ["health-checker", "ops.internal", "denbrowser-user"]
 
 [logging]
 # The proxy is the only DenBrowser component that records anything, so this
-# output is the audit trail.  See proxy.example.toml for every option; the
+# output is the audit trail: one JSON line per request (schema in audit/).
+# See proxy.example.toml for every option; the
 # defaults (daily rotation, 14 files kept, stderr mirror on, level = "info")
 # apply to anything not set here.
 #

@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use clap::Parser;
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::server::Server;
@@ -13,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 
 mod attest;
+mod audit;
 mod config;
 mod logging;
 mod machine;
@@ -22,8 +25,9 @@ mod ratelimit;
 mod tls_key;
 mod upstream_tls;
 use attest::{AttestInputs, BodyBinding, Verifier};
+use audit::{Reason, RequestAudit};
 use config::Config;
-use machine::MachineIdentity;
+use machine::{MachineError, MachineIdentity};
 use mtls::ClientCert;
 use passthrough::BypassPolicy;
 use ratelimit::RateLimiter;
@@ -50,6 +54,12 @@ const BOUND_BODY_MAX: usize = 64 * 1024;
 /// `upstream_request_filter` cannot drift — a strip that misses its header
 /// leaks the certificate to the backend.
 const MACHINE_CERT_HEADER: &str = "x-denbrowser-machine-cert";
+
+/// The attestation headers, named once for the same reason.
+const TS_HEADER: &str = "x-denbrowser-ts";
+const NONCE_HEADER: &str = "x-denbrowser-nonce";
+const TOKEN_HEADER: &str = "x-denbrowser-token";
+const ATTESTATION_HEADERS: [&str; 3] = [TS_HEADER, NONCE_HEADER, TOKEN_HEADER];
 
 #[derive(Parser, Debug)]
 #[command(about = "DenBrowser attestation proxy — verifies ECIES tokens, strips headers, forwards")]
@@ -112,12 +122,14 @@ impl DenBrowserProxy {
 
 #[async_trait]
 impl ProxyHttp for DenBrowserProxy {
-    // No per-request state is needed: bound bodies are verified and captured in
-    // `request_filter`, and pingora forwards them; unbound bodies stream through
-    // untouched.
-    type CTX = ();
+    // The audit record for this request.  Bound bodies are verified and
+    // captured in `request_filter` and pingora forwards them; unbound bodies
+    // stream through untouched — neither needs state beyond the audit trail.
+    type CTX = RequestAudit;
 
-    fn new_ctx(&self) -> Self::CTX {}
+    fn new_ctx(&self) -> Self::CTX {
+        RequestAudit::new(self.machine.is_some())
+    }
 
     async fn upstream_peer(
         &self,
@@ -155,35 +167,56 @@ impl ProxyHttp for DenBrowserProxy {
     /// method/host/path binding are still fully verified before the upstream is
     /// contacted; only per-body integrity is intentionally skipped for these
     /// uploads.
-    async fn request_filter(
-        &self,
-        session: &mut Session,
-        _ctx: &mut Self::CTX,
-    ) -> Result<bool> {
+    ///
+    /// Every exit records its decision in `ctx`; the audit line itself is
+    /// written by `logging` once the exchange is over.
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         // Origin IP, keyed on by both rate limiting and bypass.  Owned copy so
         // the immutable borrow of `session` ends before any `respond_error`.
         let client_ip = session.client_addr().and_then(|a| a.as_inet()).map(|s| s.ip());
+
+        // What the checks below read from the request head, taken once and
+        // recorded before any check can refuse the request.  The host has its
+        // port stripped: that is the form the attestation token binds, the
+        // rate-limit globs match, and the audit record keeps.
+        let (host, machine_present) = {
+            let req = session.req_header();
+            let host = header_str(&req.headers, "host")
+                .map(|h| h.split(':').next().unwrap_or(&h).to_owned());
+            ctx.request(req.method.as_str(), host.as_deref());
+            ctx.attestation_headers(
+                header_str(&req.headers, TS_HEADER).as_deref(),
+                header_str(&req.headers, NONCE_HEADER).as_deref(),
+            );
+            let machine_present = req.headers.contains_key(MACHINE_CERT_HEADER);
+            if let Some(cert) = header_str(&req.headers, MACHINE_CERT_HEADER) {
+                ctx.machine_cert_presented(cert);
+            }
+            (host, machine_present)
+        };
 
         // Rate limiting runs *before* attestation so a flood from one IP is shed
         // cheaply here — it never reaches the crypto path or the upstream.  The
         // counter is keyed on the origin IP and the rule glob is matched against
         // `host + path`, so per-URL-pattern limits work even on requests that
-        // would later fail attestation.
+        // would later fail attestation.  The path is used for matching only and
+        // is never logged.
         // Enforce only when we have an IP to key on (always true for a TCP/TLS
         // client); otherwise fail open rather than throttle blindly.
         if let Some(limiter) = &self.rate_limiter
             && let Some(ip) = client_ip
         {
             let target = {
-                let req = session.req_header();
-                let host = header_str(&req.headers, "host")
-                    .map(|h| h.split(':').next().unwrap_or(&h).to_owned())
-                    .unwrap_or_default();
-                let path = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-                format!("{host}{path}")
+                let path = session
+                    .req_header()
+                    .uri
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/");
+                format!("{}{path}", host.as_deref().unwrap_or_default())
             };
             if !limiter.admit(&ip, &target) {
-                warn!("rate limited — {ip} {target}");
+                ctx.reject(Reason::RateLimited, "request rate limit exceeded");
                 let _ = session.respond_error(429).await;
                 return Ok(true);
             }
@@ -200,49 +233,61 @@ impl ProxyHttp for DenBrowserProxy {
             && let Some(cert) = client_cert(session)
             && let Some(subject) = policy.authorizes(&ip, cert)
         {
-            info!("attestation bypass — ip={ip} cert_subject={subject} machine=(bypass)");
+            ctx.bypass(subject);
             return Ok(false);
         }
 
-        // Machine-identity preflight.  A required missing header is as cheap to
-        // reject as a missing attestation header, but defer all certificate
-        // parsing, chain crypto, and DNS until the attestation token has passed.
-        // This prevents a copied public machine certificate from making bogus
-        // attestation traffic consume the more expensive machine path.
-        let machine_cert = match &self.machine {
-            None => None,
-            Some(verifier) => {
-                let presented = header_str(&session.req_header().headers, MACHINE_CERT_HEADER);
-                match presented {
-                    Some(cert_b64) => Some(cert_b64),
-                    // Absent.  Rejected unless the operator is mid-rollout and
-                    // has deliberately relaxed `required`.
-                    None if verifier.required() => {
-                        warn!("rejected — {}", machine::MachineError::Missing);
-                        let _ = session.respond_error(403).await;
-                        return Ok(true);
-                    }
-                    None => None,
-                }
-            }
-        };
-
         let req = session.req_header();
+        let ts = header_str(&req.headers, TS_HEADER);
+        let nonce = header_str(&req.headers, NONCE_HEADER);
+        let token = header_str(&req.headers, TOKEN_HEADER);
 
-        let ts = header_str(&req.headers, "x-denbrowser-ts");
-        let nonce = header_str(&req.headers, "x-denbrowser-nonce");
-        let token = header_str(&req.headers, "x-denbrowser-token");
-        let host = header_str(&req.headers, "host")
-            .map(|h| h.split(':').next().unwrap_or(&h).to_owned());
-
+        // Header presence, classified before anything is verified.  A request
+        // carrying *none* of the DenBrowser headers is someone on another
+        // browser: refused, but low severity.  Anything partial is a client
+        // that knows the protocol and is getting it wrong, which is not.
         let (ts, nonce, token, host) = match (ts, nonce, token, host) {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
-            _ => {
-                warn!("rejected — missing attestation headers");
+            (_, _, _, host) => {
+                let sent = ATTESTATION_HEADERS
+                    .iter()
+                    .filter(|h| req.headers.contains_key(**h))
+                    .count();
+                if sent == 0 && !machine_present {
+                    ctx.reject(
+                        Reason::NoAttestationHeaders,
+                        "no DenBrowser attestation headers — not DenBrowser, or a \
+                         DenBrowser not configured for this proxy",
+                    );
+                } else {
+                    ctx.reject(
+                        Reason::IncompleteAttestationHeaders,
+                        describe_incomplete(&req.headers, host.is_some(), machine_present),
+                    );
+                }
                 let _ = session.respond_error(403).await;
                 return Ok(true);
             }
         };
+
+        // Machine-identity preflight.  A required missing header is as cheap to
+        // reject as a missing attestation header, but defer chain crypto and
+        // DNS until the attestation token has passed.  This prevents a copied
+        // public machine certificate from making bogus attestation traffic
+        // consume the more expensive machine path.  (The audit record may still
+        // parse a presented certificate for its DN, which is cheap.)
+        if let Some(verifier) = &self.machine
+            && !machine_present
+        {
+            // Absent.  Rejected unless the operator is mid-rollout and has
+            // deliberately relaxed `required`.
+            if verifier.required() {
+                ctx.machine_rejected(&MachineError::Missing);
+                let _ = session.respond_error(403).await;
+                return Ok(true);
+            }
+            ctx.machine_absent();
+        }
 
         let method = req.method.as_str().to_owned();
         let path = req
@@ -264,12 +309,13 @@ impl ProxyHttp for DenBrowserProxy {
             match self.verifier.verify_headers(&inputs) {
                 Ok(p1) => p1,
                 Err(e) => {
-                    warn!("rejected — {e} (host={host} {method} {path})");
+                    ctx.reject(e.reason(), e.to_string());
                     let _ = session.respond_error(403).await;
                     return Ok(true);
                 }
             }
         };
+        ctx.token_verified((&p1.body_binding).into());
 
         // Machine identity: which workstation this came from.  Attestation has
         // now passed, but no request body has been read and no upstream has been
@@ -277,35 +323,38 @@ impl ProxyHttp for DenBrowserProxy {
         // paying the body-buffering cost, while malformed attestation never
         // reaches certificate chain verification or DNS.
         //
-        // The verified hostname is carried into the accept log below; it grants
+        // The verified identity is carried into the audit record; it grants
         // nothing on its own.  See `machine` for what this does and does not
         // prove.
-        let machine_host = match (&self.machine, machine_cert.as_deref()) {
-            (Some(verifier), Some(cert_b64)) => match verifier.verify(cert_b64, client_ip).await {
-                Ok(hostname) => Some(hostname),
+        if let Some(verifier) = &self.machine
+            && machine_present
+        {
+            let verified = match ctx.presented_machine_cert() {
+                Some(cert_b64) => verifier.verify(cert_b64, client_ip).await,
+                // Present, but not a visible-ASCII header value — so it cannot
+                // be base64.
+                None => Err(MachineError::NotBase64),
+            };
+            match verified {
+                Ok(machine) => ctx.machine_verified(machine),
                 Err(e) => {
-                    warn!("rejected — {e}");
+                    ctx.machine_rejected(&e);
                     let _ = session.respond_error(403).await;
                     return Ok(true);
                 }
-            },
-            _ => None,
-        };
-        let machine_log = machine_host.as_deref().unwrap_or("-");
+            }
+        }
 
         // Unbound upload: no body hash to verify.  Commit the nonce now (there is
         // no phase 2 to defer it to) and return without draining the body so
         // pingora streams it straight to the upstream.
         if matches!(p1.body_binding, BodyBinding::Unbound) {
             if let Err(e) = self.verifier.commit_nonce(&p1.nonce) {
-                warn!("rejected — {e} (host={host} {method} {path})");
+                ctx.reject(e.reason(), e.to_string());
                 let _ = session.respond_error(403).await;
                 return Ok(true);
             }
-            info!(
-                "accepted — {method} {host}{} machine={machine_log} (unbound upload)",
-                path_without_query(&path)
-            );
+            ctx.forward();
             return Ok(false);
         }
 
@@ -322,9 +371,12 @@ impl ProxyHttp for DenBrowserProxy {
                 Ok(Some(chunk)) => {
                     total += chunk.len();
                     if total > BOUND_BODY_MAX {
-                        warn!(
-                            "rejected — bound body exceeds {BOUND_BODY_MAX} bytes \
-                             (must be sent as an unbound upload)"
+                        ctx.reject(
+                            Reason::BodyTooLarge,
+                            format!(
+                                "bound body exceeds {BOUND_BODY_MAX} bytes \
+                                 (must be sent as an unbound upload)"
+                            ),
                         );
                         let _ = session.respond_error(413).await;
                         return Ok(true);
@@ -333,7 +385,11 @@ impl ProxyHttp for DenBrowserProxy {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    warn!("rejected — could not read request body: {e}");
+                    // The error type only: its context is free-form.
+                    ctx.reject(
+                        Reason::BodyReadFailed,
+                        format!("could not read request body: {}", e.etype().as_str()),
+                    );
                     let _ = session.respond_error(400).await;
                     return Ok(true);
                 }
@@ -342,17 +398,14 @@ impl ProxyHttp for DenBrowserProxy {
 
         let actual: [u8; 32] = hasher.finalize().into();
         if let Err(e) = self.verifier.verify_body_and_commit(&p1, &actual) {
-            warn!("rejected — {e} (host={host} {method} {path})");
+            ctx.reject(e.reason(), e.to_string());
             let _ = session.respond_error(403).await;
             return Ok(true);
         }
 
         // Fully verified.  Pingora's retry buffer holds the body and replays it
         // to the upstream on its own.
-        info!(
-            "accepted — {method} {host}{} machine={machine_log} ({total} byte body)",
-            path_without_query(&path)
-        );
+        ctx.forward();
         Ok(false)
     }
 
@@ -363,11 +416,56 @@ impl ProxyHttp for DenBrowserProxy {
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
-        upstream_request.remove_header("x-denbrowser-ts");
-        upstream_request.remove_header("x-denbrowser-nonce");
-        upstream_request.remove_header("x-denbrowser-token");
+        for header in ATTESTATION_HEADERS {
+            upstream_request.remove_header(header);
+        }
         upstream_request.remove_header(MACHINE_CERT_HEADER);
         Ok(())
+    }
+
+    /// Count response body bytes for the audit record (see
+    /// `RequestAudit::response_body` for why this is not read off the session).
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        if let Some(chunk) = body {
+            ctx.response_body(chunk.len());
+        }
+        Ok(None)
+    }
+
+    /// Write the request's audit record.  pingora calls this exactly once per
+    /// request — after a response from `request_filter`, after a completed
+    /// proxy exchange, and after a fatal error — so every request gets one line
+    /// carrying the final status and the body bytes moved each way.
+    async fn logging(
+        &self,
+        session: &mut Session,
+        e: Option<&pingora_core::Error>,
+        ctx: &mut Self::CTX,
+    ) {
+        let conn = audit::Connection {
+            proxy: session.server_addr().and_then(|a| a.as_inet()).copied(),
+            client: session.client_addr().and_then(|a| a.as_inet()).copied(),
+            user_subject_dn: client_cert(session).map(|c| c.subject_dn.clone()),
+            status_code: session.response_written().map(|r| r.status.as_u16()),
+            request_body_bytes: session.body_bytes_read(),
+            response_body_bytes: ctx.response_body_bytes(),
+        };
+        ctx.finish(&conn, e.map(audit::classify_proxy_error));
+    }
+
+    /// The request description pingora appends to its own error lines.  Its
+    /// default includes the path and query; this keeps them out of the log, as
+    /// the audit record does (see `audit`).
+    fn request_summary(&self, session: &Session, _ctx: &Self::CTX) -> String {
+        let req = session.req_header();
+        let host = header_str(&req.headers, "host");
+        format!("{} {}", req.method, host.as_deref().unwrap_or("-"))
     }
 }
 
@@ -375,20 +473,24 @@ fn header_str(headers: &http::HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(|s| s.to_owned())
 }
 
-/// Drop the query string from a path for logging.
-///
-/// The accept path logs one line per *successful* request, so unlike the
-/// rejection logs it sees ordinary user traffic in bulk — and query strings
-/// routinely carry session tokens, search terms, and other content this product
-/// exists to keep from leaking.  Recording the path alone is enough to audit
-/// what was allowed through without turning the audit trail into its own
-/// disclosure risk.  Rejection logs keep the full path deliberately: they are
-/// comparatively rare and the query is often the reason the request was refused.
-fn path_without_query(path: &str) -> &str {
-    match path.split_once('?') {
-        Some((head, _)) => head,
-        None => path,
+/// Say what is wrong with a partial set of DenBrowser headers, for the audit
+/// message.  Names headers only, never their values.
+fn describe_incomplete(headers: &http::HeaderMap, has_host: bool, machine_present: bool) -> String {
+    if machine_present && !ATTESTATION_HEADERS.iter().any(|h| headers.contains_key(*h)) {
+        return "machine certificate sent without any attestation headers".to_owned();
     }
+    let unusable: Vec<&str> = ATTESTATION_HEADERS
+        .into_iter()
+        .filter(|h| header_str(headers, h).is_none())
+        .collect();
+    let mut problems = Vec::new();
+    if !unusable.is_empty() {
+        problems.push(format!("missing or unreadable: {}", unusable.join(", ")));
+    }
+    if !has_host {
+        problems.push("no Host header".to_owned());
+    }
+    format!("incomplete attestation headers ({})", problems.join("; "))
 }
 
 /// Read the mTLS client identity the TLS layer recorded on this connection's
@@ -619,14 +721,61 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn headers(names: &[&'static str]) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        for name in names {
+            h.insert(*name, http::HeaderValue::from_static("x"));
+        }
+        h
+    }
+
     #[test]
-    fn path_without_query_strips_from_the_first_question_mark() {
-        assert_eq!(path_without_query("/"), "/");
-        assert_eq!(path_without_query("/search"), "/search");
-        assert_eq!(path_without_query("/search?q=secret"), "/search");
-        // A `?` in the query value must not resurrect the rest of it.
-        assert_eq!(path_without_query("/a?b=1?2&token=shh"), "/a");
-        // Empty query still drops the separator, so the line reads cleanly.
-        assert_eq!(path_without_query("/a?"), "/a");
+    fn describe_incomplete_names_the_missing_headers() {
+        let h = headers(&[TS_HEADER]);
+        assert_eq!(
+            describe_incomplete(&h, true, false),
+            "incomplete attestation headers (missing or unreadable: \
+             x-denbrowser-nonce, x-denbrowser-token)"
+        );
+    }
+
+    #[test]
+    fn describe_incomplete_reports_a_missing_host() {
+        let h = headers(&ATTESTATION_HEADERS);
+        assert_eq!(
+            describe_incomplete(&h, false, false),
+            "incomplete attestation headers (no Host header)"
+        );
+    }
+
+    #[test]
+    fn describe_incomplete_flags_a_machine_cert_without_attestation() {
+        assert_eq!(
+            describe_incomplete(&headers(&[MACHINE_CERT_HEADER]), true, true),
+            "machine certificate sent without any attestation headers"
+        );
+    }
+
+    #[test]
+    fn describe_incomplete_does_not_call_unreadable_headers_absent() {
+        let mut h = headers(&[MACHINE_CERT_HEADER]);
+        for name in ATTESTATION_HEADERS {
+            h.insert(name, http::HeaderValue::from_bytes(b"\xff").unwrap());
+        }
+        assert_eq!(
+            describe_incomplete(&h, true, true),
+            "incomplete attestation headers (missing or unreadable: \
+             x-denbrowser-ts, x-denbrowser-nonce, x-denbrowser-token)"
+        );
+    }
+
+    #[test]
+    fn describe_incomplete_treats_an_unreadable_value_as_missing() {
+        let mut h = headers(&[TS_HEADER, TOKEN_HEADER]);
+        h.insert(NONCE_HEADER, http::HeaderValue::from_bytes(b"\xff\xfe").unwrap());
+        assert!(
+            describe_incomplete(&h, true, false).contains("x-denbrowser-nonce"),
+            "a value that is not visible ASCII cannot be used, so it is reported"
+        );
     }
 }
