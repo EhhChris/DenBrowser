@@ -341,6 +341,47 @@ key in its own config file, so one partner can never decrypt another's tokens,
 and a deployment that forgets the key fails loudly instead of silently picking
 up whatever happens to sit at a default location.
 
+**Request bodies.**  A request whose token binds a body hash is buffered and
+hashed before the upstream is contacted, so it is capped at Pingora's 64 KiB
+retry buffer: a larger bound body is answered `413`.  The browser sends bigger
+uploads *unbound* (the token carries the `unbound` marker instead of a hash) and
+those stream straight through with no size cap.  The 64 KiB boundary is pinned
+by `test/attestation/test_roundtrip.py`.
+
+**HTTP/2 to the browser.**  The listener offers HTTP/2 with HTTP/1.1 as the
+fallback (ALPN `h2, http/1.1`), the mirror image of the upstream leg, which
+prefers HTTP/2 and falls back to HTTP/1.1.  The two legs negotiate
+independently and Pingora translates between them, so a browser on HTTP/2 is
+fronted for an HTTP/1.1-only backend, and vice versa, with nothing to
+configure.  Attestation is protocol-agnostic: over HTTP/2 the host comes from
+`:authority`, which the browser derives from the same URL it signs.  Two things
+differ from HTTP/1.1: an error response such as `403` resets only that stream
+instead of closing the connection, and Pingora's HTTP/2 server defaults apply,
+100 concurrent streams per connection and a 64 KiB request-header list, which
+the machine certificate header fits comfortably.  The HTTP/2 path is covered
+by `test/attestation/test_roundtrip.py`, which drives it with `curl`.
+
+**Pingora 0.9.0 behaviour.**  The proxy inherits a few defaults from Pingora
+0.9.0 that were reviewed and accepted as-is:
+
+- Hop-by-hop request headers (`Connection`, `TE`, `Keep-Alive`, `Upgrade`,
+  `Proxy-*`) and any header named in `Connection:` are stripped before the
+  upstream sees the request.  The attestation headers are end-to-end and are
+  stripped by the proxy itself, as before.
+- Malformed requests (two `Host` headers, userinfo in `Host`, an absolute-form
+  target whose authority differs from `Host`) are answered `400` *before*
+  attestation or rate limiting run.  A `Connection` header naming a protected
+  header such as `Host`, or ten or more names, is answered `400` *after*
+  attestation passed; that request's nonce is spent, and its audit record is a
+  failed `forward` with reason `request_malformed` (risk `high`) and status
+  `400`.
+- A `POST` that fails on a reused upstream connection is answered `502` rather
+  than retried, so the backend can never receive a side-effecting request
+  twice.  The browser mints a fresh token per request, so retrying is safe.
+- An absolute-form request target (`GET https://host/p?q HTTP/1.1`) is bound
+  as `/p?q`, matching what the browser signs.  Browsers send origin-form to an
+  origin server, so this only matters to hand-written clients.
+
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any
 applicable limit is answered `429` *before* attestation or the upstream is
@@ -409,6 +450,15 @@ none of the others:
   enabled = true
   client_ca = "/etc/denbrowser/user-ca.pem"
   ```
+
+  TLS sessions are resumable.  The listener sets a session-ID context, which
+  OpenSSL requires before it will resume a client-authenticated session; without
+  one, every resumption attempt by a browser that cached a session failed its
+  handshake and cost a second, full handshake.  A resumed handshake does not
+  re-verify the client certificate: the identity recorded for the connection is
+  the one verified at the full handshake that created the session, and sessions
+  live for OpenSSL's default of two hours.  No 0-RTT data is accepted, and a
+  proxy restart invalidates every session.
 
 **Machine identity** (`[machine_identity]`) records *which workstation* a
 request came from.  The browser sends its machine certificate as base64 DER in
@@ -568,6 +618,13 @@ risk table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
 
   Because the proxy logs through `tracing` and bridges the `log` facade into it,
   raising the level also surfaces Pingora's own internals in the same file.
+
+  Requests that Pingora refuses before attestation runs (malformed request line,
+  duplicate or ambiguous `Host`, bad framing) are answered `400` with no audit
+  record and, since Pingora 0.9.0, only a `debug` system line, so at `info` they
+  leave no trace.  Do not enable `pingora_proxy=debug` in production to see
+  them: that line carries the raw request, attestation token and machine
+  certificate included.
 
 > **Upgrade note.** Earlier builds initialised `env_logger` with no default
 > filter, so the effective level was `error` and — since the proxy emits nothing

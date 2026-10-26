@@ -119,7 +119,7 @@ reasons! {
     /// None of the attestation headers were sent: not DenBrowser, or a
     /// DenBrowser not configured for this proxy.
     NoAttestationHeaders         => "no_attestation_headers",          AttestationHeaders, Low;
-    /// Some attestation headers (or the Host header) are missing or unreadable,
+    /// Some attestation headers (or the host) are missing or unreadable,
     /// or a machine certificate arrived without any attestation.
     IncompleteAttestationHeaders => "incomplete_attestation_headers",  AttestationHeaders, High;
     /// Machine identity is required and no certificate was sent.
@@ -168,6 +168,9 @@ reasons! {
     BodyHashMismatch             => "body_hash_mismatch",              AttestationBody,    Critical;
     /// The client failed to deliver the body being verified.
     BodyReadFailed               => "body_read_failed",                Downstream,         Low;
+    /// pingora refused the request as malformed after `request_filter` let it
+    /// through, chiefly a `Connection` header naming `Host` or `X-Forwarded-*`.
+    RequestMalformed             => "request_malformed",               Downstream,         High;
     /// The upstream could not be reached or failed mid-exchange.
     UpstreamError                => "upstream_error",                  Upstream,           Medium;
     /// The client's connection failed mid-exchange.
@@ -362,7 +365,8 @@ pub struct AttestationFields {
     pub body_binding: Option<Binding>,
 }
 
-/// The server the client asked for: the Host header, port removed.
+/// The server the client asked for: the Host header (`:authority` over
+/// HTTP/2), port removed.
 #[derive(Debug, Serialize)]
 pub struct ServerFields {
     pub address: Option<String>,
@@ -499,7 +503,7 @@ impl RequestAudit {
         }
     }
 
-    /// The method and Host header (port removed); never the path.
+    /// The method and host (Host or `:authority`, port removed); never the path.
     pub fn request(&mut self, method: &str, host: Option<&str>) {
         self.method = Some(bounded(method, MAX_METHOD_CHARS));
         self.host = host.map(|h| bounded(h, MAX_HOST_CHARS));
@@ -717,10 +721,15 @@ impl RequestAudit {
 
 /// Map pingora's terminal error for a request onto a reason and message.
 pub fn classify_proxy_error(e: &pingora_core::Error) -> (Reason, String) {
-    use pingora_core::ErrorSource;
+    use pingora_core::{ErrorSource, ErrorType};
 
     let (reason, side) = match e.esource() {
         ErrorSource::Upstream => (Reason::UpstreamError, "upstream"),
+        // pingora's request policy refused it with a 400 (since 0.9.0), as
+        // opposed to the client's connection failing.
+        ErrorSource::Downstream if *e.etype() == ErrorType::InvalidHTTPHeader => {
+            (Reason::RequestMalformed, "malformed request")
+        }
         ErrorSource::Downstream => (Reason::DownstreamError, "client connection"),
         ErrorSource::Internal | ErrorSource::Unset => (Reason::InternalError, "internal"),
     };
@@ -982,6 +991,29 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_request_refused_after_forwarding_is_high_risk() {
+        // pingora 0.9.0 refuses some requests `request_filter` already let
+        // through, such as `Connection: host`.  Attestation passed and the
+        // nonce is spent, but no browser sends such a request.
+        let mut ctx = RequestAudit::new(true);
+        ctx.token_verified(Binding::Bound);
+        ctx.forward();
+        let err = pingora_core::Error::new_down(pingora_core::ErrorType::InvalidHTTPHeader);
+        let r = json(
+            &mut ctx,
+            &conn(Some(400), 0, 0),
+            Some(classify_proxy_error(&err)),
+        );
+        assert_eq!(r["level"], "WARN");
+        assert_eq!(r["event"]["action"], "forward");
+        assert_eq!(r["event"]["outcome"], "failure");
+        assert_eq!(r["event"]["reason"], "request_malformed");
+        assert_eq!(r["event"]["risk"], "high");
+        assert_eq!(r["attestation"]["status"], "verified");
+        assert_eq!(r["http"]["response"]["status_code"], 400);
+    }
+
+    #[test]
     fn a_transport_error_after_a_refusal_keeps_the_refusal() {
         let mut ctx = RequestAudit::new(true);
         ctx.reject(Reason::NonceReplay, "nonce already seen — replay rejected");
@@ -1019,6 +1051,13 @@ mod tests {
             (
                 Reason::DownstreamError,
                 "client connection error: ConnectionClosed".to_owned()
+            )
+        );
+        assert_eq!(
+            classify_proxy_error(&Error::new_down(ErrorType::InvalidHTTPHeader)),
+            (
+                Reason::RequestMalformed,
+                "malformed request error: InvalidHTTPHeader".to_owned()
             )
         );
         assert_eq!(
@@ -1433,6 +1472,26 @@ mod tests {
                 let mut ex = Example::new(ctx, conn(Some(200), 0, 1_048_576), 2_204);
                 ex.error = Some(classify_proxy_error(&pingora_core::Error::new_down(
                     pingora_core::ErrorType::ConnectionClosed,
+                )));
+                ex
+            })),
+            System(
+                Level::ERROR,
+                "pingora_proxy",
+                // pingora 0.9.0's request policy refusing `Connection: host`.
+                "Fail to proxy: Downstream InvalidHTTPHeader context: Peer: addr: \
+                 10.30.0.8:443, scheme: HTTPS, sni: backend.internal cause:  context: \
+                 protected header cannot be nominated by the Connection header, status: 400, \
+                 tries: 1, retry: false, GET intranet.example.com",
+            ),
+            Audit(Box::new(|now| {
+                let mut ctx = attested("GET", now);
+                ctx.token_verified(Binding::Bound);
+                ctx.machine_verified(verified_machine());
+                ctx.forward();
+                let mut ex = Example::new(ctx, conn(Some(400), 0, 0), 3);
+                ex.error = Some(classify_proxy_error(&pingora_core::Error::new_down(
+                    pingora_core::ErrorType::InvalidHTTPHeader,
                 )));
                 ex
             })),
