@@ -82,10 +82,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
-index d166e1d597d9..187db157bd97 100644
+index 55c5ebc0b0d2..f078978e6a6e 100644
 --- a/widget/cocoa/nsCocoaWindow.mm
 +++ b/widget/cocoa/nsCocoaWindow.mm
-@@ -6905,10 +6905,11 @@ static bool AlwaysUsesNativeFullScreen() {
+@@ -6991,10 +6991,11 @@ nsresult nsCocoaWindow::SetTitle(const nsAString& aTitle) {
      return NS_OK;
    }
  
@@ -102,7 +102,7 @@ index d166e1d597d9..187db157bd97 100644
      // Don't cause invalidations when the title isn't displayed.
      [mWindow disableSetNeedsDisplay];
 diff --git a/widget/gtk/nsWindow.cpp b/widget/gtk/nsWindow.cpp
-index 9d11df189598..45344fd861fe 100644
+index 7c1b11fa2103..b7abf32ad0ea 100644
 --- a/widget/gtk/nsWindow.cpp
 +++ b/widget/gtk/nsWindow.cpp
 @@ -1921,17 +1921,10 @@ nsresult nsWindow::SetTitle(const nsAString& aTitle) {

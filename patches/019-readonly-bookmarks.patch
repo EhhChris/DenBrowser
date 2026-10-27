@@ -32,7 +32,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
-index ba4697abc6bf..4becba4ed769 100644
+index 8f0b18c0a534..d4f61c18f867 100644
 --- a/browser/base/content/browser-init.js
 +++ b/browser/base/content/browser-init.js
 @@ -67,6 +67,12 @@ const DENBROWSER_BLOCKED_NOTIFICATION_DETAILS = new Map([
@@ -183,10 +183,10 @@ index acd57c4ab931..119ecb14a8a9 100644
      info = validateBookmarkObject("Bookmarks.sys.mjs: reorder", info, {
        guid: { required: true },
 diff --git a/toolkit/components/places/PlacesUtils.sys.mjs b/toolkit/components/places/PlacesUtils.sys.mjs
-index d2d38fe6ed64..fe1f3e430d94 100644
+index dafb6717f2f1..3817dd266b0d 100644
 --- a/toolkit/components/places/PlacesUtils.sys.mjs
 +++ b/toolkit/components/places/PlacesUtils.sys.mjs
-@@ -2465,6 +2465,8 @@ export var PlacesUtils = {
+@@ -2451,6 +2451,8 @@ export var PlacesUtils = {
        if (hasKeyword) {
          keywordOrEntry.keyword = keywordOrEntry.keyword.trim().toLowerCase();
        }
@@ -195,7 +195,7 @@ index d2d38fe6ed64..fe1f3e430d94 100644
        /** @type {(entry: KeywordEntry) => void} */
        let safeOnResult = entry => {
          if (onResult) {
-@@ -2559,6 +2561,10 @@ export var PlacesUtils = {
+@@ -2545,6 +2547,10 @@ export var PlacesUtils = {
          throw new Error(url + " is not a valid URL");
        }
  
@@ -206,7 +206,7 @@ index d2d38fe6ed64..fe1f3e430d94 100644
        return PlacesUtils.withConnectionWrapper(
          "PlacesUtils.keywords.insert",
          async db => {
-@@ -2921,6 +2927,8 @@ export var PlacesUtils = {
+@@ -2907,6 +2913,8 @@ export var PlacesUtils = {
       *  Whether the given word is a keyword.
       */
      isKeywordFromCache(keyword) {

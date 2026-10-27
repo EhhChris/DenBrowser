@@ -80,7 +80,7 @@ index 13464a72e83e..ba5a127f92ff 100644
  invalidHeaderValue=%S sent back a header with empty characters not allowed by web security standards.
  networkProtocolError=Firefox has experienced a network protocol violation that cannot be repaired.
 diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
-index f6750087c720..1ca9bf53de1f 100644
+index 4f6e936420e6..452715846a60 100644
 --- a/docshell/base/nsDocShell.cpp
 +++ b/docshell/base/nsDocShell.cpp
 @@ -4,6 +4,8 @@
@@ -92,7 +92,7 @@ index f6750087c720..1ca9bf53de1f 100644
  #include <algorithm>
  #include "mozilla/CycleCollectedJSContext.h"
  #include "mozilla/dom/HTMLFormElement.h"
-@@ -8505,6 +8507,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
+@@ -8535,6 +8537,21 @@ nsresult nsDocShell::InternalLoad(nsDocShellLoadState* aLoadState,
  
    MOZ_TRY(CheckDisallowedJavascriptLoad(aLoadState));
  
@@ -210,7 +210,7 @@ index baf48c8f5d46..e43c9cea6329 100644
      "nsASocketHandler.h",
      "nsAsyncRedirectVerifyHelper.h",
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
-index 19f25f25584f..b80ee36f2c76 100644
+index 54f2e3e1b791..b80ed799def5 100644
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
 +++ b/netwerk/protocol/http/nsHttpChannel.cpp
 @@ -6,6 +6,7 @@
@@ -221,7 +221,7 @@ index 19f25f25584f..b80ee36f2c76 100644
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
-@@ -7603,6 +7604,16 @@ nsHttpChannel::AsyncOpen(nsIStreamListener* aListener) {
+@@ -7621,6 +7622,16 @@ nsHttpChannel::AsyncOpen(nsIStreamListener* aListener) {
      return NS_FAILED(mStatus) ? mStatus : NS_ERROR_FAILURE;
    }
  

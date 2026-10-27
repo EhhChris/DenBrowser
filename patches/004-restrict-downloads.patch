@@ -39,7 +39,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
-index 28e8d41f6ec2..ba4697abc6bf 100644
+index 0091b9132034..8f0b18c0a534 100644
 --- a/browser/base/content/browser-init.js
 +++ b/browser/base/content/browser-init.js
 @@ -40,6 +40,189 @@ var gSerialDeviceObserver = {
@@ -283,7 +283,7 @@ diff --git a/browser/components/shell/nsMacShellService.mm b/browser/components/
 index 6bdf1087f321..a0b05d6e2887 100644
 --- a/browser/components/shell/nsMacShellService.mm
 +++ b/browser/components/shell/nsMacShellService.mm
-@@ -39,6 +39,10 @@
+@@ -39,6 +39,10 @@ using mozilla::widget::SetDesktopImage;
  
  #define SAFARI_BUNDLE_IDENTIFIER "com.apple.Safari"
  
@@ -294,7 +294,7 @@ index 6bdf1087f321..a0b05d6e2887 100644
  NS_IMPL_ISUPPORTS(nsMacShellService, nsIMacShellService, nsIShellService,
                    nsIToolkitShellService, nsIWebProgressListener)
  
-@@ -120,6 +124,10 @@
+@@ -120,6 +124,10 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
  NS_IMETHODIMP
  nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
                                          const nsACString& aImageName) {

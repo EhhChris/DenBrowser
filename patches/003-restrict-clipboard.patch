@@ -93,7 +93,7 @@ index 042341cecb1a..19a7cbf8df1f 100644
          case "context-copyaudiourl":
          case "context-copyimage":
 diff --git a/browser/base/content/nsContextMenu.sys.mjs b/browser/base/content/nsContextMenu.sys.mjs
-index 5bab8ffea8d5..144fb8465e95 100644
+index d97a2f43eff1..aec4ab2cd315 100644
 --- a/browser/base/content/nsContextMenu.sys.mjs
 +++ b/browser/base/content/nsContextMenu.sys.mjs
 @@ -75,13 +75,6 @@ XPCOMUtils.defineLazyServiceGetter(
@@ -110,7 +110,7 @@ index 5bab8ffea8d5..144fb8465e95 100644
  XPCOMUtils.defineLazyPreferenceGetter(
    lazy,
    "TEXT_FRAGMENTS_ENABLED",
-@@ -1731,13 +1724,22 @@ export class nsContextMenu {
+@@ -1737,13 +1730,22 @@ export class nsContextMenu {
      return blobURL;
    }
  
@@ -139,7 +139,7 @@ index 5bab8ffea8d5..144fb8465e95 100644
    }
  
    // Change current window to the URL of the image, video, or audio.
-@@ -2220,57 +2222,16 @@ export class nsContextMenu {
+@@ -2226,57 +2228,16 @@ export class nsContextMenu {
  
    // Generate email address and put it on clipboard.
    copyEmail() {
@@ -201,7 +201,7 @@ index 5bab8ffea8d5..144fb8465e95 100644
    }
  
    previewLink(url = this.linkURL) {
-@@ -2284,16 +2245,8 @@ export class nsContextMenu {
+@@ -2290,16 +2251,8 @@ export class nsContextMenu {
     * 'Stripped' means that query parameters for tracking/ link decoration
     * that are known to us will be removed from the URI.
     */
@@ -220,7 +220,7 @@ index 5bab8ffea8d5..144fb8465e95 100644
    }
  
    async addSearchFieldAsEngine() {
-@@ -2572,10 +2525,7 @@ export class nsContextMenu {
+@@ -2578,10 +2531,7 @@ export class nsContextMenu {
    }
  
    copyMediaLocation() {
@@ -399,10 +399,10 @@ index 2309c29fb6f4..e05a6c6820d4 100644
  
    async handleDeleteEvent() {
 diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
-index 90e61367637d..b57b0d0045e4 100644
+index 9f7e47bb9836..8219d84d37f4 100644
 --- a/dom/base/Document.cpp
 +++ b/dom/base/Document.cpp
-@@ -5621,6 +5621,19 @@ bool Document::ExecCommand(const nsAString& aHTMLCommandName, bool aShowUI,
+@@ -5619,6 +5619,19 @@ bool Document::ExecCommand(const nsAString& aHTMLCommandName, bool aShowUI,
      return false;
    }
  
@@ -556,7 +556,7 @@ index 6fff861948ab..a8b139f87c04 100644
    RefPtr<nsGlobalWindowInner> owner = GetOwnerWindow();
    RefPtr<Promise> p = dom::Promise::Create(owner, aRv);
 diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
-index 448eb85acde2..dbaca20b21c3 100644
+index 01af26507e80..03d83ad87a52 100644
 --- a/dom/ipc/ContentParent.cpp
 +++ b/dom/ipc/ContentParent.cpp
 @@ -135,6 +135,8 @@
@@ -568,7 +568,7 @@ index 448eb85acde2..dbaca20b21c3 100644
  #ifdef MOZ_WMF
  #  include "mozilla/glean/DomMediaPlatformsWmfMetrics.h"
  #endif
-@@ -3242,10 +3244,113 @@ void ContentParent::OnVarChanged(const nsTArray<GfxVarUpdate>& aVar) {
+@@ -3244,10 +3246,113 @@ void ContentParent::OnVarChanged(const nsTArray<GfxVarUpdate>& aVar) {
    (void)SendVarUpdate(aVar);
  }
  
@@ -683,7 +683,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    // aRequestingPrincipal is allowed to be nullptr here.
  
    if (!ValidatePrincipal(aTransferable.dataPrincipal(),
-@@ -3273,6 +3378,57 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
+@@ -3275,6 +3380,57 @@ mozilla::ipc::IPCResult ContentParent::RecvSetClipboard(
    if (!aRequestingWindowContext.IsDiscarded()) {
      window = aRequestingWindowContext.get_canonical();
    }
@@ -741,7 +741,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    clipboard->SetData(trans, nullptr, aWhichClipboard, window);
    return IPC_OK();
  }
-@@ -3325,6 +3481,22 @@ nsresult ContentParent::GetClipboardDataInternal(
+@@ -3327,6 +3483,22 @@ nsresult ContentParent::GetClipboardDataInternal(
      return NS_ERROR_ILLEGAL_VALUE;
    }
  
@@ -764,7 +764,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    nsresult rv;
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
    if (NS_FAILED(rv)) {
-@@ -3419,9 +3591,64 @@ mozilla::ipc::IPCResult ContentParent::RecvEmptyClipboard(
+@@ -3421,9 +3593,64 @@ mozilla::ipc::IPCResult ContentParent::RecvEmptyClipboard(
    return IPC_OK();
  }
  
@@ -829,7 +829,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    nsresult rv;
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
    NS_ENSURE_SUCCESS(rv, IPC_OK());
-@@ -3521,6 +3748,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
+@@ -3523,6 +3750,23 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshot(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -853,7 +853,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    nsresult rv;
    // Retrieve clipboard
    nsCOMPtr<nsIClipboard> clipboard(do_GetService(kCClipboardCID, &rv));
-@@ -3558,6 +3802,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
+@@ -3560,6 +3804,27 @@ mozilla::ipc::IPCResult ContentParent::RecvGetClipboardDataSnapshotSync(
          this, "attempt to paste into WindowContext loaded in another process");
    }
  
@@ -882,7 +882,7 @@ index 448eb85acde2..dbaca20b21c3 100644
    if (!clipboard) {
      *aRequestOrError = NS_ERROR_FAILURE;
 diff --git a/dom/ipc/ContentParent.h b/dom/ipc/ContentParent.h
-index 1e1bf554e866..9e56d0d012ff 100644
+index d42ead119b68..ebc43d7ee65d 100644
 --- a/dom/ipc/ContentParent.h
 +++ b/dom/ipc/ContentParent.h
 @@ -975,7 +975,8 @@ class ContentParent final : public PContentParent,
@@ -908,10 +908,10 @@ index 1e1bf554e866..9e56d0d012ff 100644
        nsTArray<nsCString>&& aTypes,
        const nsIClipboard::ClipboardType& aWhichClipboard,
 diff --git a/dom/ipc/PContent.ipdl b/dom/ipc/PContent.ipdl
-index 1e6977f6672c..20224502928f 100644
+index 4f69b00fad7f..99061561aaf7 100644
 --- a/dom/ipc/PContent.ipdl
 +++ b/dom/ipc/PContent.ipdl
-@@ -1237,7 +1237,9 @@ parent:
+@@ -1238,7 +1238,9 @@ parent:
  
      // Places the items within dataTransfer on the clipboard.
      async SetClipboard(IPCTransferable aTransferable,
@@ -922,7 +922,7 @@ index 1e6977f6672c..20224502928f 100644
  
      // Given a list of supported types, returns the clipboard data for the
      // first type that matches.
-@@ -1275,6 +1277,14 @@ parent:
+@@ -1276,6 +1278,14 @@ parent:
      sync ClipboardHasType(nsCString[] aTypes, ClipboardType aWhichClipboard)
          returns (bool hasType);
  
@@ -1060,15 +1060,19 @@ index 8cab331f21d9..140403964557 100644
      parent: {
        esModuleURI: "resource://gre/actors/PrintingParent.sys.mjs",
 diff --git a/widget/nsBaseClipboard.cpp b/widget/nsBaseClipboard.cpp
-index 71bbb8af2b5c..3aef75b1811d 100644
+index f3f8a51b52ea..ec221074cc04 100644
 --- a/widget/nsBaseClipboard.cpp
 +++ b/widget/nsBaseClipboard.cpp
-@@ -390,9 +390,14 @@ NS_IMETHODIMP nsBaseClipboard::SetData(
+@@ -402,13 +402,14 @@ NS_IMETHODIMP nsBaseClipboard::SetData(
      mIgnoreEmptyNotification = true;
      // Reject existing pending asyncSetData request if any.
      RejectPendingAsyncSetDataRequestIfAny(aWhichClipboard);
 -    SanitizeForClipboard(aTransferable);
--    rv = SetNativeClipboardData(aTransferable, aWhichClipboard);
+-    {
+-      mozilla::AutoRestore<bool> mutating(mMutatingNativeClipboard);
+-      mMutatingNativeClipboard = true;
+-      rv = SetNativeClipboardData(aTransferable, aWhichClipboard);
+-    }
      mIgnoreEmptyNotification = false;
 +    // DenBrowser: suppress OS write AND skip the cache Update() below.
 +    // Otherwise the in-memory ClipboardCache exposes listed-site text to
