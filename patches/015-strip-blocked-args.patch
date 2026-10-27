@@ -942,7 +942,7 @@ index 000000000000..ef96a27e6422
 +  return ok ? 0 : 1;
 +}
 diff --git a/browser/app/winlauncher/test/moz.build b/browser/app/winlauncher/test/moz.build
-index a4687d9dc0cd..36b3c6392b17 100644
+index d9fdadc33073..dbea3da7e9f7 100644
 --- a/browser/app/winlauncher/test/moz.build
 +++ b/browser/app/winlauncher/test/moz.build
 @@ -7,6 +7,7 @@ DisableStlWrapping()

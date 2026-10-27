@@ -10,6 +10,7 @@ use p256::ecdh::diffie_hellman;
 use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
+use crate::audit::Reason;
 use crate::config::AttestationConfig;
 
 const MAX_TS_DRIFT_SECS: i64 = 30;
@@ -47,8 +48,6 @@ pub struct AttestInputs<'a> {
 /// to hash up front, so the proxy streams the body straight through without
 /// buffering.  Origin attestation, nonce replay, timestamp, and method/host/path
 /// binding still apply — only per-body integrity is dropped for these requests.
-/// The `Unbound` state lives inside the AES-GCM-authenticated plaintext, so a
-/// client cannot forge it or downgrade a normal (bound) request without the key.
 pub enum BodyBinding {
     Hash([u8; 32]),
     Unbound,
@@ -90,6 +89,22 @@ impl std::fmt::Display for AttestError {
             Self::DecryptFailed => write!(f, "AES-128-GCM authentication failed"),
             Self::PlaintextMismatch => write!(f, "plaintext mismatch"),
             Self::BodyHashMismatch => write!(f, "body hash mismatch"),
+        }
+    }
+}
+
+impl AttestError {
+    /// The audit reason this failure is recorded under.
+    pub fn reason(&self) -> Reason {
+        match self {
+            Self::BadTimestamp => Reason::TimestampInvalid,
+            Self::TimestampDrift(_) => Reason::TimestampOutOfWindow,
+            Self::InvalidNonce(_) => Reason::NonceInvalid,
+            Self::NonceReplay => Reason::NonceReplay,
+            Self::InvalidToken(_) => Reason::TokenMalformed,
+            Self::DecryptFailed => Reason::TokenDecryptFailed,
+            Self::PlaintextMismatch => Reason::TokenRequestMismatch,
+            Self::BodyHashMismatch => Reason::BodyHashMismatch,
         }
     }
 }

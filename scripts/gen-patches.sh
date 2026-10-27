@@ -74,6 +74,8 @@ done
 
 if [[ $PREFLIGHT_FAILED -ne 0 ]]; then
     echo "[gen] ERROR: Refusing to overwrite patches; repair the commit messages first." >&2
+    echo "[gen]   Git's default comment cleanup can strip # PATCH: bodies during rebase conflict resolution." >&2
+    echo "[gen]   See $ROOT_DIR/docs/patch-workflow.md (Missing patch documentation after a rebase)." >&2
     exit 1
 fi
 

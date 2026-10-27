@@ -39,7 +39,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/base/content/browser-init.js b/browser/base/content/browser-init.js
-index 311e36a23026..64819c5d2896 100644
+index 0091b9132034..8f0b18c0a534 100644
 --- a/browser/base/content/browser-init.js
 +++ b/browser/base/content/browser-init.js
 @@ -40,6 +40,189 @@ var gSerialDeviceObserver = {
@@ -279,11 +279,11 @@ index 9c1541ec5cc3..a2718c4e7ae9 100644
      if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
        return true;
      }
-diff --git a/browser/components/shell/nsMacShellService.cpp b/browser/components/shell/nsMacShellService.cpp
-index 5f5dd4163cb3..fac137c60652 100644
---- a/browser/components/shell/nsMacShellService.cpp
-+++ b/browser/components/shell/nsMacShellService.cpp
-@@ -37,6 +37,10 @@ using mozilla::widget::SetDesktopImage;
+diff --git a/browser/components/shell/nsMacShellService.mm b/browser/components/shell/nsMacShellService.mm
+index 6bdf1087f321..a0b05d6e2887 100644
+--- a/browser/components/shell/nsMacShellService.mm
++++ b/browser/components/shell/nsMacShellService.mm
+@@ -39,6 +39,10 @@ using mozilla::widget::SetDesktopImage;
  
  #define SAFARI_BUNDLE_IDENTIFIER "com.apple.Safari"
  
@@ -294,7 +294,7 @@ index 5f5dd4163cb3..fac137c60652 100644
  NS_IMPL_ISUPPORTS(nsMacShellService, nsIMacShellService, nsIShellService,
                    nsIToolkitShellService, nsIWebProgressListener)
  
-@@ -101,6 +105,10 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
+@@ -120,6 +124,10 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
  NS_IMETHODIMP
  nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
                                          const nsACString& aImageName) {
@@ -306,10 +306,10 @@ index 5f5dd4163cb3..fac137c60652 100644
  
    // Get the image URI:
 diff --git a/browser/components/shell/nsWindowsShellService.cpp b/browser/components/shell/nsWindowsShellService.cpp
-index 424bf6469e19..d085868a2600 100644
+index b42d887f50e6..bab6db82c849 100644
 --- a/browser/components/shell/nsWindowsShellService.cpp
 +++ b/browser/components/shell/nsWindowsShellService.cpp
-@@ -120,6 +120,10 @@ using namespace ABI::Windows::UI::StartScreen;
+@@ -102,6 +102,10 @@ using namespace ABI::Windows::UI::StartScreen;
  using namespace mozilla;
  using mozilla::intl::Localization;
  
@@ -320,7 +320,7 @@ index 424bf6469e19..d085868a2600 100644
  struct SysFreeStringDeleter {
    void operator()(BSTR aPtr) { ::SysFreeString(aPtr); }
  };
-@@ -698,6 +702,10 @@ NS_IMETHODIMP
+@@ -680,6 +684,10 @@ NS_IMETHODIMP
  nsWindowsShellService::SetDesktopBackground(dom::Element* aElement,
                                              int32_t aPosition,
                                              const nsACString& aImageName) {
@@ -332,10 +332,10 @@ index 424bf6469e19..d085868a2600 100644
      // XXX write background loading stuff!
      return NS_ERROR_NOT_AVAILABLE;
 diff --git a/browser/locales/en-US/browser/browser.ftl b/browser/locales/en-US/browser/browser.ftl
-index f05045ad2d6c..2f879ace6ec8 100644
+index 759a6d2638c3..657f7450f87c 100644
 --- a/browser/locales/en-US/browser/browser.ftl
 +++ b/browser/locales/en-US/browser/browser.ftl
-@@ -1318,6 +1318,13 @@ restore-session-startup-suggestion-button = Show me how
+@@ -1324,6 +1324,13 @@ restore-session-startup-suggestion-button = Show me how
  
  filepicker-blocked-infobar = Your organization has blocked access to local files on this computer
  

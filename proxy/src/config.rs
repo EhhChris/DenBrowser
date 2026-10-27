@@ -49,13 +49,35 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub upstream: String,
 
+    /// Optional PEM CA bundle for verifying the upstream server. Empty uses
+    /// Pingora/OpenSSL's default trust store; a supplied bundle replaces it for
+    /// upstream connections. Relative paths resolve from the working directory.
+    /// Loaded once at startup; hostname verification remains enabled.
+    #[serde(default)]
+    pub upstream_ca: String,
+
     /// Path to the TLS server certificate chain in PEM format.
     #[serde(default)]
     pub tls_cert: String,
 
-    /// Path to the TLS server private key in PEM format.
+    /// Path to the TLS server private key in PEM format.  May be encrypted
+    /// (PKCS#8 `ENCRYPTED PRIVATE KEY` or legacy `Proc-Type: 4,ENCRYPTED`), in
+    /// which case one of the two passphrase settings below must be set.
     #[serde(default)]
     pub tls_key: String,
+
+    /// Passphrase for an encrypted `tls_key`, written inline.  Empty (the
+    /// default) means none.  Prefer `tls_key_passphrase_file`, which keeps the
+    /// secret out of this file; setting both is rejected by [`Self::validate`].
+    #[serde(default)]
+    pub tls_key_passphrase: Secret,
+
+    /// Path to a file whose first line is the passphrase for an encrypted
+    /// `tls_key` — the form that fits Docker/Kubernetes secrets and systemd
+    /// credentials.  Empty (the default) means none.  Relative paths resolve
+    /// against the proxy's working directory, as `tls_key` does.
+    #[serde(default)]
+    pub tls_key_passphrase_file: String,
 }
 
 impl ProxyConfig {
@@ -73,7 +95,54 @@ impl ProxyConfig {
                 anyhow::bail!("[proxy].{name} is required");
             }
         }
+        // Two sources for one secret would leave the reader guessing which one
+        // is in force, so naming both is an error rather than a precedence rule.
+        if !self.tls_key_passphrase.is_empty() && !self.tls_key_passphrase_file.is_empty() {
+            anyhow::bail!(
+                "[proxy].tls_key_passphrase and [proxy].tls_key_passphrase_file are \
+                 mutually exclusive — set at most one"
+            );
+        }
         Ok(())
+    }
+}
+
+/// A config string that must never reach the log, such as a key passphrase.
+///
+/// It deserializes as a plain TOML string, but its `Debug` output is redacted:
+/// every config struct derives `Debug`, and the log is the audit trail, so a
+/// `{:?}` of the config — in a test failure or a future debug line — must not
+/// be able to leak it.
+#[derive(Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// True when nothing was configured.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The secret itself, for the code that actually consumes it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Says whether a value is set, and nothing else about it.
+        if self.0.is_empty() {
+            f.write_str("\"\"")
+        } else {
+            f.write_str("<redacted>")
+        }
     }
 }
 
@@ -144,7 +213,7 @@ pub struct RuleConfig {
 /// during the TLS handshake; a client with no certificate or an untrusted one is
 /// rejected at the handshake and never reaches the request path.  This sits *in
 /// front of* attestation as an independent layer: it authenticates the user/
-/// device, while attestation still proves the request came from a genuine
+/// device, while attestation attempts to prove the request came from a genuine
 /// DenBrowser build and TLS pinning still authenticates the proxy to the browser.
 ///
 /// Disabled by default, so a proxy with no config (or `enabled = false`) requests
@@ -424,8 +493,12 @@ mod tests {
         let c = Config::default();
         assert!(c.proxy.listen.is_empty());
         assert!(c.proxy.upstream.is_empty());
+        assert!(c.proxy.upstream_ca.is_empty());
         assert!(c.proxy.tls_cert.is_empty());
         assert!(c.proxy.tls_key.is_empty());
+        // Optional: a plaintext key needs no passphrase.
+        assert!(c.proxy.tls_key_passphrase.is_empty());
+        assert!(c.proxy.tls_key_passphrase_file.is_empty());
         assert!(!c.rate_limiting.enabled);
         assert_eq!(c.rate_limiting.max_requests, 0);
         assert!(c.rate_limiting.rules.is_empty());
@@ -445,8 +518,24 @@ mod tests {
         c.proxy.validate().unwrap();
         assert_eq!(c.proxy.listen, "127.0.0.1:9443");
         assert_eq!(c.proxy.upstream, "backend.internal:443");
+        assert!(c.proxy.upstream_ca.is_empty());
         assert_eq!(c.proxy.tls_cert, "/etc/denbrowser/proxy.crt");
         assert_eq!(c.proxy.tls_key, "/etc/denbrowser/proxy.key");
+    }
+
+    #[test]
+    fn parses_optional_upstream_ca() {
+        let c: Config = toml::from_str(
+            r#"
+            [proxy]
+            upstream_ca = "/run/secrets/upstream_ca.pem"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(c.proxy.upstream_ca, "/run/secrets/upstream_ca.pem");
+
+        let c: Config = toml::from_str("[proxy]\nupstream_ca = \"\"\n").unwrap();
+        assert!(c.proxy.upstream_ca.is_empty());
     }
 
     #[test]
@@ -460,6 +549,75 @@ mod tests {
         let c: Config = toml::from_str(toml).unwrap();
         let error = c.proxy.validate().unwrap_err().to_string();
         assert!(error.contains("[proxy].tls_key is required"));
+    }
+
+    #[test]
+    fn parses_either_tls_key_passphrase_source() {
+        let inline: Config = toml::from_str(
+            r#"
+            [proxy]
+            listen = "0.0.0.0:8081"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+            tls_key = "/etc/denbrowser/proxy.key"
+            tls_key_passphrase = "correct horse"
+        "#,
+        )
+        .unwrap();
+        inline.proxy.validate().unwrap();
+        assert_eq!(inline.proxy.tls_key_passphrase.expose(), "correct horse");
+        assert!(inline.proxy.tls_key_passphrase_file.is_empty());
+
+        let file: Config = toml::from_str(
+            r#"
+            [proxy]
+            listen = "0.0.0.0:8081"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+            tls_key = "/etc/denbrowser/proxy.key"
+            tls_key_passphrase_file = "/run/secrets/proxy_tls_key_passphrase"
+        "#,
+        )
+        .unwrap();
+        file.proxy.validate().unwrap();
+        assert!(file.proxy.tls_key_passphrase.is_empty());
+        assert_eq!(
+            file.proxy.tls_key_passphrase_file,
+            "/run/secrets/proxy_tls_key_passphrase"
+        );
+    }
+
+    #[test]
+    fn proxy_config_rejects_both_passphrase_sources() {
+        let toml = r#"
+            [proxy]
+            listen = "0.0.0.0:8081"
+            upstream = "backend.internal:443"
+            tls_cert = "/etc/denbrowser/proxy.crt"
+            tls_key = "/etc/denbrowser/proxy.key"
+            tls_key_passphrase = "correct horse"
+            tls_key_passphrase_file = "/run/secrets/proxy_tls_key_passphrase"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        let error = c.proxy.validate().unwrap_err().to_string();
+        assert!(error.contains("mutually exclusive"), "got: {error}");
+    }
+
+    #[test]
+    fn tls_key_passphrase_is_redacted_from_debug_output() {
+        let c: Config =
+            toml::from_str("[proxy]\ntls_key_passphrase = \"correct horse\"\n").unwrap();
+        let debug = format!("{c:?}");
+        assert!(
+            !debug.contains("correct horse"),
+            "passphrase leaked: {debug}"
+        );
+        assert!(
+            debug.contains("tls_key_passphrase: <redacted>"),
+            "got: {debug}"
+        );
+        // Unset stays distinguishable from set.
+        assert_eq!(format!("{:?}", Secret::default()), "\"\"");
     }
 
     #[test]

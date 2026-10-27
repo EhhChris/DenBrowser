@@ -9,9 +9,10 @@ This tool drives load against a single running instance of `denbrowser-proxy`
      overwhelmed (latency blows up, connections start erroring/timing out, or
      throughput stops climbing as we add concurrency)?
 
-  2. When rate limiting is eventually added to the proxy, is it kicking in?
-     (Detected here via HTTP 429 / Retry-After, or via otherwise-valid
-     requests being rejected while the connection itself stays healthy.)
+  2. Is the proxy's [rate_limiting] kicking in?  It answers 429 before
+     attestation runs once a client IP exceeds its cap.  (Detected here via
+     HTTP 429, or via otherwise-valid requests being rejected while the
+     connection itself stays healthy.)
 
 It generates three *kinds* of traffic, mirroring exactly what the verifier in
 proxy/src/attest.rs checks:
@@ -355,8 +356,9 @@ class ReplayGen:
             )
         except requests.RequestException:
             return None
-        # 200 = committed and good to replay.  429 (future rate limiting) means
-        # the nonce was NOT committed, so it is not a usable replay seed.
+        # 200 = committed and good to replay.  429 (rate limited before
+        # attestation ran) means the nonce was NOT committed, so it is not a
+        # usable replay seed.
         return spec.headers if r.status_code == 200 else None
 
     def prepare(self) -> bool:

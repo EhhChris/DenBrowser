@@ -30,10 +30,11 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [--skip-fetch] [--skip-patches] [--skip-patch N]... [--jobs N] [--dev] [--ffversion X.Y.Z] [--tarball PATH]"
             echo "  --skip-patch N    Skip patch N (by number, e.g. 6 for 006-attest-requests.patch)."
             echo "                    Repeatable: --skip-patch 6 --skip-patch 8"
+            echo "                    Production requires patch 17; use --dev to skip it."
             echo "  --dev             Enable DevTools + testing features and use DEMO branding:"
             echo "                    skips patches 8, 15, 17, strips devtools locks from policies.json and"
             echo "                    mozilla.cfg, and adjusts mozconfig to enable marionette,"
-            echo "                    crashreporter, profiling, and preserve debug symbols (no strip)."
+            echo "                    crashreporter, profiling, and AutoConfig while preserving debug symbols."
             echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
             echo "                    fetching the latest from Mozilla's product-details API."
             echo "  --tarball PATH    Use a specific source tarball (firefox-X.Y.Zesr.source.tar.xz)."
@@ -139,6 +140,28 @@ if [[ $SKIP_PATCHES -eq 0 ]]; then
     bash "$SCRIPTS_DIR/apply-patches.sh" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"}
 else
     echo "[build] Skipping patches (--skip-patches)"
+fi
+
+# Production removes AutoConfig, so patch 017 must already be present even
+# when --skip-patches is used with a previously patched source tree.
+if [[ $DEV_MODE -eq 0 ]]; then
+    if ! python3 - "$FIREFOX_SRC" <<'PYEOF'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+prefs = (source / 'modules/libpref/Preferences.cpp').read_text()
+manifest = (source / 'browser/installer/package-manifest.in').read_text()
+anchor = ('  StaticPrefs::InitAll();\n\n'
+          '  // DenBrowser: lock prefs before loading defaults from data files.\n'
+          '  SetupDenBrowserLockdown();')
+if prefs.count(anchor) != 1 or '@RESPATH@/defaults/autoconfig/prefcalls.js' in manifest:
+    sys.exit(1)
+PYEOF
+    then
+        echo "[build] ERROR: production requires patch 017; rebuild without skipping it." >&2
+        exit 1
+    fi
 fi
 
 # ── Step 2.5: Generate the attestation proxy table ───────────────────────────
@@ -644,7 +667,8 @@ with open(path, encoding='utf-8') as f:
     content = f.read()
 # Strip production-only flags (comments on same line are also removed).
 for flag in ('--enable-strip', '--enable-install-strip',
-             '--disable-crashreporter', '--disable-profiling'):
+             '--disable-crashreporter', '--disable-profiling',
+             '--disable-pref-extensions'):
     content = re.sub(r'ac_add_options ' + re.escape(flag) + r'[^\n]*\n?', '', content)
 # Append dev-only overrides.
 content += (
@@ -665,7 +689,7 @@ echo "mk_add_options MOZ_MAKE_FLAGS=\"-j${JOBS}\"" >> "$FIREFOX_SRC/.mozconfig"
 # Writes the effective policies.json to a staging path here; it is installed
 # into the packaged app's distribution/ directory in Step 6 (after the build).
 # NOTE: mach does NOT package browser/app/distribution/, so this file is a
-# runtime artifact like mozilla.cfg — the Step 6 copy is what actually makes the
+# runtime artifact like dev-mode mozilla.cfg — the Step 6 copy is what makes the
 # policy engine read it.
 #
 # Default bookmarks/shortcuts are NOT delivered via the Bookmarks policy: the
@@ -709,11 +733,9 @@ fi
 # reusing stale Makefiles from a different ESR release.
 echo "$ESR_VERSION" > "$OBJ_VERSION_MARKER"
 
-# ── Step 6: Install autoconfig lockdown ──────────────────────────────────────
-# mozilla.cfg and autoconfig.js must live in the built application directory,
-# not the source. They cannot be installed pre-build because they are not part
-# of the Firefox build system — they are runtime files read directly from the
-# installation directory at startup.
+# ── Step 6: Install runtime configuration ────────────────────────────────────
+# Production locks are compiled by patch 017. Only dev builds use AutoConfig;
+# remove stale sidecars from production output after incremental builds.
 #
 # Layout differs by platform:
 #   macOS:         <app>/Contents/Resources/defaults/pref/autoconfig.js
@@ -739,28 +761,28 @@ else
 fi
 
 if [[ -n "$PREF_DIR" ]]; then
-    echo "[build] Installing autoconfig lockdown into $PLATFORM_LABEL..."
-    mkdir -p "$PREF_DIR"
-    cp "$CONFIG_DIR/autoconfig.js" "$PREF_DIR/autoconfig.js"
     if [[ $DEV_MODE -eq 1 ]]; then
+        echo "[build] Installing dev AutoConfig into $PLATFORM_LABEL..."
+        mkdir -p "$PREF_DIR"
+        cp "$CONFIG_DIR/autoconfig.js" "$PREF_DIR/autoconfig.js"
         sed -E '/^\/\/ ── Developer tools/,/^$/d; /lockPref\("devtools\./d' \
             "$CONFIG_DIR/mozilla.cfg" > "$GRE_DIR/mozilla.cfg"
         echo "[build] Installed autoconfig.js and mozilla.cfg (DevTools locks removed)"
     else
-        cp "$CONFIG_DIR/mozilla.cfg" "$GRE_DIR/mozilla.cfg"
-        echo "[build] Installed autoconfig.js and mozilla.cfg"
+        rm -f "$PREF_DIR/autoconfig.js" "$GRE_DIR/mozilla.cfg"
+        echo "[build] Removed stale AutoConfig files from $PLATFORM_LABEL"
     fi
 
     # Enterprise policies: the policy engine reads <app>/distribution/policies.json
     # (relative to the binary on Windows/Linux, or Contents/Resources on macOS).
     # mach does not package browser/app/distribution/, so install the file
     # generated in Step 4 here — without this, NO policy (AIControls, FirefoxHome,
-    # PasswordManagerEnabled, …) takes effect; the lockdown otherwise rides on mozilla.cfg.
+    # PasswordManagerEnabled, …) takes effect; patch 017 protects compiled prefs.
     mkdir -p "$GRE_DIR/distribution"
     cp "$DIST_DIR/policies.json" "$GRE_DIR/distribution/policies.json"
     echo "[build] Installed policies.json into $PLATFORM_LABEL distribution/"
 else
-    echo "[build] WARNING: No build output found at $APP_BUNDLE or $DIST_BIN — skipping autoconfig/policies install"
+    echo "[build] WARNING: No build output found at $APP_BUNDLE or $DIST_BIN — skipping runtime configuration install"
     echo "[build]          Run a full build first, or check MOZ_OBJDIR in mozconfig."
 fi
 

@@ -58,10 +58,10 @@ index 042f795c9cff..fa09f6d6d97e 100644
      let blob = await canvas.convertToBlob();
      let blobURL = URL.createObjectURL(blob);
 diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
-index ebae2a976d01..6484c3c9a42e 100644
+index 02418d5d8c3a..55c5ebc0b0d2 100644
 --- a/widget/cocoa/nsCocoaWindow.mm
 +++ b/widget/cocoa/nsCocoaWindow.mm
-@@ -5162,6 +5162,10 @@ static unsigned int WindowMaskForBorderStyle(BorderStyle aBorderStyle) {
+@@ -5267,6 +5267,10 @@ nsresult nsCocoaWindow::CreateNativeWindow(const NSRect& aRect,
                                             styleMask:features
                                               backing:NSBackingStoreBuffered
                                                 defer:YES];

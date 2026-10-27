@@ -18,11 +18,40 @@ listen = "0.0.0.0:8081"
 # REQUIRED. TLS upstream endpoint to receive verified requests (host:port).
 upstream = "localhost:8443"
 
+# OPTIONAL. PEM CA bundle used to verify the upstream server's certificate.
+# Omit or leave empty to use Pingora/OpenSSL's default system trust store.
+# When set, ONLY this bundle is trusted for upstream connections; include all
+# required CA certificates. The upstream certificate must still match the host
+# in `upstream`. This is separate from the user and machine certificate CAs.
+# Loaded once at startup: restart after changing it. Relative paths resolve
+# against the proxy's working directory. An unreadable, invalid, or empty bundle
+# aborts startup. --insecure-upstream still disables certificate and hostname
+# verification, even when this bundle is configured.
+# upstream_ca = "/run/secrets/upstream_ca.pem"
+
 # REQUIRED. TLS identity presented to the browser. The browser pins the
 # certificate's SPKI, so rotating it requires rebuilding DenBrowser with the
 # new certificate or pin in config/site-config.json.
 tls_cert = "../build/proxy-tls.crt"
 tls_key = "../build/proxy-tls.key"
+
+# OPTIONAL. Passphrase for an encrypted tls_key, in either PEM form OpenSSL
+# writes: PKCS#8 ("BEGIN ENCRYPTED PRIVATE KEY") or the legacy
+# "Proc-Type: 4,ENCRYPTED". Leave both unset for a plaintext key, and set at
+# most one: startup rejects both. A passphrase set for a plaintext key is
+# logged as unused.
+#
+# Prefer the file. It keeps the secret out of this config, which is often
+# committed or widely readable, and suits Docker/Kubernetes secrets and systemd
+# credentials. Only its first line is read, without the line ending, as with
+# OpenSSL's `-passin file:`. Relative paths resolve against the proxy's working
+# directory. To encrypt an existing key with that file:
+#   openssl pkey -in proxy-tls.key -aes256 -passout file:proxy-tls.pass -out proxy-tls.key.enc
+#
+# An encrypted key with neither set aborts startup with an error naming these
+# settings, instead of waiting on OpenSSL's terminal passphrase prompt.
+# tls_key_passphrase_file = "/run/secrets/proxy_tls_key_passphrase"
+# tls_key_passphrase = "..."
 
 # ---------------------------------------------------------------------------
 
@@ -88,9 +117,10 @@ max_requests = 50
 #
 # This is one of four orthogonal layers and replaces none of them: mTLS
 # authenticates the user (client -> proxy), TLS SPKI pinning authenticates
-# the proxy to the browser (proxy -> client), attestation proves the request
-# came from a genuine DenBrowser build and binds it against replay/tampering,
-# and machine identity ([machine_identity] below) names the workstation.
+# the proxy to the browser (proxy -> client), attestation attempts to prove
+# the request came from a genuine DenBrowser build and binds it against
+# replay/tampering, and machine identity ([machine_identity] below) names the
+# workstation.
 #
 # Disabled by default: with enabled = false, no client certificate is requested
 # and the listener behaves exactly as before.
@@ -201,6 +231,10 @@ allowed_subjects = ["health-checker", "ops.internal"]
 # telemetry and diagnostics patched out, so the proxy is the only component that
 # records anything — this output IS the audit trail.
 #
+# Every line is one JSON object: one audit record per request plus system
+# records for everything else.  URL paths are never logged.  The schema and an
+# example of every event are in proxy/audit/.
+#
 # Every setting below is optional and the defaults shown are what applies when
 # the whole section is omitted.
 
@@ -221,7 +255,15 @@ file_prefix = "denbrowser-proxy.log"
 # convenient way to turn up detail for one run without editing this file.
 #
 # `info` records both accepted and rejected requests.  Drop to `warn` to log
-# only rejections and rate limiting.
+# only refusals and failed requests.  Audit records use the target
+# denbrowser_proxy::audit, so "warn,denbrowser_proxy::audit=info" keeps every
+# audit record while quieting everything else.
+#
+# Requests Pingora itself refuses before attestation runs (malformed request
+# line, duplicate or ambiguous Host, bad framing) get a 400 and no audit record;
+# Pingora logs them as a `system` line at `debug` only.  Leave `pingora_proxy`
+# at `info` or above in production: that debug line carries the raw request,
+# attestation token and machine certificate included.
 level = "info"
 
 # How often to start a new file: "minutely", "hourly", "daily", or "never".
@@ -232,6 +274,5 @@ rotation = "daily"
 max_files = 14
 
 # Also mirror everything to stderr.  Keep this on for systemd/journald capture
-# and for local development; the file stays free of terminal colour codes either
-# way.
+# and for local development; both outputs carry the same JSON lines.
 stderr = true

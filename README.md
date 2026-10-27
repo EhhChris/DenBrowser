@@ -7,7 +7,7 @@
 
 A set of patches for building a branded version of Firefox ESR browser that attempts to restrict users from removing data from the browser or otherwise persisting it locally. DenBrowser is **not** a complete solution, and really only makes sense when the deployment and operating environment is largely controlled and the user has no elevated privileges. The intended purpose is to provide a moderate approach to data loss prevention strategies with less intense external infrastructure requirements and less user impact on performance for use in **controlled** environments.
 
-**Currently tracking Firefox ESR 153.x** (most recently built against 153.1.0esr;
+**Currently tracking Firefox ESR 153.x** (most recently built against 153.6.0esr;
 `scripts/fetch-esr.sh` pulls whatever ESR is current at fetch time).
 
 As this project progresses tags will be cut and attempt to follow the latest ESR releases.
@@ -57,8 +57,8 @@ DenBrowser/
 ├── config/
 │   ├── mozconfig               # Firefox build flags + app identity
 │   ├── policies.json           # Enterprise policy enforcement (loaded at startup)
-│   ├── mozilla.cfg             # Hardened lockPref overrides (autoconfig-locked)
-│   ├── autoconfig.js           # Bootstrap that tells Firefox to load mozilla.cfg
+│   ├── mozilla.cfg             # Source for compiled production locks; dev AutoConfig
+│   ├── autoconfig.js           # Dev-only AutoConfig bootstrap
 │   └── site-config.json        # Per-deployment whitelist / blacklist / clipboard sites /
 │                               #   attestation proxies / bookmarks
 ├── patches/
@@ -67,9 +67,12 @@ DenBrowser/
 ├── proxy/
 │   ├── Cargo.toml
 │   ├── proxy.example.toml      # Example operational config (attestation key, rate limiting, …)
+│   ├── audit/                  # JSON log schema (mapping) + an example of every audit event
 │   └── src/
 │       ├── main.rs             # Pingora-based attestation proxy entrypoint
 │       ├── attest.rs           # ECIES verification + replay cache
+│       ├── audit.rs            # Structured JSON audit records, reasons, severities
+│       ├── logging.rs          # Log subscriber setup + JSON line formatter
 │       ├── config.rs           # Operational TOML config loader
 │       ├── ratelimit.rs        # Per-origin-IP request rate limiting
 │       ├── mtls.rs             # Baseline mutual-TLS client authentication
@@ -95,20 +98,19 @@ single bypass still leaves the rest in place:
 1. **Build-time flags** (`config/mozconfig`) — `--disable-crashreporter`,
    `--disable-updater`, `--disable-tests`, `--disable-parental-controls`,
    `--disable-profiling`, `--disable-accessibility`, `--disable-printing`,
+   `--disable-pref-extensions`,
    `--enable-hardening`,
    `--enable-strip` / `--enable-install-strip`.  Code paths and symbols are
    never compiled in.
-2. **Source patches** — applied to the Firefox source tree before build;
-   compiled into the binary and cannot be disabled at runtime by any
-   user-accessible mechanism.
+2. **Source patches** — applied to the Firefox source tree before build and
+   included in the build output.
 3. **Enterprise policies** (`config/policies.json`) — loaded at startup;
    lock UI surfaces and per-URL permissions.  Cannot be overridden by
    profile state.
-4. **Autoconfig prefs** (`config/mozilla.cfg` via `config/autoconfig.js`) —
-   `lockPref` values that override `prefs.js`, `about:config`, and all
-   profile state. Patch 017 additionally compiles the entire `mozilla.cfg`
-   set into `libxul`, so the same locks survive deletion or substitution
-   of the on-disk autoconfig files.
+4. **Compiled preference locks** (patch 017, generated from
+   `config/mozilla.cfg`) — lock values against profile and user preferences.
+   Production excludes AutoConfig and does not install its runtime files;
+   development builds retain AutoConfig because they skip patch 017.
 
 The categories below summarize what is protected and where the enforcement
 lives.
@@ -189,9 +191,9 @@ compile-time switches and the baked-in bookmarks:
 
 A deployment normally fronts several partner applications, each behind its
 **own** attestation proxy with its own attestation keypair and TLS cert — no
-partner should be able to verify (or mint) another partner's tokens.  The
-`proxies` array is the build-time map from *domains* to *the proxy that fronts
-them*, and it drives both compile-time proxy features at once:
+partner should be able to verify another partner's tokens.  The `proxies`
+array is the build-time map from *domains* to *the proxy that fronts them*,
+and it drives both compile-time proxy features at once:
 
 - the attestation public key used to encrypt a request's token (patch 006), and
 - the TLS SPKI pin enforced when connecting to those domains (patch 012).
@@ -278,8 +280,49 @@ tls_key = "/etc/denbrowser/partner-a-tls.key"
 ```
 
 `listen` and `upstream` use `host:port` form. The upstream connection is TLS;
-the certificate and key are PEM files, and the certificate's SPKI must match
-the pin compiled into DenBrowser for this proxy.
+`tls_cert` and `tls_key` are the PEM identity presented to the browser, and that
+certificate's SPKI must match the pin compiled into DenBrowser for this proxy.
+
+Upstream certificate and hostname verification are enabled by default, using
+Pingora/OpenSSL's system CA trust store. To trust a private upstream CA, set
+`upstream_ca` in `[proxy]`:
+
+```toml
+[proxy]
+upstream = "app-backend.partner-a.internal:443"
+upstream_ca = "/run/secrets/partner-a-upstream-ca.pem"
+```
+
+The PEM bundle should include the upstream's root CA and may contain multiple CA
+certificates. It **replaces** system trust for upstream connections, and the
+upstream certificate must still match the hostname in `upstream`.
+Omit `upstream_ca` or set it to `""` to retain the default
+trust store. This setting is independent of `[mtls].client_ca` and
+`[machine_identity].machine_ca`.
+
+The bundle is read once at startup; restart the proxy after changing it. An
+unreadable, invalid, or certificate-free bundle aborts startup. Relative paths
+resolve against the proxy's working directory. In Docker, mount the bundle into
+the proxy container and use its container path. The development-only
+`--insecure-upstream` / `DENBROWSER_INSECURE_UPSTREAM` switch still disables both
+upstream certificate and hostname verification, even with a CA bundle configured.
+
+The key may be passphrase-protected, in either PEM form OpenSSL writes (PKCS#8
+`ENCRYPTED PRIVATE KEY` or the legacy `Proc-Type: 4,ENCRYPTED`). Supply the
+passphrase with **one** of two optional settings: `tls_key_passphrase_file`, a
+file whose first line is the passphrase, or `tls_key_passphrase` inline. Prefer
+the file — it keeps the secret out of the config and fits Docker or Kubernetes
+secrets and systemd credentials:
+
+```toml
+[proxy]
+tls_key = "/etc/denbrowser/partner-a-tls.key"
+tls_key_passphrase_file = "/run/secrets/partner-a-tls-key-passphrase"
+```
+
+Setting both is a startup error, and so is an encrypted key with neither: the
+proxy names the missing setting rather than stopping at OpenSSL's interactive
+passphrase prompt, which would hang a foreground run and abort a service.
 
 **Attestation key** (`[attestation]`) is also required — it names
 this proxy's EC P-256 attestation private key, the private half of the public key
@@ -297,6 +340,47 @@ is no CLI flag and no default path: each partner's proxy process names its own
 key in its own config file, so one partner can never decrypt another's tokens,
 and a deployment that forgets the key fails loudly instead of silently picking
 up whatever happens to sit at a default location.
+
+**Request bodies.**  A request whose token binds a body hash is buffered and
+hashed before the upstream is contacted, so it is capped at Pingora's 64 KiB
+retry buffer: a larger bound body is answered `413`.  The browser sends bigger
+uploads *unbound* (the token carries the `unbound` marker instead of a hash) and
+those stream straight through with no size cap.  The 64 KiB boundary is pinned
+by `test/attestation/test_roundtrip.py`.
+
+**HTTP/2 to the browser.**  The listener offers HTTP/2 with HTTP/1.1 as the
+fallback (ALPN `h2, http/1.1`), the mirror image of the upstream leg, which
+prefers HTTP/2 and falls back to HTTP/1.1.  The two legs negotiate
+independently and Pingora translates between them, so a browser on HTTP/2 is
+fronted for an HTTP/1.1-only backend, and vice versa, with nothing to
+configure.  Attestation is protocol-agnostic: over HTTP/2 the host comes from
+`:authority`, which the browser derives from the same URL it signs.  Two things
+differ from HTTP/1.1: an error response such as `403` resets only that stream
+instead of closing the connection, and Pingora's HTTP/2 server defaults apply,
+100 concurrent streams per connection and a 64 KiB request-header list, which
+the machine certificate header fits comfortably.  The HTTP/2 path is covered
+by `test/attestation/test_roundtrip.py`, which drives it with `curl`.
+
+**Pingora 0.9.0 behaviour.**  The proxy inherits a few defaults from Pingora
+0.9.0 that were reviewed and accepted as-is:
+
+- Hop-by-hop request headers (`Connection`, `TE`, `Keep-Alive`, `Upgrade`,
+  `Proxy-*`) and any header named in `Connection:` are stripped before the
+  upstream sees the request.  The attestation headers are end-to-end and are
+  stripped by the proxy itself, as before.
+- Malformed requests (two `Host` headers, userinfo in `Host`, an absolute-form
+  target whose authority differs from `Host`) are answered `400` *before*
+  attestation or rate limiting run.  A `Connection` header naming a protected
+  header such as `Host`, or ten or more names, is answered `400` *after*
+  attestation passed; that request's nonce is spent, and its audit record is a
+  failed `forward` with reason `request_malformed` (risk `high`) and status
+  `400`.
+- A `POST` that fails on a reused upstream connection is answered `502` rather
+  than retried, so the backend can never receive a side-effecting request
+  twice.  The browser mints a fresh token per request, so retrying is safe.
+- An absolute-form request target (`GET https://host/p?q HTTP/1.1`) is bound
+  as `/p?q`, matching what the browser signs.  Browsers send origin-form to an
+  origin server, so this only matters to hand-written clients.
 
 **Rate limiting** (`[rate_limiting]`) throttles requests per origin IP.  A bad
 config aborts startup rather than starting unprotected, and a request over any
@@ -337,10 +421,10 @@ none of the others:
 - **TLS SPKI pinning** (patch 012) authenticates the *proxy* to the browser
   (proxy → client); the browser pins the proxy's cert, defeating MITM even by a
   validly-CA-issued cert. mTLS is the opposite direction and does not replace it.
-- **Attestation** (ECIES headers) proves the request came from a genuine
-  DenBrowser build and binds it against replay/tampering — properties a client
-  cert doesn't provide. mTLS proves *who* holds a key but not *what software*
-  produced the request, so the two are complementary.
+- **Attestation** (ECIES headers) attempts to prove the request came from a
+  genuine DenBrowser build and binds it against replay/tampering — properties
+  a client cert doesn't provide. mTLS proves *who* holds a key but not *what
+  software* produced the request, so the two are complementary.
 - **Machine identity** (`[machine_identity]`, below) names the *workstation* the
   request came from — which none of the other three establish.
 
@@ -353,15 +437,28 @@ none of the others:
 
   The listener also advertises `client_ca` in the TLS `CertificateRequest`, so a
   browser holding more than one client certificate can filter its store to the
-  one identity this proxy accepts, rather than prompting with a picker or
-  offering the wrong certificate (which would then fail the handshake with
-  nothing to diagnose it by).
+  identity this proxy accepts. DenBrowser locks
+  `security.default_personal_cert` to `Select Automatically`. Provision only
+  one eligible certificate for each proxy: a CA list cannot distinguish two
+  certificates issued by the same CA, and Firefox may choose either one.
+  This preference applies to all allowed HTTPS sites, so any such site that
+  requests client authentication may receive an eligible certificate without
+  a picker.
 
   ```toml
   [mtls]
   enabled = true
   client_ca = "/etc/denbrowser/user-ca.pem"
   ```
+
+  TLS sessions are resumable.  The listener sets a session-ID context, which
+  OpenSSL requires before it will resume a client-authenticated session; without
+  one, every resumption attempt by a browser that cached a session failed its
+  handshake and cost a second, full handshake.  A resumed handshake does not
+  re-verify the client certificate: the identity recorded for the connection is
+  the one verified at the full handshake that created the session, and sessions
+  live for OpenSSL's default of two hours.  No 0-RTT data is accepted, and a
+  proxy restart invalidates every session.
 
 **Machine identity** (`[machine_identity]`) records *which workstation* a
 request came from.  The browser sends its machine certificate as base64 DER in
@@ -475,6 +572,17 @@ browser build has telemetry and diagnostics patched out (patch 010), so the prox
 is the only component that records anything and this output is the audit trail.
 The whole section is optional; omitting it logs at `info` to stderr only.
 
+Every line, in the file and on stderr, is one JSON object.  Each HTTP request
+produces exactly one **audit** record when it finishes, carrying the proxy and
+client IPs, the user and machine certificate DNs, the attestation nonce, an
+ISO 8601 UTC timestamp, the request and response body bytes, and, for a refusal,
+the pipeline stage it failed at, a reason code, and a risk level (`low` for a
+browser that sent no DenBrowser headers at all, up to `critical` for a token
+bound to a different request or body).  URL paths and query strings are never
+recorded.  Everything else (startup, pingora diagnostics) is a **system** record
+with the same envelope.  The schema, an example of every event type, the
+risk table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
+
 - `dir` — directory for rotating log files.  **Empty (the default) means stderr
   only.**  Created at startup if absent; if it is set but cannot be created or
   written the proxy **exits** rather than run with no audit trail.  Relative
@@ -484,12 +592,14 @@ The whole section is optional; omitting it logs at `info` to stderr only.
 - `level` — `RUST_LOG` syntax: a bare level (`trace`/`debug`/`info`/`warn`/
   `error`/`off`) or directives such as `"info,denbrowser_proxy=debug"`.  Default
   `info`, which records accepted *and* rejected requests; `warn` records only
-  rejections and rate limiting.
+  refusals and failed requests.  Audit records use the target
+  `denbrowser_proxy::audit`, so `"warn,denbrowser_proxy::audit=info"` keeps every
+  audit record while quieting everything else.
 - `rotation` — `"minutely"`, `"hourly"`, `"daily"` (default), or `"never"`.
 - `max_files` — rotated files to keep, oldest deleted first.  Default 14.  `0`
   keeps everything, leaving disk growth unbounded.
 - `stderr` — mirror to stderr as well (default `true`), for journald capture and
-  local development.  The file itself never contains terminal colour codes.
+  local development.  Both outputs carry the same JSON lines.
 
   ```toml
   [logging]
@@ -509,11 +619,23 @@ The whole section is optional; omitting it logs at `info` to stderr only.
   Because the proxy logs through `tracing` and bridges the `log` facade into it,
   raising the level also surfaces Pingora's own internals in the same file.
 
+  Requests that Pingora refuses before attestation runs (malformed request line,
+  duplicate or ambiguous `Host`, bad framing) are answered `400` with no audit
+  record and, since Pingora 0.9.0, only a `debug` system line, so at `info` they
+  leave no trace.  Do not enable `pingora_proxy=debug` in production to see
+  them: that line carries the raw request, attestation token and machine
+  certificate included.
+
 > **Upgrade note.** Earlier builds initialised `env_logger` with no default
 > filter, so the effective level was `error` and — since the proxy emits nothing
 > at that level — a stock deployment logged *nothing at all*.  Existing config
 > files keep working untouched, but they will start producing `info` output on
 > stderr where they were previously silent.
+
+> **Upgrade note (JSON audit log).** The free-text `accepted — …` / `rejected — …`
+> lines are replaced by JSON records; anything parsing them needs updating.
+> [`proxy/audit/README.md`](proxy/audit/README.md#migrating-from-the-plain-text-log)
+> maps each old line to its new reason code.
 
 ---
 
@@ -542,7 +664,7 @@ for navigation.
 | 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad` for the navigation error page and `nsHttpChannel::AsyncOpen` for all HTTP(S) requests; localize the "blocked page" message. |
 | 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
-| 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it from `Preferences::GetInstanceForService` after pref-config-startup. Locks every pref directly in `libxul`, removing the dependency on the on-disk `mozilla.cfg`/`autoconfig.js` pair for layer-4 enforcement. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
+| 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it before default preference files are loaded. Locks every pref directly in `libxul`; production builds exclude AutoConfig and do not install its runtime files. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
 | 019 | `readonly-bookmarks` | Make the bookmark store read-only: the seven public mutation methods of `Bookmarks.sys.mjs` (insert/insertTree/update/moveToFolder/remove/eraseEverything/reorder) reject before doing any work, so no caller can create, edit, or delete bookmarks. |
 | 020 | `about-dialog` | Updates the about or help dialog to reflect DenBrowser instead of Firefox. Also stamps the build id next to the version — `153.0esr (64-bit) (build a1b2c3d)` — from the DenBrowser repo commit, injected into `aboutDialog.js` by `build.sh` Step 2.8 (`-dirty` suffix when the tree had uncommitted changes; hidden entirely when the build came from a non-git source tree). |
