@@ -37,10 +37,10 @@ index 5936f8a8d9bd..53728f2a32ee 100644
  ; Remote Settings JSON dumps
  @RESPATH@/browser/defaults/settings
 diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
-index b6200c23171f..b1d4077e9b6c 100644
+index b6200c23171f..924f995a7405 100644
 --- a/modules/libpref/Preferences.cpp
 +++ b/modules/libpref/Preferences.cpp
-@@ -3924,6 +3924,542 @@ void Preferences::SetupTelemetryPref() {
+@@ -3924,6 +3924,551 @@ void Preferences::SetupTelemetryPref() {
  
  #endif  // MOZ_WIDGET_ANDROID
  
@@ -50,7 +50,7 @@ index b6200c23171f..b1d4077e9b6c 100644
 +// Runs before default preference files are read, so their values cannot
 +// replace these locked defaults. Production builds exclude AutoConfig.
 +//
-+// 175 prefs locked.
++// 178 prefs locked.
 +static void SetupDenBrowserLockdown() {
 +  MOZ_ASSERT(XRE_IsParentProcess());
 +  Preferences::SetBool("browser.cache.disk.enable", false,
@@ -98,6 +98,15 @@ index b6200c23171f..b1d4077e9b6c 100644
 +  Preferences::SetInt("browser.sessionstore.interval", 2147483647,
 +                      PrefValueKind::Default);
 +  Preferences::Lock("browser.sessionstore.interval");
++  Preferences::SetInt("toolkit.startup.max_resumed_crashes", -1,
++                      PrefValueKind::Default);
++  Preferences::Lock("toolkit.startup.max_resumed_crashes");
++  Preferences::SetBool("toolkit.startup.always_use_safe_mode", false,
++                       PrefValueKind::Default);
++  Preferences::Lock("toolkit.startup.always_use_safe_mode");
++  Preferences::SetBool("toolkit.winRegisterApplicationRestart", false,
++                       PrefValueKind::Default);
++  Preferences::Lock("toolkit.winRegisterApplicationRestart");
 +  Preferences::SetBool("browser.download.useDownloadDir", false,
 +                       PrefValueKind::Default);
 +  Preferences::Lock("browser.download.useDownloadDir");
@@ -583,7 +592,7 @@ index b6200c23171f..b1d4077e9b6c 100644
  /* static */
  already_AddRefed<Preferences> Preferences::GetInstanceForService() {
    if (sPreferences) {
-@@ -5184,6 +5720,9 @@ nsresult Preferences::InitInitialObjects(bool aIsStartup) {
+@@ -5184,6 +5729,9 @@ nsresult Preferences::InitInitialObjects(bool aIsStartup) {
    // will override the former.
    StaticPrefs::InitAll();
  

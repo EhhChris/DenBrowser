@@ -15,8 +15,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 # PUBLIC GRAMMAR:
 #   denbrowser.exe
 #   denbrowser.exe -osint -url http(s)://...
-#   The exact advisory -os-restarted prefix is also accepted for Windows
-#   Restart Manager, but never widens the grammar or environment contract.
+#   A registered den: link (den:http(s)://... or den://http(s)://...) in the
+#   -url position is unwrapped once to the URL it carries, which must then
+#   satisfy the same grammar; the browser never receives the den: form.
+#   Nothing else is accepted, including Windows Restart Manager's
+#   -os-restarted tag (patch 017 locks toolkit.winRegisterApplicationRestart
+#   off, so DenBrowser never registers a relaunch).
 #
 # SECURITY PROPERTIES:
 #   - Unknown, duplicated, reordered, inline, and alternate-spelling arguments
@@ -41,10 +45,10 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 diff --git a/browser/app/winlauncher/DenBrowserLaunchPolicy.h b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
 new file mode 100644
-index 000000000000..a2d56860dd69
+index 000000000000..d4161b6ce1eb
 --- /dev/null
 +++ b/browser/app/winlauncher/DenBrowserLaunchPolicy.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,165 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -114,30 +118,55 @@ index 000000000000..a2d56860dd69
 +  return true;
 +}
 +
++// A den: link wraps one URL as den:<url> or den://<url>. Returns the wrapped
++// URL without validating it, or nullptr when aValue is not a den: link.
++inline wchar_t* UnwrapDenLinkUrl(wchar_t* aValue) {
++  if (!aValue || _wcsnicmp(aValue, L"den:", 4)) {
++    return nullptr;
++  }
++
++  wchar_t* inner = aValue + 4;
++  if (inner[0] == L'/' && inner[1] == L'/') {
++    inner += 2;
++  }
++  return inner;
++}
++
++// Replaces a den: link in the trailing "-osint -url <url>" position with the
++// URL it wraps. IsAllowedBrowserCommandLine still decides afterwards.
++inline void UnwrapDenLinkArgument(int aArgc, wchar_t* aArgv[]) {
++  if (aArgc < 4 || !aArgv || !aArgv[aArgc - 3] || !aArgv[aArgc - 2] ||
++      wcscmp(aArgv[aArgc - 3], L"-osint") ||
++      wcscmp(aArgv[aArgc - 2], L"-url")) {
++    return;
++  }
++
++  if (wchar_t* inner = UnwrapDenLinkUrl(aArgv[aArgc - 1])) {
++    aArgv[aArgc - 1] = inner;
++  }
++}
++
 +// The public Windows launch language is intentionally tiny:
 +//   denbrowser.exe
 +//   denbrowser.exe -osint -url http(s)://...
-+// Windows Restart Manager may prepend one exact, advisory -os-restarted tag.
-+// That tag never grants access to any additional argument or environment state.
-+inline bool IsAllowedBrowserCommandLine(int aArgc, wchar_t* const aArgv[]) {
++// A registered den: link arrives as -osint -url den:http(s)://... and is
++// reduced to the second form by UnwrapDenLinkArgument before this check.
++// Nothing else is accepted, including the -os-restarted tag of Windows Restart
++// Manager relaunches: DenBrowser locks toolkit.winRegisterApplicationRestart
++// off, so it never registers one. The binary path in argv[0] is not inspected.
++inline bool IsAllowedBrowserCommandLine(int aArgc,
++                                        const wchar_t* const aArgv[]) {
 +  if (aArgc < 1 || !aArgv || !aArgv[0]) {
 +    return false;
 +  }
 +
-+  int index = 1;
-+  if (index < aArgc && aArgv[index] &&
-+      !wcscmp(aArgv[index], L"-os-restarted")) {
-+    ++index;
-+  }
-+
-+  if (index == aArgc) {
++  if (aArgc == 1) {
 +    return true;
 +  }
 +
-+  return aArgc - index == 3 && aArgv[index] && aArgv[index + 1] &&
-+         aArgv[index + 2] && !wcscmp(aArgv[index], L"-osint") &&
-+         !wcscmp(aArgv[index + 1], L"-url") &&
-+         IsAllowedWebUrl(aArgv[index + 2]);
++  return aArgc == 4 && aArgv[1] && aArgv[2] && aArgv[3] &&
++         !wcscmp(aArgv[1], L"-osint") && !wcscmp(aArgv[2], L"-url") &&
++         IsAllowedWebUrl(aArgv[3]);
 +}
 +
 +inline bool IsContentProcessFlag(const wchar_t* aArg) {
@@ -186,7 +215,7 @@ index 000000000000..a2d56860dd69
 +
 +#endif  // mozilla_DenBrowserLaunchPolicy_h
 diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
-index 8337336dc894..64ab5f306a62 100644
+index 8337336dc894..2dd0b650e880 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.cpp
 +++ b/browser/app/winlauncher/LauncherProcessWin.cpp
 @@ -3,6 +3,7 @@
@@ -504,7 +533,7 @@ index 8337336dc894..64ab5f306a62 100644
  
    mozilla::LauncherRegistryInfo::ProcessType desiredType =
        runAsLauncher ? mozilla::LauncherRegistryInfo::ProcessType::Launcher
-@@ -356,20 +559,74 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
+@@ -356,20 +559,75 @@ static mozilla::Maybe<bool> RunAsLauncherProcess(int& argc, wchar_t** argv) {
  namespace mozilla {
  
  Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
@@ -539,6 +568,7 @@ index 8337336dc894..64ab5f306a62 100644
 +    return Nothing();
 +  }
 +
++  denbrowser::UnwrapDenLinkArgument(argc, argv);
 +  if (!denbrowser::IsAllowedBrowserCommandLine(argc, argv)) {
 +    return Some(127);
 +  }
@@ -586,7 +616,7 @@ index 8337336dc894..64ab5f306a62 100644
  #if defined(MOZ_LAUNCHER_PROCESS)
    LauncherRegistryInfo regInfo;
    Maybe<bool> runAsLauncher = RunAsLauncherProcess(regInfo, argc, argv);
-@@ -383,14 +640,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -383,14 +641,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    Maybe<std::wstring> blocklistFileName = Nothing();
  #endif  // defined(MOZ_LAUNCHER_PROCESS)
    if (!runAsLauncher || !runAsLauncher.value()) {
@@ -602,7 +632,7 @@ index 8337336dc894..64ab5f306a62 100644
    }
  
  #if defined(MOZ_SANDBOX)
-@@ -400,11 +650,6 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -400,11 +651,6 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
  
    mozilla::UseParentConsole();
  
@@ -614,7 +644,7 @@ index 8337336dc894..64ab5f306a62 100644
    LauncherFlags flags = ProcessCmdLine(argc, argv);
  
    nsAutoHandle mediumIlToken;
-@@ -412,53 +657,20 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -412,53 +658,20 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
        GetElevationState(argv[0], flags, mediumIlToken);
    if (elevationState.isErr()) {
      HandleLauncherError(elevationState);
@@ -675,7 +705,7 @@ index 8337336dc894..64ab5f306a62 100644
    }
  
  #if defined(MOZ_LAUNCHER_PROCESS)
-@@ -466,7 +678,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -466,7 +679,7 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    LauncherVoidResult commitResult = regInfo.Commit();
    if (commitResult.isErr()) {
      mozilla::HandleLauncherError(commitResult);
@@ -684,7 +714,7 @@ index 8337336dc894..64ab5f306a62 100644
    }
  #endif  // defined(MOZ_LAUNCHER_PROCESS)
  
-@@ -474,49 +686,30 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -474,49 +687,30 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    UniquePtr<wchar_t[]> cmdLine(MakeCommandLine(argc, argv));
    if (!cmdLine) {
      HandleLauncherError(LAUNCHER_ERROR_GENERIC());
@@ -737,7 +767,7 @@ index 8337336dc894..64ab5f306a62 100644
    }
  
    // Pass on the path of the shortcut used to launch this process, if any.
-@@ -531,20 +724,32 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -531,20 +725,32 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    PROCESS_INFORMATION pi = {};
    BOOL createOk;
  
@@ -778,7 +808,7 @@ index 8337336dc894..64ab5f306a62 100644
    }
  
    nsAutoHandle process(pi.hProcess);
-@@ -566,13 +771,13 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -566,13 +772,13 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
    if (setupResult.isErr()) {
      HandleLauncherError(setupResult);
      ::TerminateProcess(process.get(), 1);
@@ -834,16 +864,17 @@ index c70aa3715c38..86e72800b1b8 100644
  #endif  // mozilla_LauncherProcessWin_h
 diff --git a/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
 new file mode 100644
-index 000000000000..ef96a27e6422
+index 000000000000..53946ce54a4d
 --- /dev/null
 +++ b/browser/app/winlauncher/test/TestDenBrowserLaunchPolicy.cpp
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,237 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 +
 +#include <initializer_list>
 +#include <stdio.h>
++#include <string>
 +#include <vector>
 +
 +#include "DenBrowserLaunchPolicy.h"
@@ -863,6 +894,28 @@ index 000000000000..ef96a27e6422
 +    return false;
 +  }
 +  return true;
++}
++
++// aExpectedUrl is the URL the browser must receive, or nullptr when the
++// launch must be rejected.
++static bool CheckDenLink(std::initializer_list<const wchar_t*> aArguments,
++                         const wchar_t* aExpectedUrl,
++                         const char* aDescription) {
++  std::vector<wchar_t*> argv;
++  for (const wchar_t* argument : aArguments) {
++    argv.push_back(const_cast<wchar_t*>(argument));
++  }
++
++  int argc = static_cast<int>(argv.size());
++  mozilla::denbrowser::UnwrapDenLinkArgument(argc, argv.data());
++  bool allowed =
++      mozilla::denbrowser::IsAllowedBrowserCommandLine(argc, argv.data());
++  bool ok = aExpectedUrl ? allowed && !wcscmp(argv.back(), aExpectedUrl)
++                         : !allowed;
++  if (!ok) {
++    printf("TEST-FAILED | DenBrowserLaunchPolicy | %s\n", aDescription);
++  }
++  return ok;
 +}
 +
 +static bool CheckContentCommandLine(
@@ -893,13 +946,39 @@ index 000000000000..ef96a27e6422
 +  ok &= CheckBrowserCommandLine(
 +      true, {L"denbrowser.exe", L"-osint", L"-url", L"http://example.test/"},
 +      "canonical HTTP OS launch must be accepted");
-+  ok &= CheckBrowserCommandLine(true, {L"denbrowser.exe", L"-os-restarted"},
-+                                "Windows restart tag must be accepted");
 +  ok &= CheckBrowserCommandLine(
-+      true,
++      true, {L""}, "binary path in argv[0] is not inspected");
++
++  ok &= CheckBrowserCommandLine(false, {}, "empty argument list must be rejected");
++  ok &= CheckBrowserCommandLine(false, {nullptr},
++                                "null argv[0] must be rejected");
++  ok &= CheckBrowserCommandLine(false, {L"denbrowser.exe", L"-os-restarted"},
++                                "Windows restart tag must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false,
 +      {L"denbrowser.exe", L"-os-restarted", L"-osint", L"-url",
 +       L"https://example.test/"},
-+      "tagged canonical Windows restart must be accepted");
++      "tagged Windows restart must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false,
++      {L"denbrowser.exe", L"-private-window", L"-url", L"https://example.test/"},
++      "flag in place of -osint must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false,
++      {L"denbrowser.exe", L"-osint", L"-new-window", L"https://example.test/"},
++      "flag in place of -url must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false, {L"denbrowser.exe", L"-url", L"https://example.test/"},
++      "-url without -osint must be rejected");
++  ok &= CheckBrowserCommandLine(false, {L"denbrowser.exe", L"-osint", L"-url"},
++                                "-url without a value must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false, {L"denbrowser.exe", L"-osint", L"-url", nullptr},
++      "null URL must be rejected");
++  ok &= CheckBrowserCommandLine(
++      false,
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:https://example.test/"},
++      "den: link that was not unwrapped must be rejected");
 +
 +  ok &= CheckBrowserCommandLine(false,
 +                                {L"denbrowser.exe", L"https://example.test/"},
@@ -924,6 +1003,91 @@ index 000000000000..ef96a27e6422
 +  ok &= CheckBrowserCommandLine(
 +      false, {L"denbrowser.exe", L"-os-restarted", L"-os-restarted"},
 +      "duplicate restart tags must be rejected");
++
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:https://example.test/a"},
++      L"https://example.test/a", "den: link must unwrap to its HTTPS URL");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den://https://example.test/a"},
++      L"https://example.test/a", "den:// link must unwrap to its HTTPS URL");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:http://example.test/"},
++      L"http://example.test/", "den: link must unwrap to its HTTP URL");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"DEN:https://example.test/"},
++      L"https://example.test/", "den: scheme must match case-insensitively");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-os-restarted", L"-osint", L"-url",
++                      L"den:https://example.test/"},
++                     nullptr, "tagged restart den: link must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"https://example.test/"},
++      L"https://example.test/", "plain URL must pass through unchanged");
++
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:file:///C:/secret.txt"},
++      nullptr, "den: link to a file URL must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den://javascript:alert(1)"},
++      nullptr, "den: link to a javascript URL must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:about:config"}, nullptr,
++      "den: link to an about URL must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:den:https://example.test/"},
++      nullptr, "nested den: link must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url",
++                      L"den://den://https://example.test/"},
++                     nullptr, "nested den:// link must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url",
++                      L"den:///https://example.test/"},
++                     nullptr, "den:/// link must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:https%3A%2F%2Fexample.test"},
++      nullptr, "percent-encoded den: link must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:https://user@example.test/"},
++      nullptr, "den: link with URL userinfo must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url", L"den:"}, nullptr,
++                     "empty den: link must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url", L"den://"},
++                     nullptr, "empty den:// link must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url", L"den:https://"},
++                     nullptr, "den: link without a host must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"den:https://example.test/"}, nullptr,
++                     "bare den: link must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-osint", L"-url",
++                      L"den:https://example.test/", L"--headless"},
++                     nullptr, "den: link with an extra argument must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"--headless", L"-osint", L"-url",
++                      L"den:https://example.test/"},
++                     nullptr, "den: link after an extra argument must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"den:https://example.test/",
++                      L"-osint", L"-url", L"https://example.test/"},
++                     nullptr, "den: link before the -osint pair must be rejected");
++  ok &= CheckDenLink({L"denbrowser.exe", L"-os-restarted",
++                      L"den:https://example.test/"},
++                     nullptr, "den: link after a bare restart tag must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"--osint", L"--url", L"den:https://example.test/"},
++      nullptr, "den: link with double-dash flags must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"/osint", L"/url", L"den:https://example.test/"},
++      nullptr, "den: link with slash flags must be rejected");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", L"den:\thttps://example.test/"},
++      nullptr, "den: link with a tab after the prefix must be rejected");
++
++  const std::wstring longestUrl =
++      L"https://example.test/" +
++      std::wstring(mozilla::denbrowser::kMaximumLaunchUrlLength - 21, L'a');
++  const std::wstring longestLink = L"den://" + longestUrl;
++  const std::wstring tooLongLink = longestLink + L"a";
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", longestLink.c_str()},
++      longestUrl.c_str(), "den:// link to a maximum-length URL must unwrap");
++  ok &= CheckDenLink(
++      {L"denbrowser.exe", L"-osint", L"-url", tooLongLink.c_str()}, nullptr,
++      "den:// link to an over-length URL must be rejected");
 +
 +  ok &= CheckContentCommandLine(
 +      true, {L"denbrowser.exe", L"-contentproc", L"1", L"tab"},

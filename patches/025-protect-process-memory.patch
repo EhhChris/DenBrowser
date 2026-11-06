@@ -30,7 +30,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/browser/app/winlauncher/LauncherProcessWin.cpp b/browser/app/winlauncher/LauncherProcessWin.cpp
-index 64ab5f306a62..4fd44878c192 100644
+index 2dd0b650e880..d3585176c355 100644
 --- a/browser/app/winlauncher/LauncherProcessWin.cpp
 +++ b/browser/app/winlauncher/LauncherProcessWin.cpp
 @@ -7,6 +7,7 @@
@@ -41,7 +41,7 @@ index 64ab5f306a62..4fd44878c192 100644
  #include "mozilla/glue/Debug.h"
  #include "mozilla/GeckoArgs.h"
  #include "mozilla/Maybe.h"
-@@ -735,15 +736,21 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
+@@ -736,15 +737,21 @@ Maybe<int> LauncherMain(int& argc, wchar_t* argv[]) {
      return Some(127);
    }
  

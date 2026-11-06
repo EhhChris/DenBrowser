@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
             echo "                    Repeatable: --skip-patch 6 --skip-patch 8"
             echo "                    Production requires patch 17; use --dev to skip it."
             echo "  --dev             Enable DevTools + testing features and use DEMO branding:"
-            echo "                    skips patches 8, 15, 17, strips devtools locks from policies.json and"
+            echo "                    skips patches 8, 15, 17, 25, 26, strips devtools locks from policies.json and"
             echo "                    mozilla.cfg, and adjusts mozconfig to enable marionette,"
             echo "                    crashreporter, profiling, and AutoConfig while preserving debug symbols."
             echo "  --ffversion X.Y.Z Pin the Firefox ESR version (e.g. 140.11.0) instead of"
@@ -63,6 +63,9 @@ if [[ $DEV_MODE -eq 1 ]]; then
     # Patch 015 blocks starting the browser with things like marionette for
     # testing automations. Disable in dev mode.
     SKIP_PATCH_ARGS+=(--skip-patch 15)
+    # Patches 025 and 026 build on files and code that 015 adds, so they cannot
+    # apply without it.
+    SKIP_PATCH_ARGS+=(--skip-patch 25 --skip-patch 26)
     # Patch 017 compiles every mozilla.cfg lockPref into libxul, including the
     # devtools.* locks. Skipping it in dev mode lets the sed-stripped on-disk
     # mozilla.cfg govern devtools state and keeps the compiled binary clean of

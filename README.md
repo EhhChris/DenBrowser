@@ -85,6 +85,7 @@ DenBrowser/
     ├── gen-proxy-tls.sh        # Generate a proxy's TLS cert + report its SPKI pin
     ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     ├── gen-machine-cert.sh     # Generate machine (workstation) cert + CA
+    ├── register-den-protocol.ps1 # Register the den: link scheme on Windows
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
@@ -133,6 +134,8 @@ lives.
 | Sync / Firefox Accounts | 013 | `DisableFirefoxAccounts` | `identity.fxaccounts.enabled` (covered by policy) |
 | Site whitelist / blacklist | 014 | — | — |
 | Argv + env-var stripping | 015 | — | — |
+| Command lines forwarded to a running browser | 026 | — | — |
+| Automatic restarts (crash safe mode, Windows Restart Manager) | — | — | `toolkit.startup.max_resumed_crashes`, `toolkit.startup.always_use_safe_mode`, `toolkit.winRegisterApplicationRestart` |
 | Window-title leak | 016 | — | — |
 | Camera / Microphone / Location / Notifications / VR | — | `Permissions: Camera/Microphone/Location/Notifications/VirtualReality {BlockNewRequests: true, Locked: true}`, `Autoplay: block-audio-video` | `geo.enabled`, `media.peerconnection.enabled`, `media.navigator.enabled` |
 | Cookies — in-memory, no third-party | — | `Cookies: reject-foreign + Locked`, `SanitizeOnShutdown.Cookies` | (via policy) |
@@ -639,6 +642,103 @@ risk table, and `jq` recipes are in [`proxy/audit/`](proxy/audit/README.md).
 
 ---
 
+## Opening links from other applications (`den:` links)
+
+On Windows, other applications can open a page in DenBrowser with a `den:` link
+that wraps an ordinary web URL:
+
+```
+den:https://intranet.example.com/reports
+den://https://intranet.example.com/reports
+```
+
+Prefer the first form. A standard (WHATWG) URL parser reads `https` as the
+host of `den://https://…` and rewrites the link to `den://https//…`, which
+DenBrowser rejects. Browsers that follow the URL standard parse links that way,
+so the second form only works from applications that hand the link to Windows
+unparsed.
+
+**How it is handled.** Windows starts `denbrowser.exe -osint -url "<link>"`.
+The patch 015 launcher strips the `den:` or `den://` prefix once, then applies
+the same check as any other OS launch: the result must be an `http://` or
+`https://` URL with a host, no userinfo, at most 8192 characters, and none of
+ASCII space or control characters, `"`, `<`, `>` or `\`. Other characters,
+including non-ASCII ones, are left to the browser's URL parser. Anything else
+(`den:file:…`, `den:about:…`, nested `den:den:…`, a wrapped URL that is itself
+percent-encoded such as `den:https%3A%2F%2F…`, extra arguments) exits with
+code 127 and opens nothing. If DenBrowser is already running, the new instance
+hands the checked URL to it, and the running browser accepts that hand-off only
+in the same `-osint -url http(s)://…` shape (patch 026).
+
+Two caller behaviours change the link before the launcher sees it:
+
+- Windows' command-line parsing removes double quotes, so a link such as
+  `den:https://ex"ample.com` from a local application opens
+  `https://example.com`. A quote followed by a space splits the link into extra
+  arguments, which the launcher rejects. The URL opened can therefore differ
+  from the link text another program displayed or filtered on.
+- Some hosts, such as Internet Explorer mode and applications that embed the
+  WebBrowser control, percent-decode the link before handing it to Windows. A
+  `%20` then becomes a space and the launch is rejected.
+
+The browser only ever receives the plain `https://` URL, so the site
+whitelist/blacklist (patch 014) and attestation apply exactly as for a typed
+address. `den:` links inside web pages are not handled: the locked
+`network.protocol-handler.external-default` pref stops DenBrowser handing
+unknown schemes back to Windows.
+
+**Registering the scheme.** Registration is Windows registry state, so it
+belongs in deployment rather than the build. From an elevated shell on each
+workstation, or as an Intune/SCCM script:
+
+```powershell
+.\scripts\register-den-protocol.ps1 -BrowserPath 'C:\Program Files\DenBrowser\denbrowser.exe'
+```
+
+The script uses only registry cmdlets, so it also runs under Constrained
+Language Mode on WDAC-enforced machines. `-Scope User` writes HKCU instead (no
+elevation; for testing, and refused under the SYSTEM account), `-Unregister`
+removes the registration (run it when uninstalling DenBrowser), and `-WhatIf`
+previews either. An existing `den` registration that does not point at a
+`denbrowser.exe` is left alone unless you pass `-Force`. To deploy with Group
+Policy Registry Preferences instead, create these values:
+
+| Key under `HKLM\SOFTWARE\Classes` | Value | Data |
+|---|---|---|
+| `den` | (Default) | `URL:DenBrowser Link` |
+| `den` | `URL Protocol` | *(empty string)* |
+| `den\DefaultIcon` | (Default) | `C:\Program Files\DenBrowser\denbrowser.exe,0` |
+| `den\shell\open\command` | (Default) | `"C:\Program Files\DenBrowser\denbrowser.exe" -osint -url "%1"` |
+
+The command must be exactly `-osint -url "%1"`; the launcher rejects every
+other argument shape. Test a registration from a normal, non-elevated user
+session with `Start-Process 'den:https://example.com'`. From a UAC-elevated
+shell nothing opens, because the launcher will not start the browser with an
+elevated token.
+
+Things to know:
+
+- Windows prefers a per-user (HKCU) `den` registration over the machine-wide
+  one, so a user can point their own `den:` links at another program. That
+  does not change what DenBrowser accepts. The script only warns when the
+  account running it has one, so it cannot see end users' overrides when run
+  by deployment tooling.
+- Any local application, and any web page in another browser, can open
+  DenBrowser at an arbitrary http(s) URL. Browsers ask before opening an
+  external application, but the user can tick "always allow" for a site, and
+  policies such as Chrome and Edge's `AutoLaunchProtocolsFromOrigins` can skip
+  the prompt, after which that site opens `den:` links without asking. With a
+  whitelist configured the URL must still be on it; in blacklist or no-filter
+  mode it can be any site. If DenBrowser is already running and signed in, the
+  link is a top-level GET carrying the user's session, the same exposure as
+  clicking a link in any browser, so internal applications should not change
+  state on GET.
+- Windows only. macOS would need a `CFBundleURLTypes` entry in the app's
+  `Info.plist` plus unwrapping in `BrowserContentHandler.sys.mjs`, because the
+  patch 015 launcher does not run there.
+
+---
+
 ## Patches
 
 Patches apply in lexicographic order via `scripts/apply-patches.sh`.  Each
@@ -662,7 +762,7 @@ for navigation.
 | 012 | `pin-proxy-tls` | Pin each attestation proxy's TLS SPKI (sha256) into the build — the pin column of patch 006's proxy table, so every partner proxy is pinned to its own cert; abort the handshake in `AuthCertificateHook` before any application data flows if the leaf cert doesn't match. |
 | 013 | `disable-sync` | Hardcode `WeaveService.enabled` and `FXA_ENABLED` to `false`; remove the Sync preferences pane and Synced-Tabs sidebar entries from the UI. |
 | 014 | `site-filter` | Compile-time whitelist/blacklist enforcement in `nsDocShell::InternalLoad` for the navigation error page and `nsHttpChannel::AsyncOpen` for all HTTP(S) requests; localize the "blocked page" message. |
-| 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
+| 015 | `strip-blocked-args` | Strip security-sensitive CLI flags (`--profile`, `--marionette`, `--remote-debugging-port`, `--screenshot`, `--headless`, `--safe-mode`, `--jsdebugger`, …) **and** environment variables (`MOZ_LOG`, `SSLKEYLOGFILE`, `MOZ_DISABLE_*_SANDBOX`, `MOZ_PROFILER_STARTUP*`, `MOZ_CRASHREPORTER*`, …) from the process before any Firefox code reads them.  Also unwraps registered `den:` links to the http(s) URL they carry (see [`den:` links](#opening-links-from-other-applications-den-links)).  Regenerate per-ESR via `scripts/gen-015-patch.sh`. |
 | 016 | `fixed-window-title` | Override `nsCocoaWindow::SetTitle` / Windows + GTK `nsWindow::SetTitle` to substitute the constant string `"DenBrowser"` for the page-supplied title — prevents page-title leakage through `CGWindowListCopyWindowInfo`, `EnumWindows`/`GetWindowTextW`, `_NET_WM_NAME`, etc. |
 | 017 | `compile-in-lockprefs` | Generate a C++ function (`SetupDenBrowserLockdown`) from `config/mozilla.cfg` and call it before default preference files are loaded. Locks every pref directly in `libxul`; production builds exclude AutoConfig and do not install its runtime files. Regenerate per-ESR (and on every `mozilla.cfg` edit) via `scripts/gen-017-patch.sh`. Skipped in `--dev` builds. |
 | 018 | `custom-newtab` | Replace the (blank-in-PBM) activity-stream new-tab page with a self-contained shortcuts page. `about:denbrowserhome` is registered as a plain chrome `about:` page via the C++ `AboutRedirector` (like `about:robots`/`about:privatebrowsing`), mapping to `chrome://browser/content/denbrowser-newtab.{html,css}`; it renders as untrusted content in a normal child process, sidestepping the newtab add-on entirely. `AboutNewTab.newTabURL` is pinned to it so every new tab loads it. Tiles are injected from `site-config.json`'s `bookmarks` by `build.sh` Step 2.7. |
@@ -671,6 +771,7 @@ for navigation.
 | 022 | `clear-stale-movingtab` | Re-enable browser chrome synchronously when tab drag/drop terminates, preserve tabstrip-only drop animation, and recover malformed drags that would otherwise leave URL-bar, extension, and menu pointer events disabled. |
 | 023 | `disable-context-search` | Remove the normal and private "Search for..." content context-menu actions for both manually selected text and the visible label of an unselected link, using Firefox's source-level menu relevance logic rather than profile CSS or a runtime preference. |
 | 024 | `windows-machine-certificate-header` | Read the current workstation certificate's public DER from the Windows managed/ordinary Personal stores, require its CN to match the local Windows hostname, and attach it as `X-DenBrowser-Machine-Cert` only on requests claimed by the attestation proxy table. Caller-supplied values are stripped to prevent spoofing and redirect leakage; no private key is opened. |
-| 025 | `protect-process-memory` | Give the main browser and Firefox-owned Windows children a protected creation-time DACL that denies ordinary same-user `PROCESS_VM_READ`, DACL rewrite, and owner rewrite opens while preserving Firefox broker IPC. Blocks Task Manager/ordinary external minidumps; custom handle duplication, creator handles, enabled debug privilege, and kernel access remain out of scope. |
+| 025 | `protect-process-memory` | Give the main browser and Firefox-owned Windows children a protected creation-time DACL that denies ordinary same-user `PROCESS_VM_READ`, DACL rewrite, and owner rewrite opens while preserving Firefox broker IPC. Blocks Task Manager/ordinary external minidumps; custom handle duplication, creator handles, enabled debug privilege, and kernel access remain out of scope. Skipped in `--dev` builds, which skip 015 that it builds on. |
+| 026 | `restrict-remote-commands` | Hold command lines that reach a running browser through its remote window (`WM_COPYDATA`, which any same-user process can send) to the launcher's grammar: the binary alone or `-osint -url http(s)://…`, checked with patch 015's URL rules. Legacy v2 messages and every other flag (`-new-window`, `-chrome`, `-file`, …) are refused, and the sender's working directory is ignored. Synthetic input, UI Automation, and a same-user process impersonating the remote window remain out of scope. Skipped in `--dev` builds, which skip 015 that it builds on. |
 
 ---
