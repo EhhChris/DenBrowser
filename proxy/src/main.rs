@@ -369,7 +369,7 @@ impl ProxyHttp for DenBrowserProxy {
         // no phase 2 to defer it to) and return without draining the body so
         // pingora streams it straight to the upstream.
         if matches!(p1.body_binding, BodyBinding::Unbound) {
-            if let Err(e) = self.verifier.commit_nonce(&p1.nonce) {
+            if let Err(e) = self.verifier.commit_nonce(&p1) {
                 ctx.reject(e.reason(), e.to_string());
                 let _ = session.respond_error(403).await;
                 return Ok(true);

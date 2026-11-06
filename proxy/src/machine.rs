@@ -234,8 +234,11 @@ pub struct MachineIdentity {
     /// the mTLS user CA.
     ca_certs: Vec<X509>,
     /// Hostname → addresses, so the forward check costs one query per
-    /// workstation per TTL rather than one per request.  Same shape as the
-    /// attestation nonce cache: a `Mutex<HashMap<..>>` swept on insert.
+    /// workstation per TTL rather than one per request.  A `Mutex<HashMap<..>>`
+    /// swept on insert, which is affordable here because the map is bounded by
+    /// the live fleet and inserts happen once per workstation per TTL; the
+    /// attestation nonce cache, whose entries scale with the request rate,
+    /// expires through a queue instead (see `attest::NonceCache`).
     dns_cache: Mutex<HashMap<String, CacheEntry>>,
     resolver: Box<dyn Resolver>,
     dns_ttl: Duration,

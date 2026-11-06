@@ -250,7 +250,7 @@
         },
         {
           "const": "timestamp_out_of_window",
-          "description": "The attestation timestamp is more than 30 seconds from the proxy's clock — almost always a workstation (or proxy) clock that has drifted. Compare attestation.client_timestamp with timestamp. HTTP 403.",
+          "description": "The attestation timestamp is outside the accepted window. At phase 1: more than 30 seconds from the proxy's clock, almost always a workstation (or proxy) clock that has drifted. When the nonce is committed: more than 60 seconds beyond that window, meaning the request body or the checks before forwarding took too long. The message says which. Compare attestation.client_timestamp with timestamp. HTTP 403.",
           "x-stage": "attestation_token",
           "x-risk": "medium"
         },

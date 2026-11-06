@@ -123,7 +123,7 @@ attestation failure exactly when its stage starts with `attestation_`.
 | `machine_address_mismatch` | `machine_identity` | high | 403 | Trusted cert from an address its name doesn't resolve to: copied cert, NAT, or DNS lagging DHCP. |
 | `machine_no_client_address` | `machine_identity` | medium | 403 | No peer IP on the connection (should not happen). |
 | `timestamp_invalid` | `attestation_token` | high | 403 | `X-DenBrowser-Ts` not an integer. |
-| `timestamp_out_of_window` | `attestation_token` | medium | 403 | Workstation clock more than 30 s off. |
+| `timestamp_out_of_window` | `attestation_token` | medium | 403 | Workstation clock more than 30 s off; or, when the nonce is committed, the body and the checks before forwarding took more than 60 s beyond that window. The `message` says which; `attestation.body_binding` is set only in the second case. |
 | `nonce_invalid` | `attestation_token` | high | 403 | Nonce not 16 bytes of base64. |
 | `nonce_replay` | `attestation_token` | high | 403 | Nonce reused: a replayed request, or a network-stack resend after a dropped connection. |
 | `token_malformed` | `attestation_token` | high | 403 | Token not base64, too short, or bad EC point. |

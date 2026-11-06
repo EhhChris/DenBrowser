@@ -230,9 +230,14 @@ single instance is overwhelmed" answer.
   inside the timestamp window) so the rejection is genuinely `NonceReplay` and
   not `TimestampDrift`.
 - **Memory is not the constraint for header traffic.** The proxy's footprint is
-  dominated by fixed runtime, not per-request state. The nonce cache holds only
-  a 16-byte key + timestamp per committed request and is swept on a 90s TTL, so
-  even sustained thousands-per-second valid traffic adds single-digit MB.
+  dominated by fixed runtime, not per-request state. The nonce cache costs
+  about 50 bytes per committed request (a 16-byte key in a set plus a
+  (key, timestamp) expiry-queue entry), held for 180s in structures that grow
+  in powers of two and do not shrink, so sustained valid traffic adds a
+  high-water mark of roughly 10 to 20 MB per 1,000 requests/s. Dropping
+  entries once they are 180s old is a bounded amount of work per commit rather
+  than a scan of everything still live, so no per-request cost grows with the
+  rate.
   Request bodies are bounded too: a body whose hash is bound into the token is
   buffered in Pingora's 64 KiB retry buffer and anything larger is answered
   `413`, while an *unbound* upload streams straight through without buffering.
