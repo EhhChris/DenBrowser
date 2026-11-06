@@ -896,6 +896,7 @@ mod tests {
         for e in [
             AttestError::BadTimestamp,
             AttestError::TimestampDrift(95),
+            AttestError::CommitTooLate(95),
             AttestError::InvalidNonce("wrong length"),
             AttestError::NonceReplay,
             AttestError::InvalidToken("token too short"),
