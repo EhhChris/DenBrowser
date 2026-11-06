@@ -1,7 +1,10 @@
 //! Runtime configuration for the DenBrowser proxy.
 //!
 //! The file is required. `--config` selects it, defaulting to `proxy.toml` in
-//! the working directory.
+//! the working directory.  String values may reference environment variables
+//! as `${NAME}`; see [`env`] for the exact rules.
+
+mod env;
 
 use serde::Deserialize;
 
@@ -113,9 +116,16 @@ impl ProxyConfig {
 /// every config struct derives `Debug`, and the log is the audit trail, so a
 /// `{:?}` of the config — in a test failure or a future debug line — must not
 /// be able to leak it.
+///
+/// A new `Secret` setting must also be listed in [`SECRET_SETTINGS`].
 #[derive(Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
+
+/// Every [`Secret`] setting, by the path config errors print.  A `${NAME}`
+/// expansion error in one of these names the setting but not the variable:
+/// there, the text between `${` and `}` may be part of an inline secret.
+const SECRET_SETTINGS: &[&str] = &["[proxy].tls_key_passphrase"];
 
 impl Secret {
     /// True when nothing was configured.
@@ -457,8 +467,18 @@ impl LoggingConfig {
         // token is checked against the real level names here.  Anything with a
         // `,` or `=` is genuine directive syntax and is left to `EnvFilter`.
         let level = self.level.trim();
-        if !level.is_empty()
-            && !level.contains(',')
+
+        // A level with no directive in it ("", " ", ",") builds a filter that
+        // drops every event, audit records included, without an error.  `off`
+        // says that on purpose; an empty value is an accident.
+        if level.split(',').all(|d| d.trim().is_empty()) {
+            anyhow::bail!(
+                "[logging].level is empty, which would turn off every log line, audit \
+                 records included; write \"off\" if that is what you mean"
+            );
+        }
+
+        if !level.contains(',')
             && !level.contains('=')
             && !LOG_LEVELS.contains(&level.to_ascii_lowercase().as_str())
         {
@@ -473,14 +493,41 @@ impl LoggingConfig {
 }
 
 impl Config {
-    /// Read and parse a TOML config file, returning a descriptive error (with
-    /// the file path) on any I/O or parse failure.
+    /// Read and parse a TOML config file, expanding `${NAME}` environment
+    /// variable references in its string values, and return a descriptive
+    /// error (with the file path) on any I/O, parse, or expansion failure.
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("cannot read config {path}: {e}"))?;
-        let config: Config = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("cannot parse config {path}: {e}"))?;
-        Ok(config)
+        Self::parse(&text, &|name| std::env::var(name))
+            .map_err(|e| anyhow::anyhow!("cannot parse config {path}: {e}"))
+    }
+
+    /// Parse config text, resolving `${NAME}` references through `lookup`.
+    fn parse(text: &str, lookup: &env::Lookup<'_>) -> anyhow::Result<Self> {
+        // The typed parse runs first, and is not redundant with the one below:
+        // - It reports a misspelt key or a wrong type with the line and column.
+        //   The expanded tree has no spans, so its errors cannot.
+        // - It is stricter.  Deserializing from a `toml::Value` accepts a
+        //   datetime such as `listen = 1979-05-27` as the string "1979-05-27";
+        //   this parse rejects it.
+        //
+        // It sees the text before expansion, so a check on a string's content
+        // belongs in a `validate` method, not in deserialization: here it would
+        // see the literal `${NAME}` rather than the value, and in the final
+        // deserialization below its error would quote the expanded value.
+        toml::from_str::<Config>(text)?;
+        let mut table: toml::Table = toml::from_str(text)?;
+        env::expand(&mut table, lookup, SECRET_SETTINGS)?;
+        // Expansion only replaces string contents, so this cannot fail where
+        // the typed parse succeeded.  If it ever does, its error would quote
+        // an expanded value, possibly a secret, so it is not passed on.
+        toml::Value::Table(table).try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "the config parsed before environment variables were expanded but \
+                 not after; this is a bug in the proxy"
+            )
+        })
     }
 }
 
@@ -739,10 +786,18 @@ mod tests {
         assert!(!c.machine_identity.partial_chain);
     }
 
+    /// A lookup in which no variable is set, so a test never depends on the
+    /// environment it happens to run in.
+    fn no_env(_: &str) -> Result<String, std::env::VarError> {
+        Err(std::env::VarError::NotPresent)
+    }
+
     #[test]
     fn checked_in_proxy_configs_parse_and_share_machine_defaults() {
-        let operational: Config = toml::from_str(include_str!("../proxy.toml")).unwrap();
-        let example: Config = toml::from_str(include_str!("../proxy.example.toml")).unwrap();
+        // Through `parse`, as `load` does, which also proves neither file
+        // depends on an environment variable to start.
+        let operational = Config::parse(include_str!("../proxy.toml"), &no_env).unwrap();
+        let example = Config::parse(include_str!("../proxy.example.toml"), &no_env).unwrap();
 
         assert_eq!(operational.machine_identity.dns_ttl_secs, 14_400);
         assert_eq!(example.machine_identity.dns_ttl_secs, 14_400);
@@ -973,6 +1028,29 @@ mod tests {
     }
 
     #[test]
+    fn logging_rejects_a_level_with_no_directive() {
+        // Each of these builds a filter that drops every event, audit records
+        // included, so it must stop startup rather than run silent.
+        for level in ["", " ", "\n", " \t\r\n", ",", " , ", ",,"] {
+            let c = LoggingConfig {
+                level: level.to_owned(),
+                ..LoggingConfig::default()
+            };
+            let error = match c.validate() {
+                Err(e) => e.to_string(),
+                Ok(()) => panic!("{level:?} should have been rejected"),
+            };
+            assert!(error.contains("[logging].level is empty"), "got: {error}");
+        }
+        // Turning logging off is still possible, by saying so.
+        let off = LoggingConfig {
+            level: "off".to_owned(),
+            ..LoggingConfig::default()
+        };
+        off.validate().unwrap();
+    }
+
+    #[test]
     fn logging_accepts_valid_levels_and_directives() {
         for level in LOG_LEVELS {
             let c = LoggingConfig {
@@ -991,6 +1069,224 @@ mod tests {
             c.validate()
                 .unwrap_or_else(|e| panic!("{level} should validate: {e}"));
         }
+    }
+
+    #[test]
+    fn parse_expands_environment_references_in_every_section() {
+        let env = |name: &str| match name {
+            "LISTEN" => Ok("0.0.0.0:8081".to_owned()),
+            "CERTS" => Ok("/run/secrets".to_owned()),
+            "PASS" => Ok("correct horse".to_owned()),
+            "WS" => Ok("ws-*.corp.example.com".to_owned()),
+            "APP" => Ok("example.com".to_owned()),
+            "HEALTH" => Ok("health-checker".to_owned()),
+            "LEVEL" => Ok("warn".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        let c = Config::parse(
+            r#"
+            [proxy]
+            listen = "${LISTEN}"
+            upstream = "backend.internal:443"
+            tls_cert = "${CERTS}/proxy.crt"
+            tls_key = "${CERTS}/proxy.key"
+            tls_key_passphrase = "${PASS}"
+
+            [attestation]
+            private_key = "${CERTS}/attest.pem"
+
+            [mtls]
+            client_ca = "${CERTS}/user-ca.pem"
+
+            [proxy_bypass]
+            allowed_subjects = ["${HEALTH}"]
+
+            [machine_identity]
+            machine_ca = "${CERTS}/machine-ca.pem"
+            allowed_hostnames = ["${WS}", "kiosk-1.corp.example.com"]
+
+            [[rate_limiting.rules]]
+            pattern = "${APP}/secrets/*"
+            window_secs = 60
+            max_requests = 5
+
+            [logging]
+            dir = "$${CERTS}"
+            level = "${LEVEL}"
+            "#,
+            &env,
+        )
+        .unwrap();
+        c.proxy.validate().unwrap();
+        c.logging.validate().unwrap();
+        assert_eq!(c.proxy.listen, "0.0.0.0:8081");
+        assert_eq!(c.proxy.tls_cert, "/run/secrets/proxy.crt");
+        assert_eq!(c.proxy.tls_key, "/run/secrets/proxy.key");
+        assert_eq!(c.proxy.tls_key_passphrase.expose(), "correct horse");
+        assert_eq!(c.attestation.private_key, "/run/secrets/attest.pem");
+        assert_eq!(c.mtls.client_ca, "/run/secrets/user-ca.pem");
+        assert_eq!(c.proxy_bypass.allowed_subjects, ["health-checker"]);
+        assert_eq!(c.logging.level, "warn");
+        assert_eq!(c.machine_identity.machine_ca, "/run/secrets/machine-ca.pem");
+        assert_eq!(
+            c.machine_identity.allowed_hostnames,
+            ["ws-*.corp.example.com", "kiosk-1.corp.example.com"]
+        );
+        assert_eq!(c.rate_limiting.rules[0].pattern, "example.com/secrets/*");
+        assert_eq!(c.rate_limiting.rules[0].window_secs, 60);
+        // The escape survives to the parsed value as a literal.
+        assert_eq!(c.logging.dir, "${CERTS}");
+        // A passphrase from the environment is redacted like an inline one.
+        assert!(!format!("{c:?}").contains("correct horse"));
+    }
+
+    #[test]
+    fn parse_keeps_environment_values_out_of_the_toml_syntax() {
+        // A value that would rewrite the file if it were pasted into the text
+        // stays one string here: `[mtls]` keeps its default.
+        let hostile = "x\"\n[mtls]\nenabled = true\nclient_ca = \"y";
+        let env = |_: &str| Ok(hostile.to_owned());
+        let c = Config::parse("[proxy]\ntls_cert = \"${CERT}\"\n", &env).unwrap();
+        assert_eq!(c.proxy.tls_cert, hostile);
+        assert!(!c.mtls.enabled);
+
+        // A Windows path needs no TOML escaping when it comes from a variable.
+        let env = |_: &str| Ok(r"C:\Users\proxy\tls.crt".to_owned());
+        let c = Config::parse("[proxy]\ntls_cert = \"${CERT}\"\n", &env).unwrap();
+        assert_eq!(c.proxy.tls_cert, r"C:\Users\proxy\tls.crt");
+    }
+
+    #[test]
+    fn parse_ignores_references_in_comments() {
+        let c = Config::parse(
+            "# tls_cert = \"${UNSET}\"\n[proxy] # ${UNSET}\nlisten = \"0.0.0.0:8081\"\n",
+            &no_env,
+        )
+        .unwrap();
+        assert_eq!(c.proxy.listen, "0.0.0.0:8081");
+    }
+
+    #[test]
+    fn parse_rejects_an_unset_reference_naming_setting_and_variable() {
+        let error = Config::parse("[mtls]\nclient_ca = \"${USER_CA}\"\n", &no_env)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "[mtls].client_ca: environment variable `USER_CA` is not set"
+        );
+    }
+
+    #[test]
+    fn parse_withholds_variable_names_in_secret_settings() {
+        // `Tr0ub${xY9zQ}or` is a passphrase written inline, not a reference;
+        // the error must not print the part of it between the braces.
+        let error = Config::parse("[proxy]\ntls_key_passphrase = 'Tr0ub${xY9zQ}or'\n", &no_env)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("xY9zQ"), "secret text leaked: {error}");
+        assert!(
+            error.starts_with("[proxy].tls_key_passphrase: "),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn every_secret_field_is_listed_in_secret_settings() {
+        // A `Secret` field missing from SECRET_SETTINGS would have its
+        // variable names printed in expansion errors.  This counts every
+        // field declaration whose type mentions `Secret`, however spelled:
+        // `Secret`, `Option<Secret>`, `crate::config::Secret`, with or without
+        // a trailing comma.  (A secret inside an array of tables could not be
+        // listed by path at all, so secrets belong in plain table fields.)
+        let fields = include_str!("config.rs")
+            .lines()
+            .filter(|line| {
+                line.trim_start()
+                    .strip_prefix("pub")
+                    .and_then(|declaration| declaration.split_once(':'))
+                    .is_some_and(|(_, ty)| ty.contains("Secret"))
+            })
+            .count();
+        assert_eq!(fields, SECRET_SETTINGS.len());
+    }
+
+    #[test]
+    fn every_secret_setting_path_names_a_real_setting() {
+        // The count above cannot catch a listed path that is misspelt.  Here
+        // each path must parse as a real setting, and a reference in it must
+        // fail without the variable's name, which only holds if the path in
+        // the list matches the path expansion builds.
+        for path in SECRET_SETTINGS {
+            let (section, key) = path
+                .strip_prefix('[')
+                .and_then(|p| p.split_once("]."))
+                .unwrap_or_else(|| panic!("{path} is not `[section].key`"));
+            let toml = format!("[{section}]\n{key} = '${{probeXYZ}}'\n");
+            let error = Config::parse(&toml, &no_env).unwrap_err().to_string();
+            assert!(
+                error.starts_with(&format!("{path}: ")),
+                "{path} got: {error}"
+            );
+            assert!(
+                !error.contains("probeXYZ"),
+                "{path} named the variable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_a_datetime_in_a_string_setting() {
+        // Only the typed pass catches this; see `Config::parse`.
+        assert!(Config::parse("[proxy]\nlisten = 1979-05-27\n", &no_env).is_err());
+    }
+
+    #[test]
+    fn load_expands_from_the_process_environment() {
+        // PATH is set almost everywhere tests run, so this needs no `set_var`,
+        // which is unsafe while other tests run on other threads.
+        let Ok(expected) = std::env::var("PATH") else {
+            eprintln!("skipping: PATH is unset or not valid Unicode");
+            return;
+        };
+        if expected.trim().is_empty() || expected.trim() != expected {
+            eprintln!("skipping: PATH is blank or padded, which expansion rejects");
+            return;
+        }
+        let file =
+            std::env::temp_dir().join(format!("denbrowser-config-env-{}.toml", std::process::id()));
+        let mut toml = String::from("[logging]\nfile_prefix = \"${PATH}\"\n");
+        if cfg!(windows) {
+            // Windows matches names without regard to case.
+            toml.push_str("dir = \"${path}\"\n");
+        }
+        std::fs::write(&file, toml).unwrap();
+        let loaded = Config::load(file.to_str().unwrap());
+        let _ = std::fs::remove_file(&file);
+
+        let c = loaded.unwrap();
+        assert_eq!(c.logging.file_prefix, expected);
+        if cfg!(windows) {
+            assert_eq!(c.logging.dir, expected);
+        }
+    }
+
+    #[test]
+    fn parse_keeps_line_numbers_for_structural_errors() {
+        // The typed pass runs before expansion, so a typo is still reported
+        // with its location rather than only by name.
+        let error = Config::parse("[proxy]\nlisten = \"x\"\nlistn = \"${UNSET}\"\n", &no_env)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line 3"), "got: {error}");
+        assert!(error.contains("listn"), "got: {error}");
+
+        // A non-string setting cannot hold a reference; quoting one is a type
+        // error, not an expansion.
+        let error = Config::parse("[rate_limiting]\nmax_requests = \"${MAX}\"\n", &no_env)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("line 2"), "got: {error}");
     }
 
     #[test]

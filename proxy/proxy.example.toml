@@ -10,6 +10,26 @@
 # Windows note: TOML basic (double-quoted) strings treat backslash as an escape,
 # so a path like "C:\Users\..." breaks (\U starts a unicode escape).  Use a
 # single-quoted literal ('C:\Users\...') or forward slashes ("C:/Users/...").
+#
+# Environment variables: any string value may include ${NAME}, which is replaced
+# by that variable's value when the proxy starts, for example
+#   tls_cert = "${DENBROWSER_CERTS}/proxy-tls.crt"
+# Only the braced form is expanded. A bare $NAME, and any other "$", is kept as
+# written; write $${ for a literal ${. A name is ASCII letters, digits and _,
+# not starting with a digit. On Windows, names ignore case. Variables are
+# resolved in every section, including one with enabled = false.
+#
+# Startup stops when a variable is unset, empty, or not valid Unicode, so a
+# setting meant to be empty is written as "" here. It also stops when a value
+# begins or ends with whitespace or an invisible character, such as a trailing
+# newline or byte-order mark from a file, and when a reference is malformed. The
+# error lists every setting that failed, and names the variable unless the
+# reference is malformed or in tls_key_passphrase.
+#
+# A value is otherwise used exactly as set: a Windows path from a variable needs
+# no escaping, and a "${" inside a value is not expanded again. A variable fills
+# one string and cannot supply several list entries. Numbers and booleans cannot
+# use a variable.
 
 [proxy]
 # REQUIRED. Address and port on which the proxy accepts browser TLS connections.
@@ -47,6 +67,13 @@ tls_key = "../build/proxy-tls.key"
 # OpenSSL's `-passin file:`. Relative paths resolve against the proxy's working
 # directory. To encrypt an existing key with that file:
 #   openssl pkey -in proxy-tls.key -aes256 -passout file:proxy-tls.pass -out proxy-tls.key.enc
+#
+# To take the inline passphrase from the environment instead, write
+# tls_key_passphrase = "${PROXY_TLS_KEY_PASSPHRASE}" (see the top of this file).
+# A variable with a trailing newline is rejected, where the file's would be
+# dropped, and a passphrase that begins or ends with a space can only come from
+# the file. The file is still the better choice where you have one: a process's
+# environment is easier to read than a file only it can open.
 #
 # An encrypted key with neither set aborts startup with an error naming these
 # settings, instead of waiting on OpenSSL's terminal passphrase prompt.

@@ -268,6 +268,51 @@ mTLS-disabled) settings. Copy the annotated `proxy/proxy.example.toml` to
 `proxy/proxy.toml` and edit it. This config is separate from
 `config/site-config.json` (which feeds the browser build).
 
+Any string value can take part or all of itself from an environment variable,
+written `${NAME}`, so one file can serve several deployments:
+
+```toml
+[proxy]
+upstream = "${UPSTREAM_HOST}:443"
+tls_cert = "${DENBROWSER_CERTS}/partner-a-tls.crt"
+```
+
+Only the braced form is expanded. A bare `$NAME`, and any other `$`, stays as
+written; `$${` is a literal `${`. So only a value that contains `${` can read
+differently than it did before this feature existed. A name is ASCII letters,
+digits and `_`, not starting with a digit, so a Windows variable such as
+`ProgramFiles(x86)` cannot be referenced. On Windows, names ignore case, as they
+do everywhere on Windows: `${path}` finds `PATH`. References are resolved in
+every section, including one switched off with `enabled = false`, so a disabled
+section still needs its variables set.
+
+**Startup aborts** in any of these cases:
+
+- A variable is unset, empty, or not valid Unicode. An empty `upstream_ca` or a
+  blank `[logging].dir` means "off", so a missing variable must not quietly
+  become one. A setting that is meant to be empty is written as `""` in the
+  file.
+- A value begins or ends with whitespace or an invisible character. This is
+  usually the trailing newline or byte-order mark of a file the value was read
+  from, as with Kubernetes `--from-file` secrets. It is rejected rather than
+  trimmed or kept, because the proxy cannot tell an accident from intent: a
+  padded rate-limit pattern never matches, and a padded entry in a log directive
+  list such as `"${LEVEL},foo=debug"` silences logging. A value that really
+  begins or ends with a space, such as a passphrase, has to be written in the
+  file (or, for the TLS key passphrase, in `tls_key_passphrase_file`).
+- A reference is malformed, such as `${NAME:-default}`.
+
+The error lists every setting that failed, each with the first variable that
+failed in it. Two cases name the setting only: a malformed reference, and a
+reference inside `tls_key_passphrase`, where the text between the braces could
+be part of a passphrase written inline.
+
+Expansion happens after the file is parsed, so a value is never read as TOML.
+Quotes, backslashes and Windows paths in it need no escaping, and a `${` inside
+a value is not expanded again. A variable fills one string, so it cannot supply
+several list entries: write `["${A}", "${B}"]`, not a single variable holding
+`a,b`. Numbers and booleans cannot use a variable.
+
 **Core proxy settings** (`[proxy]`) are required and select where this instance
 listens, where it forwards verified requests, and which TLS identity it presents:
 
