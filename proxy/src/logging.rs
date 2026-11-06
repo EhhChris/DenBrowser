@@ -236,11 +236,16 @@ impl Visit for Fields {
 /// target `inf`" and yields silence rather than an error.
 /// [`LoggingConfig::validate`] screens bare tokens for exactly that reason; what
 /// reaches here is a genuine parse failure, such as a bad level after `=`.
+///
+/// The config level is trimmed, as `validate` trims before its check.
+/// Untrimmed, `" info"` passes that check and then parses as a target named
+/// ` info`, which silences every log line, the audit records included.
+/// `RUST_LOG` has no `validate` step and is passed to `EnvFilter` as given.
 fn build_filter(cfg: &LoggingConfig) -> anyhow::Result<EnvFilter> {
     match std::env::var(ENV_FILTER_VAR) {
         Ok(var) if !var.trim().is_empty() => EnvFilter::try_new(&var)
             .map_err(|e| anyhow::anyhow!("invalid {ENV_FILTER_VAR} {var:?}: {e}")),
-        _ => EnvFilter::try_new(&cfg.level)
+        _ => EnvFilter::try_new(cfg.level.trim())
             .map_err(|e| anyhow::anyhow!("invalid [logging].level {:?}: {e}", cfg.level)),
     }
 }
@@ -401,6 +406,29 @@ mod tests {
             ..LoggingConfig::default()
         };
         assert!(build_filter(&cfg).is_ok());
+    }
+
+    #[test]
+    fn filter_trims_the_config_level_as_validate_does() {
+        if std::env::var("RUST_LOG").is_ok_and(|v| !v.trim().is_empty()) {
+            eprintln!("skipping: RUST_LOG is set and would override the config level");
+            return;
+        }
+        // validate() accepts these as "info"; the filter must mean the same,
+        // not "log only a target named `info\n`", which would log nothing.
+        for level in ["info\n", " info", "info \r\n"] {
+            let cfg = LoggingConfig {
+                level: level.to_owned(),
+                ..LoggingConfig::default()
+            };
+            cfg.validate().unwrap();
+            let filter = build_filter(&cfg).unwrap();
+            assert_eq!(
+                filter.max_level_hint(),
+                Some(tracing_subscriber::filter::LevelFilter::INFO),
+                "{level:?}"
+            );
+        }
     }
 
     #[test]
