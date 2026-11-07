@@ -26,3 +26,5 @@ Makefile     text eol=lf
 *.7z  binary
 *.bin binary
 *.mar binary
+*.bmp binary
+*.icns binary

@@ -161,7 +161,8 @@ echo "[apply-patches] Applied: $APPLIED  Skipped: $SKIPPED  Failed: $FAILED"
 # Each asset is sourced from this repo's branding/denbrowser/ if present (custom
 # DenBrowser art), otherwise from Firefox nightly branding as a placeholder. As
 # more assets are authored in-repo they automatically override the nightly copy;
-# the nightly fallback shrinks toward zero.  See TASKS.md §4a/§4b for the split.
+# the nightly fallback shrinks toward zero. Every listed asset except the three
+# stubinstaller/ files now has a DenBrowser copy in the repo.
 DENBROWSER_BRANDING="$FIREFOX_SRC/browser/branding/denbrowser"
 NIGHTLY_BRANDING="$FIREFOX_SRC/browser/branding/nightly"
 REPO_BRANDING="$ROOT_DIR/branding/denbrowser"
