@@ -86,6 +86,7 @@ DenBrowser/
     ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     ├── gen-machine-cert.sh     # Generate machine (workstation) cert + CA
     ├── register-den-protocol.ps1 # Register the den: link scheme on Windows
+    ├── gen-newtab-shortcuts.py # Generate the new-tab shortcut tiles (build.sh Step 2.7)
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
@@ -185,10 +186,17 @@ compile-time switches and the baked-in bookmarks:
 
   ```json
   "bookmarks": [
-    { "title": "Intranet", "url": "https://intranet.example.com" },
+    { "title": "Intranet", "url": "https://intranet.example.com", "image": "intranet.png" },
     { "title": "Docs", "url": "https://docs.example.com" }
   ]
   ```
+
+  An entry's optional `image` replaces the tile's letter badge; without one,
+  or with a blank value, the badge is kept.  An absolute path is used as is, a
+  value containing a path separator is relative to the repo root, and a bare
+  filename is read from `config/shortcut-images/`.  Supported types are PNG,
+  JPEG, GIF, WebP, ICO and SVG (detected from the file content), up to 256 KiB
+  each; the image is embedded in the page as a `data:` URI.
 
 ### Attestation proxies (`site-config.json`)
 
