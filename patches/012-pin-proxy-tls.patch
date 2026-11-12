@@ -185,7 +185,7 @@ index 3901a65eb6b1..b93111abbab1 100644
 +
  }  // namespace denbrowser
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
-index 4984247dedb5..159c2eb882b6 100644
+index f27f77b7448f..8e4d82302b7c 100644
 --- a/netwerk/base/DenBrowserAttest.h
 +++ b/netwerk/base/DenBrowserAttest.h
 @@ -6,6 +6,8 @@
@@ -197,7 +197,7 @@ index 4984247dedb5..159c2eb882b6 100644
  
  class nsIInputStream;
  class nsIURI;
-@@ -65,6 +67,30 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
+@@ -66,6 +68,30 @@ nsresult AddAttestHeaders(mozilla::net::nsHttpRequestHead& aHead, nsIURI* aURI,
                            nsIInputStream* aUploadStream,
                            uint64_t aUploadLength);
  
