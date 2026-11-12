@@ -58,9 +58,12 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #     2. Point config/site-config.json's "proxies" entries at the new
 #        build/<proxy>-public.der files and rebuild (build.sh regenerates the
 #        table; nothing is hand-edited into the source).
-#     3. Deploy each new private key to its proxy (build/<proxy>-private.pem).
-#     4. Remove the old public key from that proxy's allowlist — that build's
-#        traffic is now rejected even if the binary is still in circulation.
+#     3. Deploy each new private key to its proxy as [attestation] private_key
+#        (build/<proxy>-private.pem), and keep the key it replaces as
+#        previous_private_key so the last build keeps working.
+#     4. Remove previous_private_key once the old build is retired — that
+#        build's traffic is now rejected even if the binary is still in
+#        circulation.
 #
 #   The browser binary contains ONLY public keys, which are not secret.
 #   Forging headers with the public keys is meant to be mitigated by combining
@@ -683,10 +686,10 @@ index 000000000000..3901a65eb6b1
 +}  // namespace denbrowser
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
 new file mode 100644
-index 000000000000..4984247dedb5
+index 000000000000..f27f77b7448f
 --- /dev/null
 +++ b/netwerk/base/DenBrowserAttest.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,71 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
@@ -734,9 +737,10 @@ index 000000000000..4984247dedb5
 + * Key model:
 + *   - Each attestation proxy holds its own EC P-256 private key.
 + *   - The DenBrowser build embeds only the matching SPKI public keys.
-+ *   - A new keypair per browser release lets a proxy invalidate old builds
-+ *     by rotating its private key or removing the old public key from its
-+ *     allowlist.
++ *   - A new keypair per browser release lets a proxy invalidate old builds.
++ *     A proxy accepts the current build's key and, when configured, the
++ *     previous build's, so one build back keeps working until that key is
++ *     removed.
 + *
 + * Behaviour when not configured:
 + *   With an empty proxy table this function is a silent no-op.  No request is

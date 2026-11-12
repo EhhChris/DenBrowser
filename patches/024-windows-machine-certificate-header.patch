@@ -337,7 +337,7 @@ index b93111abbab1..a51dc471c9cf 100644
  }
  
 diff --git a/netwerk/base/DenBrowserAttest.h b/netwerk/base/DenBrowserAttest.h
-index 159c2eb882b6..5f1596f8b628 100644
+index 8e4d82302b7c..d016555e3095 100644
 --- a/netwerk/base/DenBrowserAttest.h
 +++ b/netwerk/base/DenBrowserAttest.h
 @@ -18,9 +18,10 @@ class nsHttpRequestHead;
@@ -354,7 +354,7 @@ index 159c2eb882b6..5f1596f8b628 100644
   *
   * Called from nsHttpChannel::SetupChannelForTransaction().  The token is an
   * ECIES-encrypted payload that decrypts (using the matching private key held
-@@ -53,7 +54,17 @@ namespace denbrowser {
+@@ -54,7 +55,17 @@ namespace denbrowser {
   *
   * Behaviour when not configured:
   *   With an empty proxy table this function is a silent no-op.  No request is

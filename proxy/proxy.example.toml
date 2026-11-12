@@ -100,6 +100,12 @@ tls_key = "../build/proxy-tls.key"
 # able to decrypt another's tokens.
 private_key = "../build/proxy-private.pem"
 
+# Optional.  The previous browser build's attestation private key, accepted
+# alongside private_key so that build keeps working after a key rotation.  Leave
+# unset or blank for a single key; remove it to stop accepting the previous
+# build.
+# previous_private_key = "../build/proxy-private-previous.pem"
+
 # ---------------------------------------------------------------------------
 
 [rate_limiting]

@@ -53,7 +53,7 @@ the field is never omitted.
 | Field | Meaning |
 |---|---|
 | `timestamp` | When the record was written (the end of the exchange): ISO 8601 UTC, millisecond precision, fixed width (`2026-10-14T13:04:05.250Z`). |
-| `schema_version` | Record layout version, currently `1.0`. |
+| `schema_version` | Record layout version, currently `1.1`. |
 | `logger` | Always `denbrowser_proxy::audit` for audit records. |
 | `level` | `INFO` for a request that was forwarded and completed, `WARN` for every refusal and failure. `[logging].level = "warn"` keeps exactly the refusals and failures. |
 | `event.kind` | `audit` (this table) or `system`. |
@@ -76,6 +76,7 @@ the field is never omitted.
 | `attestation.nonce` | `X-DenBrowser-Nonce` as sent: the transaction's unique identifier. Recorded even when invalid (cut to 64 characters). |
 | `attestation.client_timestamp` | `X-DenBrowser-Ts` as ISO 8601: the workstation's clock at attestation. Compare with `timestamp` to spot clock skew. |
 | `attestation.body_binding` | `bound` (body hash verified) or `unbound` (large upload, body not hashed). |
+| `attestation.key` | Which attestation key decrypted the token: `current` (`private_key`) or `previous` (`previous_private_key`, the previous browser build's key). `null` until the token verifies. |
 | `http.request.method` | The request method as sent (case kept, cut to 32 characters). The path is never recorded. |
 | `http.response.status_code` | Status sent to the client. |
 | `transfer.request_body_bytes` | Body bytes read from the client (uploaded). |
@@ -123,7 +124,7 @@ attestation failure exactly when its stage starts with `attestation_`.
 | `machine_address_mismatch` | `machine_identity` | high | 403 | Trusted cert from an address its name doesn't resolve to: copied cert, NAT, or DNS lagging DHCP. |
 | `machine_no_client_address` | `machine_identity` | medium | 403 | No peer IP on the connection (should not happen). |
 | `timestamp_invalid` | `attestation_token` | high | 403 | `X-DenBrowser-Ts` not an integer. |
-| `timestamp_out_of_window` | `attestation_token` | medium | 403 | Workstation clock more than 30 s off; or, when the nonce is committed, the body and the checks before forwarding took more than 60 s beyond that window. The `message` says which; `attestation.body_binding` is set only in the second case. |
+| `timestamp_out_of_window` | `attestation_token` | medium | 403 | Workstation clock more than 30 s off; or, when the nonce is committed, the body and the checks before forwarding took more than 60 s beyond that window. The `message` says which; `attestation.body_binding` and `attestation.key` are set only in the second case. |
 | `nonce_invalid` | `attestation_token` | high | 403 | Nonce not 16 bytes of base64. |
 | `nonce_replay` | `attestation_token` | high | 403 | Nonce reused: a replayed request, or a network-stack resend after a dropped connection. |
 | `token_malformed` | `attestation_token` | high | 403 | Token not base64, too short, or bad EC point. |

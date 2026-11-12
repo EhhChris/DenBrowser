@@ -86,6 +86,7 @@ DenBrowser/
     ├── gen-user-cert.sh        # Generate mTLS user (browser client) cert + CA
     ├── gen-machine-cert.sh     # Generate machine (workstation) cert + CA
     ├── register-den-protocol.ps1 # Register the den: link scheme on Windows
+    ├── gen-newtab-shortcuts.py # Generate the new-tab shortcut tiles (build.sh Step 2.7)
     └── gen-015-patch.sh        # Regenerate patch 015 for the current ESR version
 ```
 
@@ -185,10 +186,17 @@ compile-time switches and the baked-in bookmarks:
 
   ```json
   "bookmarks": [
-    { "title": "Intranet", "url": "https://intranet.example.com" },
+    { "title": "Intranet", "url": "https://intranet.example.com", "image": "intranet.png" },
     { "title": "Docs", "url": "https://docs.example.com" }
   ]
   ```
+
+  An entry's optional `image` replaces the tile's letter badge; without one,
+  or with a blank value, the badge is kept.  An absolute path is used as is, a
+  value containing a path separator is relative to the repo root, and a bare
+  filename is read from `config/shortcut-images/`.  Supported types are PNG,
+  JPEG, GIF, WebP, ICO and SVG (detected from the file content), up to 256 KiB
+  each; the image is embedded in the page as a `data:` URI.
 
 ### Attestation proxies (`site-config.json`)
 
@@ -388,6 +396,28 @@ is no CLI flag and no default path: each partner's proxy process names its own
 key in its own config file, so one partner can never decrypt another's tokens,
 and a deployment that forgets the key fails loudly instead of silently picking
 up whatever happens to sit at a default location.
+
+**Key rotation** (`previous_private_key`) is optional.  A new browser build
+carries a new public key; to keep the build before it working, also name that
+build's private key:
+
+```toml
+[attestation]
+private_key          = "/etc/denbrowser/partner-a-private.pem"
+previous_private_key = "/etc/denbrowser/partner-a-private-previous.pem"
+```
+
+The proxy tries `private_key` first and falls back to `previous_private_key`; a
+client IP whose last accepted token used the previous key has that key tried
+first.  Unset or blank means a single key.  When set, startup aborts if the file
+is unreadable, not a parseable EC key, or the same key as `private_key`.  Each
+audit record's `attestation.key` (`current` or `previous`) says which key the
+token verified under, so the log shows when the previous build is no longer in
+use; remove the setting then to stop accepting it.  Keep a copy of the old
+`<name>-private.pem` before regenerating a key with the same name
+(`gen-attest-key.sh --force` overwrites it).  The previous build also pins the
+proxy's TLS key (patch 012), so it only keeps working while that key is
+unchanged.
 
 **Request bodies.**  A request whose token binds a body hash is buffered and
 hashed before the upstream is contacted, so it is capped at Pingora's 64 KiB

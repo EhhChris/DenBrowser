@@ -34,6 +34,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #   time by build.sh (Step 2.7) from config/site-config.json's "bookmarks".
 #   The page is pure static HTML (no script), so clicking a tile is an ordinary
 #   top-level navigation.
+#
+#   A bookmark's optional "image" is embedded in its tile as a data: URI in
+#   place of the letter badge.  The page's CSP allows data: for images only,
+#   and the page is listed in sImgSrcDataBlobAllowList, which debug builds
+#   require of an about: page that does so.
 
 
 diff --git a/browser/base/content/browser.js b/browser/base/content/browser.js
@@ -51,10 +56,10 @@ index 1df07b24a235..449a94fbddfd 100644
    "about:welcome",
 diff --git a/browser/base/content/denbrowser-newtab.css b/browser/base/content/denbrowser-newtab.css
 new file mode 100644
-index 000000000000..3ddc34fb4511
+index 000000000000..4d8a9ffbace2
 --- /dev/null
 +++ b/browser/base/content/denbrowser-newtab.css
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,115 @@
 +/* This Source Code Form is subject to the terms of the Mozilla Public
 + * License, v. 2.0. If a copy of the MPL was not distributed with this
 + * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -150,6 +155,13 @@ index 000000000000..3ddc34fb4511
 +  text-transform: uppercase;
 +}
 +
++.den-icon {
++  width: 48px;
++  height: 48px;
++  object-fit: contain;
++  border-radius: 10px;
++}
++
 +.den-label {
 +  max-width: 100%;
 +  font-size: 14px;
@@ -165,7 +177,7 @@ index 000000000000..3ddc34fb4511
 +}
 diff --git a/browser/base/content/denbrowser-newtab.html b/browser/base/content/denbrowser-newtab.html
 new file mode 100644
-index 000000000000..9c3b364c8579
+index 000000000000..2bec0b6acdc7
 --- /dev/null
 +++ b/browser/base/content/denbrowser-newtab.html
 @@ -0,0 +1,39 @@
@@ -188,7 +200,7 @@ index 000000000000..9c3b364c8579
 +    <meta charset="utf-8" />
 +    <meta
 +      http-equiv="Content-Security-Policy"
-+      content="default-src chrome:; object-src 'none';"
++      content="default-src chrome:; img-src chrome: data:; object-src 'none';"
 +    />
 +    <meta name="color-scheme" content="light dark" />
 +    <title>New Tab</title>
@@ -282,3 +294,15 @@ index 4d6b04e72b22..c7c90da57a3a 100644
    },
  
    set newTabURL(aNewTabURL) {
+diff --git a/dom/security/nsContentSecurityUtils.cpp b/dom/security/nsContentSecurityUtils.cpp
+index 832d6dba5bb4..82e90d8cdfa3 100644
+--- a/dom/security/nsContentSecurityUtils.cpp
++++ b/dom/security/nsContentSecurityUtils.cpp
+@@ -1340,6 +1340,7 @@ static nsLiteralCString sImgSrcDataBlobAllowList[] = {
+     "about:addons"_ns,
+     "about:debugging"_ns,
+     "about:deleteprofile"_ns,
++    "about:denbrowserhome"_ns,
+     "about:devtools-toolbox"_ns,
+     "about:editprofile"_ns,
+     "about:firefoxview"_ns,

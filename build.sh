@@ -470,53 +470,8 @@ fi
 # URL would otherwise be an injection vector. Empty/absent list → "No shortcuts".
 NEWTAB_PAGE="$FIREFOX_SRC/browser/base/content/denbrowser-newtab.html"
 if [[ -f "$NEWTAB_PAGE" ]]; then
-    python3 - "$NEWTAB_PAGE" "$SITE_CONFIG" <<'PYEOF' || { echo "[build] ERROR: new-tab shortcut injection failed — aborting build."; exit 1; }
-import html, json, os, re, sys
-
-page_path, site_config_path = sys.argv[1], sys.argv[2]
-
-bookmarks = []
-if os.path.isfile(site_config_path):
-    with open(site_config_path, encoding="utf-8") as f:
-        bookmarks = json.load(f).get("bookmarks", [])
-
-tiles = []
-for b in bookmarks:
-    title, url = b.get("title"), b.get("url")
-    if not title or not url:
-        print(f"ERROR: bookmark entry needs both title and url: {b!r}",
-              file=sys.stderr)
-        sys.exit(1)
-    if not re.match(r"^https?://", url, re.IGNORECASE):
-        print(f"ERROR: bookmark url must be http(s): {url!r}", file=sys.stderr)
-        sys.exit(1)
-    badge = html.escape(title.strip()[0].upper())
-    # target="_self" forces the click to navigate the current tab. A plain
-    # (empty-target) top-level link can be defaulted to a new tab by Gecko
-    # (nsDocShell::ShouldOpenInBlankTarget); an explicit non-empty target
-    # bypasses that path so the shortcut consumes the tab in use.
-    tiles.append(
-        f'<a class="den-tile" target="_self" href="{html.escape(url, quote=True)}">'
-        f'<span class="den-badge">{badge}</span>'
-        f'<span class="den-label">{html.escape(title)}</span></a>'
-    )
-
-inner = ("\n        ".join(tiles) if tiles
-         else '<p class="den-empty">No shortcuts configured.</p>')
-
-start, end = "<!-- DEN_SHORTCUTS_START -->", "<!-- DEN_SHORTCUTS_END -->"
-with open(page_path, encoding="utf-8") as f:
-    content = f.read()
-pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
-new_content, n = pattern.subn(f"{start}\n        {inner}\n        {end}", content)
-if n == 0:
-    print(f"ERROR: DEN_SHORTCUTS markers not found in {page_path}",
-          file=sys.stderr)
-    sys.exit(1)
-with open(page_path, "w", encoding="utf-8", newline="\n") as f:
-    f.write(new_content)
-print(f"[build] Injected {len(tiles)} new-tab shortcut(s) into denbrowser-newtab.html")
-PYEOF
+    python3 "$SCRIPTS_DIR/gen-newtab-shortcuts.py" "$NEWTAB_PAGE" "$SITE_CONFIG" "$ROOT_DIR" \
+        || { echo "[build] ERROR: new-tab shortcut injection failed — aborting build."; exit 1; }
 else
     echo "[build] WARNING: denbrowser-newtab.html not found (patch 018 not applied?) — skipping shortcut injection"
 fi
