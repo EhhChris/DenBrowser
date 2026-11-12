@@ -21,7 +21,7 @@ use crate::machine::{MachineError, VerifiedMachine};
 
 /// Record layout version, written as `schema_version` and pinned in the schema.
 /// Bump the minor version for additive changes, the major for breaking ones.
-pub const SCHEMA_VERSION: &str = "1.0";
+pub const SCHEMA_VERSION: &str = "1.1";
 
 /// `tracing` target for audit records, and the `logger` they carry.
 pub const TARGET: &str = "denbrowser_proxy::audit";
@@ -263,6 +263,25 @@ impl From<&crate::attest::BodyBinding> for Binding {
     }
 }
 
+/// Which of the proxy's attestation keys decrypted the token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationKey {
+    /// `[attestation] private_key`.
+    Current,
+    /// `[attestation] previous_private_key`.
+    Previous,
+}
+
+impl From<crate::attest::DecryptionKey> for AttestationKey {
+    fn from(key: crate::attest::DecryptionKey) -> Self {
+        match key {
+            crate::attest::DecryptionKey::Current => Self::Current,
+            crate::attest::DecryptionKey::Previous => Self::Previous,
+        }
+    }
+}
+
 /// One audit line.  Field order here is the key order on the wire.
 #[derive(Debug, Serialize)]
 pub struct AuditRecord {
@@ -363,6 +382,8 @@ pub struct AttestationFields {
     pub client_timestamp: Option<String>,
     /// Known once the token decrypts.
     pub body_binding: Option<Binding>,
+    /// The key the token verified under.
+    pub key: Option<AttestationKey>,
 }
 
 /// The server the client asked for: the Host header (`:authority` over
@@ -486,6 +507,7 @@ impl RequestAudit {
                 nonce: None,
                 client_timestamp: None,
                 body_binding: None,
+                key: None,
             },
             token_verified: false,
             machine: MachineFields {
@@ -548,9 +570,11 @@ impl RequestAudit {
     }
 
     /// Phase one of attestation passed; the body binding is now known.
-    pub fn token_verified(&mut self, binding: Binding) {
+    /// `key` is the attestation key that decrypted the token.
+    pub fn token_verified(&mut self, binding: Binding, key: AttestationKey) {
         self.token_verified = true;
         self.attestation.body_binding = Some(binding);
+        self.attestation.key = Some(key);
     }
 
     /// The request is refused.  `message` must not contain the URL path.
@@ -636,6 +660,12 @@ impl RequestAudit {
             Outcome::Success => Level::INFO,
             Outcome::Failure => Level::WARN,
         }
+    }
+
+    /// The record as it would be written now, with no transport error.
+    #[cfg(test)]
+    pub(crate) fn test_record(&mut self, conn: &Connection) -> AuditRecord {
+        self.record(conn, None, timestamp(SystemTime::now()), 0)
     }
 
     /// Build the record with the given timestamp and duration.
@@ -877,7 +907,7 @@ mod tests {
     fn a_forwarded_request_is_info_with_no_reason() {
         let mut ctx = RequestAudit::new(true);
         ctx.request("GET", Some(HOST));
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.forward();
         let r = json(&mut ctx, &conn(Some(200), 0, 10), None);
         assert_eq!(r["level"], "INFO");
@@ -889,6 +919,27 @@ mod tests {
         assert_eq!(r["attestation"]["status"], "verified");
         assert_eq!(r["attestation"]["body_binding"], "bound");
         assert_eq!(r["transfer"]["response_body_bytes"], 10);
+    }
+
+    #[test]
+    fn the_attestation_key_is_null_until_the_token_verifies() {
+        let e = AttestError::DecryptFailed;
+        let mut ctx = RequestAudit::new(true);
+        ctx.reject(e.reason(), e.to_string());
+        let r = json(&mut ctx, &conn(Some(403), 0, 0), None);
+        assert_eq!(r["attestation"]["key"], Value::Null);
+        assert_eq!(r["attestation"]["body_binding"], Value::Null);
+
+        for (key, name) in [
+            (AttestationKey::Current, "current"),
+            (AttestationKey::Previous, "previous"),
+        ] {
+            let mut ctx = RequestAudit::new(true);
+            ctx.token_verified(Binding::Bound, key);
+            ctx.forward();
+            let r = json(&mut ctx, &conn(Some(200), 0, 0), None);
+            assert_eq!(r["attestation"]["key"], name);
+        }
     }
 
     #[test]
@@ -939,7 +990,7 @@ mod tests {
     #[test]
     fn a_machine_failure_after_the_token_reads_as_incomplete() {
         let mut ctx = RequestAudit::new(true);
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.machine_rejected(&MachineError::HostnameAddressMismatch {
             cn: MACHINE_HOST.to_owned(),
             ip: "192.0.2.99".parse().unwrap(),
@@ -964,7 +1015,7 @@ mod tests {
     #[test]
     fn a_disabled_machine_layer_says_so() {
         let mut ctx = RequestAudit::new(false);
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.forward();
         let r = json(&mut ctx, &conn(Some(200), 0, 0), None);
         assert_eq!(r["machine"]["status"], "disabled");
@@ -973,7 +1024,7 @@ mod tests {
     #[test]
     fn an_upstream_error_after_forwarding_is_a_failed_forward() {
         let mut ctx = RequestAudit::new(true);
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.forward();
         let err = pingora_core::Error::new_up(pingora_core::ErrorType::ConnectRefused);
         let r = json(
@@ -997,7 +1048,7 @@ mod tests {
         // through, such as `Connection: host`.  Attestation passed and the
         // nonce is spent, but no browser sends such a request.
         let mut ctx = RequestAudit::new(true);
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.forward();
         let err = pingora_core::Error::new_down(pingora_core::ErrorType::InvalidHTTPHeader);
         let r = json(
@@ -1235,7 +1286,7 @@ mod tests {
     fn machine_refusal(now: i64, cert: String, e: MachineError, duration_ms: u64) -> Example {
         let mut ctx = attested("GET", now);
         ctx.machine_cert_presented(cert);
-        ctx.token_verified(Binding::Bound);
+        ctx.token_verified(Binding::Bound, AttestationKey::Current);
         ctx.machine_rejected(&e);
         Example::new(ctx, conn(Some(403), 0, 0), duration_ms)
     }
@@ -1258,14 +1309,23 @@ mod tests {
             // ── Allowed ──────────────────────────────────────────────────────
             Audit(Box::new(|now| {
                 let mut ctx = attested("POST", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.forward();
                 Example::new(ctx, conn(Some(200), 512, 18_734), 42)
             })),
             Audit(Box::new(|now| {
+                // A browser one build back, its token decrypted by
+                // `previous_private_key`.
+                let mut ctx = attested("GET", now);
+                ctx.token_verified(Binding::Bound, AttestationKey::Previous);
+                ctx.machine_verified(verified_machine());
+                ctx.forward();
+                Example::new(ctx, conn(Some(200), 0, 7_310), 21)
+            })),
+            Audit(Box::new(|now| {
                 let mut ctx = attested("PUT", now);
-                ctx.token_verified(Binding::Unbound);
+                ctx.token_verified(Binding::Unbound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.forward();
                 Example::new(ctx, conn(Some(201), 52_428_800, 96), 3_510)
@@ -1276,7 +1336,7 @@ mod tests {
                 ctx.request("GET", Some(HOST));
                 ctx.attestation_headers(Some(&(now - 1).to_string()), Some(NONCE));
                 ctx.machine_absent();
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.forward();
                 Example::new(ctx, conn(Some(200), 0, 4_096), 18)
             })),
@@ -1418,7 +1478,7 @@ mod tests {
             })),
             Audit(Box::new(|now| {
                 let mut ctx = attested("POST", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.reject(
                     Reason::BodyTooLarge,
@@ -1428,7 +1488,7 @@ mod tests {
             })),
             Audit(Box::new(|now| {
                 let mut ctx = attested("POST", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 let e = AttestError::BodyHashMismatch;
                 ctx.reject(e.reason(), e.to_string());
@@ -1436,7 +1496,7 @@ mod tests {
             })),
             Audit(Box::new(|now| {
                 let mut ctx = attested("POST", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.reject(
                     Reason::BodyReadFailed,
@@ -1456,7 +1516,7 @@ mod tests {
             ),
             Audit(Box::new(|now| {
                 let mut ctx = attested("POST", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.forward();
                 let mut ex = Example::new(ctx, conn(Some(502), 512, 0), 7);
@@ -1467,7 +1527,7 @@ mod tests {
             })),
             Audit(Box::new(|now| {
                 let mut ctx = attested("GET", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.forward();
                 let mut ex = Example::new(ctx, conn(Some(200), 0, 1_048_576), 2_204);
@@ -1487,7 +1547,7 @@ mod tests {
             ),
             Audit(Box::new(|now| {
                 let mut ctx = attested("GET", now);
-                ctx.token_verified(Binding::Bound);
+                ctx.token_verified(Binding::Bound, AttestationKey::Current);
                 ctx.machine_verified(verified_machine());
                 ctx.forward();
                 let mut ex = Example::new(ctx, conn(Some(400), 0, 0), 3);
@@ -1724,6 +1784,10 @@ mod tests {
         assert_eq!(
             enum_of("bodyBinding"),
             names(&[Binding::Bound, Binding::Unbound])
+        );
+        assert_eq!(
+            enum_of("attestationKey"),
+            names(&[AttestationKey::Current, AttestationKey::Previous])
         );
         assert_eq!(defs["schemaVersion"]["const"], SCHEMA_VERSION);
     }

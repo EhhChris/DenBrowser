@@ -397,6 +397,28 @@ key in its own config file, so one partner can never decrypt another's tokens,
 and a deployment that forgets the key fails loudly instead of silently picking
 up whatever happens to sit at a default location.
 
+**Key rotation** (`previous_private_key`) is optional.  A new browser build
+carries a new public key; to keep the build before it working, also name that
+build's private key:
+
+```toml
+[attestation]
+private_key          = "/etc/denbrowser/partner-a-private.pem"
+previous_private_key = "/etc/denbrowser/partner-a-private-previous.pem"
+```
+
+The proxy tries `private_key` first and falls back to `previous_private_key`; a
+client IP whose last accepted token used the previous key has that key tried
+first.  Unset or blank means a single key.  When set, startup aborts if the file
+is unreadable, not a parseable EC key, or the same key as `private_key`.  Each
+audit record's `attestation.key` (`current` or `previous`) says which key the
+token verified under, so the log shows when the previous build is no longer in
+use; remove the setting then to stop accepting it.  Keep a copy of the old
+`<name>-private.pem` before regenerating a key with the same name
+(`gen-attest-key.sh --force` overwrites it).  The previous build also pins the
+proxy's TLS key (patch 012), so it only keeps working while that key is
+unchanged.
+
 **Request bodies.**  A request whose token binds a body hash is buffered and
 hashed before the upstream is contacted, so it is capped at Pingora's 64 KiB
 retry buffer: a larger bound body is answered `413`.  The browser sends bigger

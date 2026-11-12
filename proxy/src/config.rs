@@ -171,6 +171,11 @@ pub struct AttestationConfig {
     /// parseable EC key.
     #[serde(default)]
     pub private_key: String,
+
+    /// Path to the previous browser build's attestation private key, SEC1 PEM,
+    /// accepted alongside `private_key`.  Blank for none.
+    #[serde(default)]
+    pub previous_private_key: String,
 }
 
 /// `[rate_limiting]` — a universal per-client-IP request cap plus optional
@@ -750,6 +755,42 @@ mod tests {
         let toml = r#"
             [attestation]
             privateKey = "/etc/denbrowser/key.pem"
+        "#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn parses_attestation_previous_private_key() {
+        let toml = r#"
+            [attestation]
+            private_key = "/etc/denbrowser/partner-a-private.pem"
+            previous_private_key = "/etc/denbrowser/partner-a-previous.pem"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            c.attestation.previous_private_key,
+            "/etc/denbrowser/partner-a-previous.pem"
+        );
+    }
+
+    #[test]
+    fn attestation_previous_private_key_defaults_blank() {
+        assert!(Config::default().attestation.previous_private_key.is_empty());
+        let toml = r#"
+            [attestation]
+            private_key = "/etc/denbrowser/partner-a-private.pem"
+        "#;
+        let c: Config = toml::from_str(toml).unwrap();
+        assert!(c.attestation.previous_private_key.is_empty());
+    }
+
+    #[test]
+    fn attestation_unknown_key_is_rejected_alongside_previous_private_key() {
+        let toml = r#"
+            [attestation]
+            private_key = "/etc/denbrowser/key.pem"
+            previous_private_key = "/etc/denbrowser/old.pem"
+            previousPrivateKey = "/etc/denbrowser/old.pem"
         "#;
         assert!(toml::from_str::<Config>(toml).is_err());
     }

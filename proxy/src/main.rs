@@ -327,7 +327,7 @@ impl ProxyHttp for DenBrowserProxy {
                 method: &method,
                 path: &path,
             };
-            match self.verifier.verify_headers(&inputs) {
+            match self.verifier.verify_headers(&inputs, client_ip) {
                 Ok(p1) => p1,
                 Err(e) => {
                     ctx.reject(e.reason(), e.to_string());
@@ -336,7 +336,7 @@ impl ProxyHttp for DenBrowserProxy {
                 }
             }
         };
-        ctx.token_verified((&p1.body_binding).into());
+        ctx.token_verified((&p1.body_binding).into(), p1.key.into());
 
         // Machine identity: which workstation this came from.  Attestation has
         // now passed, but no request body has been read and no upstream has been
@@ -593,6 +593,12 @@ fn main() {
         "attestation key loaded from {}",
         config.attestation.private_key
     );
+    if !config.attestation.previous_private_key.trim().is_empty() {
+        info!(
+            "previous attestation key loaded from {}",
+            config.attestation.previous_private_key
+        );
+    }
 
     if args.insecure_upstream {
         warn!(
@@ -1027,6 +1033,93 @@ mod tests {
             assert!(upstream.headers.get(name).is_none(), "{name} reached the upstream");
         }
         assert_eq!(upstream.headers.get("x-keep").unwrap(), "k");
+    }
+
+    /// A fresh EC P-256 private key as SEC1 PEM, and its public key.
+    fn attest_key() -> (String, p256::PublicKey) {
+        let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)
+            .unwrap();
+        let pem = openssl::ec::EcKey::generate(&group)
+            .unwrap()
+            .private_key_to_pem()
+            .unwrap();
+        let pem = String::from_utf8(pem).unwrap();
+        let public = p256::SecretKey::from_sec1_pem(&pem).unwrap().public_key();
+        (pem, public)
+    }
+
+    /// A proxy with a current and a previous attestation key, and their
+    /// public keys.
+    fn two_key_proxy() -> (DenBrowserProxy, p256::PublicKey, p256::PublicKey) {
+        let (current_pem, current) = attest_key();
+        let (previous_pem, previous) = attest_key();
+        let verifier = Verifier::from_pems(&current_pem, Some(&previous_pem)).unwrap();
+        let upstream_tls = UpstreamTls::from_config(&config::ProxyConfig::default(), false).unwrap();
+        let proxy =
+            DenBrowserProxy::new(verifier, "upstream.internal:443", upstream_tls, None, None, None)
+                .unwrap();
+        (proxy, current, previous)
+    }
+
+    /// Run `request_filter` on a `GET {path}` carrying a token for `public`
+    /// that was signed for `signed_path`.  Returns whether the proxy answered
+    /// the request itself, and the audit record.
+    async fn attested_get(
+        proxy: &DenBrowserProxy,
+        public: &p256::PublicKey,
+        signed_path: &str,
+        path: &str,
+    ) -> (bool, serde_json::Value) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+        let mut nonce = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
+        let nonce = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce);
+        let token =
+            attest::tests::make_token(public, &nonce, &ts, "example.com", "GET", signed_path, b"");
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\
+             X-DenBrowser-Ts: {ts}\r\nX-DenBrowser-Nonce: {nonce}\r\n\
+             X-DenBrowser-Token: {token}\r\n\r\n"
+        );
+        let (mut session, _) = h1_session(&request).await;
+        let mut ctx = RequestAudit::new(false);
+        let handled = proxy.request_filter(&mut session, &mut ctx).await.unwrap();
+        let conn = audit::Connection {
+            proxy: None,
+            client: None,
+            tls_client_subject: None,
+            status_code: None,
+            request_body_bytes: 0,
+            response_body_bytes: 0,
+        };
+        let record = serde_json::to_value(ctx.test_record(&conn)).unwrap();
+        (handled, record)
+    }
+
+    #[tokio::test]
+    async fn a_token_for_either_key_is_forwarded_and_audited_with_its_key() {
+        let (proxy, current, previous) = two_key_proxy();
+        for (public, key) in [(&current, "current"), (&previous, "previous")] {
+            let (handled, record) = attested_get(&proxy, public, "/p?q=1", "/p?q=1").await;
+            assert!(!handled, "{key}: the request must be forwarded");
+            assert_eq!(record["event"]["action"], "forward", "{key}");
+            assert_eq!(record["attestation"]["status"], "verified", "{key}");
+            assert_eq!(record["attestation"]["key"], key);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_previous_key_token_for_another_path_is_refused_without_a_key() {
+        let (proxy, _, previous) = two_key_proxy();
+        let (handled, record) = attested_get(&proxy, &previous, "/p?q=1", "/other").await;
+        assert!(handled, "the proxy must refuse the request itself");
+        assert_eq!(record["event"]["action"], "reject");
+        assert_eq!(record["event"]["reason"], "token_request_mismatch");
+        assert_eq!(record["attestation"]["key"], serde_json::Value::Null);
     }
 
     #[tokio::test]

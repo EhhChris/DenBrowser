@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:denbrowser:proxy:audit-log:1.0",
+  "$id": "urn:denbrowser:proxy:audit-log:1.1",
   "title": "DenBrowser proxy log record",
   "description": "One line of the DenBrowser attestation proxy's log (file and stderr alike). Every line is a single JSON object of one of two kinds, distinguished by event.kind: an 'audit' record, written exactly once per HTTP request when the exchange ends, or a 'system' record for everything else (startup, configuration, fatal errors, and pingora's own diagnostics). URL paths and query strings are never recorded. Reason codes carry two annotations consumers may rely on: x-stage (where in the pipeline the failure is detected) and x-risk (how seriously to take it). Kept in step with proxy/src/audit.rs by that module's tests.",
   "oneOf": [
@@ -10,7 +10,7 @@
   "$defs": {
     "schemaVersion": {
       "description": "Version of this record layout. The minor version changes for additive changes; the major version for anything a consumer would have to adapt to.",
-      "const": "1.0"
+      "const": "1.1"
     },
     "timestamp": {
       "description": "ISO 8601 / RFC 3339 instant in UTC with millisecond precision. Always the same width, so the strings sort in time order.",
@@ -429,7 +429,7 @@
       "description": "DenBrowser request attestation (X-DenBrowser-Ts / -Nonce / -Token).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "nonce", "client_timestamp", "body_binding"],
+      "required": ["status", "nonce", "client_timestamp", "body_binding", "key"],
       "properties": {
         "status": { "$ref": "#/$defs/attestationStatus" },
         "nonce": {
@@ -443,10 +443,14 @@
         "body_binding": {
           "description": "Known once the token decrypts; null before that.",
           "anyOf": [{ "$ref": "#/$defs/bodyBinding" }, { "type": "null" }]
+        },
+        "key": {
+          "description": "Which of the proxy's attestation keys the token verified under; null until it has.",
+          "anyOf": [{ "$ref": "#/$defs/attestationKey" }, { "type": "null" }]
         }
       },
       "if": { "required": ["status"], "properties": { "status": { "const": "verified" } } },
-      "then": { "properties": { "nonce": { "type": "string" }, "body_binding": { "type": "string" } } }
+      "then": { "properties": { "nonce": { "type": "string" }, "body_binding": { "type": "string" }, "key": { "type": "string" } } }
     },
     "attestationStatus": {
       "description": "verified: every check passed and the nonce was committed. failed: an attestation check failed (event.stage starts with attestation_). bypassed: skipped under [proxy_bypass]. incomplete: the token verified, but another control refused the request before attestation finished (machine identity, or the body could not be read). not_evaluated: no attestation check ran — refused earlier, or failed before a decision.",
@@ -455,6 +459,10 @@
     "bodyBinding": {
       "description": "bound: the token commits to the body's SHA-256, which was verified before forwarding. unbound: a large upload streamed through without a body hash — origin, nonce, timestamp, and request binding still verified, body integrity not.",
       "enum": ["bound", "unbound"]
+    },
+    "attestationKey": {
+      "description": "current: [attestation] private_key, the key of the current browser build. previous: [attestation] previous_private_key, the key of the browser build before it.",
+      "enum": ["current", "previous"]
     },
 
     "server": {
