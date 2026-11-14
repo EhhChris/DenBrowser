@@ -335,7 +335,7 @@ index 0b4c480a115e..3f8bbeced0b9 100644
    return PrintPromise::CreateAndReject(NS_ERROR_NOT_AVAILABLE, __func__);
  #else
 diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
-index dae1134fa164..67d1ff55d852 100644
+index a5f443bc61c2..58942c385019 100644
 --- a/dom/base/nsGlobalWindowOuter.cpp
 +++ b/dom/base/nsGlobalWindowOuter.cpp
 @@ -263,6 +263,8 @@ using mozilla::OriginAttributes;
@@ -347,7 +347,7 @@ index dae1134fa164..67d1ff55d852 100644
  static inline nsGlobalWindowInner* GetCurrentInnerWindowInternal(
      const nsGlobalWindowOuter* aOuter) {
    return nsGlobalWindowInner::Cast(aOuter->GetCurrentInnerWindow());
-@@ -4972,6 +4974,14 @@ void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
+@@ -4996,6 +4998,14 @@ void nsGlobalWindowOuter::PrintOuter(ErrorResult& aError) {
      return;
    }
  
@@ -362,7 +362,7 @@ index dae1134fa164..67d1ff55d852 100644
    // Printing is disabled, silently return.
    if (!StaticPrefs::print_enabled()) {
      return;
-@@ -5033,6 +5043,12 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
+@@ -5057,6 +5067,12 @@ Nullable<WindowProxyHolder> nsGlobalWindowOuter::Print(
      IsPreview aIsPreview, IsForWindowDotPrint aForWindowDotPrint,
      PrintPreviewResolver&& aPrintPreviewCallback,
      RefPtr<BrowsingContext>* aCachedBrowsingContext, ErrorResult& aError) {
@@ -947,7 +947,7 @@ index 6bb563066fea..71a5fe6d04f8 100644
  #include "nsToolkitCompsCID.h"
  
  #include "mozilla/widget/ScreenManager.h"
-@@ -78,10 +80,12 @@ MAKE_GENERIC_CTOR(nsTransferable, nsITransferable)
+@@ -78,10 +80,12 @@
  MAKE_GENERIC_CTOR(nsHTMLFormatConverter, nsIFormatConverter)
  MAKE_GENERIC_CTOR(nsClipboardHelper, nsIClipboardHelper)
  MAKE_GENERIC_CTOR(nsDragService, nsIDragService)

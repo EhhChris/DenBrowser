@@ -283,7 +283,7 @@ diff --git a/browser/components/shell/nsMacShellService.mm b/browser/components/
 index 6bdf1087f321..a0b05d6e2887 100644
 --- a/browser/components/shell/nsMacShellService.mm
 +++ b/browser/components/shell/nsMacShellService.mm
-@@ -39,6 +39,10 @@ using mozilla::widget::SetDesktopImage;
+@@ -39,6 +39,10 @@
  
  #define SAFARI_BUNDLE_IDENTIFIER "com.apple.Safari"
  
@@ -294,7 +294,7 @@ index 6bdf1087f321..a0b05d6e2887 100644
  NS_IMPL_ISUPPORTS(nsMacShellService, nsIMacShellService, nsIShellService,
                    nsIToolkitShellService, nsIWebProgressListener)
  
-@@ -120,6 +124,10 @@ nsMacShellService::SetDefaultBrowser(bool aForAllUsers) {
+@@ -120,6 +124,10 @@
  NS_IMETHODIMP
  nsMacShellService::SetDesktopBackground(Element* aElement, int32_t aPosition,
                                          const nsACString& aImageName) {

@@ -782,7 +782,7 @@ index 56459dca696f..baf48c8f5d46 100644
      "ExecuteIfOnMainThreadEventTarget.cpp",
      "InterceptionInfo.cpp",
 diff --git a/netwerk/protocol/http/nsHttpChannel.cpp b/netwerk/protocol/http/nsHttpChannel.cpp
-index be0464d3911f..54f2e3e1b791 100644
+index a6c5525cc600..f87a8790ccd6 100644
 --- a/netwerk/protocol/http/nsHttpChannel.cpp
 +++ b/netwerk/protocol/http/nsHttpChannel.cpp
 @@ -5,6 +5,7 @@
@@ -793,7 +793,7 @@ index be0464d3911f..54f2e3e1b791 100644
  #include <inttypes.h>
  
  #include "mozilla/ScopeExit.h"
-@@ -2025,6 +2026,15 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
+@@ -2029,6 +2030,15 @@ nsresult nsHttpChannel::SetupChannelForTransaction() {
      mCaps |= NS_HTTP_STICKY_CONNECTION;
    }
  

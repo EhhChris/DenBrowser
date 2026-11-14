@@ -40,7 +40,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 
 diff --git a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
-index c63f5ad14810..a0c16ea043c3 100644
+index d05c9c803c12..80e83bbdd241 100644
 --- a/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
 +++ b/toolkit/mozapps/extensions/internal/XPIInstall.sys.mjs
 @@ -1395,6 +1395,8 @@ class AddonInstall {
@@ -53,10 +53,10 @@ index c63f5ad14810..a0c16ea043c3 100644
        case AddonManager.STATE_DOWNLOADED:
          this.checkPrompt();
 diff --git a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
-index 74d738e46fe5..474ebf818e0b 100644
+index f448b259154d..660ef825dafb 100644
 --- a/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
 +++ b/toolkit/mozapps/extensions/internal/XPIProvider.sys.mjs
-@@ -2633,6 +2633,10 @@ export var XPIProvider = {
+@@ -2634,6 +2634,10 @@ export var XPIProvider = {
      ];
  
      for (let [constructor, name, scope, ...args] of locations) {
