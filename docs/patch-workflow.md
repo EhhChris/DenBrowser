@@ -38,48 +38,174 @@ Two scripts move between the two representations:
 
 ## Recurring workflow: bump to a new ESR
 
-Assume the branch is currently on `FIREFOX_<OLD>esr_RELEASE` and you're moving to
-`FIREFOX_<NEW>esr_RELEASE`. Both tags must exist in `../firefox`
-(`git -C ../firefox fetch upstream --tags`).
+Use the latest **DenBrowser snapshot**, not just the old Firefox ESR base. A
+fetch makes commits and tags available but does not update your local
+`DenBrowser` branch. Rebasing a stale branch can silently omit newer patches
+and replay older versions of existing patches.
 
-Set Git's comment character before starting the rebase. Patch documentation
-uses `#` lines, which Git's default message cleanup otherwise removes when
-editing a commit message after resolving conflicts. Using `;` keeps those
-lines while still removing Git's generated editor comments.
+Run the following blocks in the same Bash session. Replace the example values
+with the intended releases; select `OLD_SNAPSHOT` after checking the available
+DenBrowser tags. `origin` is the DenBrowser fork and `upstream` is Mozilla.
 
 ```bash
 cd ../firefox
-git config rerere.enabled true          # reuse each resolution across retries
-git config --local core.commentChar ';' # preserve # PATCH documentation
+git fetch origin --tags || exit 1
+git fetch upstream --tags || exit 1
+git tag --list 'denbrowser-*' --sort=-version:refname | head -20
 
-# Replay the patch commits from the old base onto the new ESR tag.
-git rebase --onto FIREFOX_<NEW>esr_RELEASE FIREFOX_<OLD>esr_RELEASE DenBrowser
-#   ...resolve conflicts commit-by-commit:
-#     edit files → git add <file> → GIT_EDITOR=true git rebase --continue
-#   A patch upstream has made redundant may go empty — drop it (git rebase --skip)
-#     and delete its patches/ file. If a resolution changes WHAT a patch does,
-#     also edit that commit's body so the regenerated comment stays truthful.
+OLD_BASE=FIREFOX_153_6_0esr_RELEASE
+OLD_SNAPSHOT=denbrowser-153.6.0esr-4
+NEW_BASE=FIREFOX_153_7_0esr_RELEASE
+NEW_VERSION=153.7.0esr
+NEW_TAG=denbrowser-${NEW_VERSION}-1
 
-git tag denbrowser-<NEW>esr-1           # snapshot the branch tip
+# Stop if the local branch does not contain the latest intended snapshot.
+git merge-base --is-ancestor "$OLD_SNAPSHOT" DenBrowser || {
+    echo "STOP: DenBrowser is missing the intended starting snapshot."
+    exit 1
+}
+git merge-base --is-ancestor "$OLD_BASE" DenBrowser || exit 1
+git switch DenBrowser
+git status --short
 ```
 
-Then regenerate the files in this repo and verify:
+Commit or preserve outstanding work before continuing. If the snapshot check
+fails, inspect the local branch, `origin/DenBrowser`, and `OLD_SNAPSHOT` before
+choosing the starting point. Fetching or pulling the remote branch alone is
+not sufficient if that branch is also stale. Do not bypass the check or reset
+away local work. For an already-completed bad rebase, use the recovery section
+below.
+
+Create a backup and compare the branch's patch inventory with the saved files
+**before regeneration**. STUBs have no commit. Investigate any difference; an
+intentionally retired patch must be reviewed and its saved file removed.
+The generator currently checks commit documentation but does **not** reject
+saved patch files that have no corresponding commit, so this check is required.
+
+```bash
+BACKUP=backup/denbrowser-before-${NEW_VERSION}-$(date +%Y%m%d-%H%M%S)
+git branch "$BACKUP" DenBrowser
+AUDIT_DIR=$(mktemp -d)
+PATCHES_DIR=$(cd ../DenBrowser/patches && pwd)
+
+git log --format=%s "$OLD_BASE..$BACKUP" | LC_ALL=C sort > "$AUDIT_DIR/before.txt"
+for pf in "$PATCHES_DIR"/*.patch; do
+    if head -5 "$pf" | grep -q '^# STUB'; then continue; fi
+    basename "$pf" .patch
+done | LC_ALL=C sort > "$AUDIT_DIR/files.txt"
+diff -u "$AUDIT_DIR/files.txt" "$AUDIT_DIR/before.txt" || {
+    echo "STOP: saved patches and branch commits disagree."
+    exit 1
+}
+```
+
+Set Git's comment character before rebasing. Patch documentation uses `#`
+lines, which Git's default message cleanup otherwise removes when editing a
+commit message after resolving conflicts. Using `;` preserves those lines.
+
+```bash
+git config rerere.enabled true
+git config --local core.commentChar ';'
+git rebase --onto "$NEW_BASE" "$OLD_BASE" DenBrowser
+# Resolve conflicts: edit files, git add <file>, then:
+# GIT_EDITOR=true git rebase --continue
+```
+
+Skip an empty patch only after confirming that upstream supplies its behavior;
+record why and remove its saved patch file. If a resolution changes behavior,
+update that commit's documentation too. A completed rebase is not sufficient
+verification: compare the patch subjects and review each change in range-diff.
+Patch counts alone cannot detect older versions of existing patches.
+
+```bash
+git log --format=%s "$NEW_BASE..DenBrowser" | LC_ALL=C sort > "$AUDIT_DIR/after.txt"
+diff -u "$AUDIT_DIR/before.txt" "$AUDIT_DIR/after.txt"
+git range-diff "$OLD_BASE..$BACKUP" "$NEW_BASE..DenBrowser"
+```
+
+Stop on unexplained additions, omissions, or content changes. For deliberately
+retired patches, reconcile the saved-file inventory and document the reviewed
+before/after difference before proceeding. Then regenerate and verify:
 
 ```bash
 cd ../DenBrowser
-scripts/gen-patches.sh --base-tag FIREFOX_<NEW>esr_RELEASE   # rewrites patches/*.patch
+scripts/gen-patches.sh --base-tag "$NEW_BASE" || exit 1
 
-# Round-trip check: re-seed a throwaway branch from the files; it must reproduce
-# the branch exactly.
-scripts/seed-fork-branch.sh --base-tag FIREFOX_<NEW>esr_RELEASE --branch _roundtrip
-git -C ../firefox diff --quiet DenBrowser _roundtrip && echo "round-trip OK"
-git -C ../firefox switch DenBrowser && git -C ../firefox branch -D _roundtrip
+# Round-trip: requires a clean Firefox checkout, including no untracked files.
+# Choose an unused throwaway branch name; seed resets an existing branch.
+ROUNDTRIP=_roundtrip-$(date +%Y%m%d-%H%M%S)
+scripts/seed-fork-branch.sh --base-tag "$NEW_BASE" --branch "$ROUNDTRIP" || exit 1
+git -C ../firefox diff --quiet DenBrowser "$ROUNDTRIP" || {
+    echo "STOP: round-trip tree differs from DenBrowser."
+    exit 1
+}
+git -C ../firefox switch DenBrowser
+git -C ../firefox branch -D "$ROUNDTRIP"
 
-# Build gate: fetch the new ESR tarball, apply the regenerated patches, build.
-./build.sh --ffversion <NEW>            # (see build.sh --help)
+# Build gate: fetch the target ESR tarball, apply regenerated patches, build.
+./build.sh --ffversion "${NEW_VERSION%esr}" || exit 1    # see build.sh --help
 ```
 
-Commit the refreshed `patches/`, then push the fork branch/tags as desired.
+Only after the inventory, range-diff, round-trip, and build checks pass, create
+the release tag. If the build has not been run, record that limitation and do
+not treat the snapshot as a validated release.
+
+```bash
+git -C ../firefox tag "$NEW_TAG" DenBrowser
+```
+
+Review and commit the refreshed `patches/`, then push the fork branch and tag
+as desired. A rebased published branch requires a coordinated history update;
+use `--force-with-lease`, not an unconditional force push. Keep the backup
+until verification and publication are complete.
+
+## Recovering a rebase from a stale branch
+
+Back up the bad branch first. Create a separate recovery branch from the latest
+known-good DenBrowser snapshot and rebase that complete stack onto the new ESR
+base. Do not cherry-pick only the missing last patch: earlier patches may also
+have newer versions or prerequisites in the known-good snapshot.
+
+```bash
+cd ../firefox
+# Set OLD_BASE, OLD_SNAPSHOT, NEW_BASE, and NEW_TAG as above.
+BAD_BACKUP=backup/denbrowser-bad-rebase-$(date +%Y%m%d-%H%M%S)
+RECOVERY=recover/denbrowser-$(date +%Y%m%d-%H%M%S)
+git branch "$BAD_BACKUP" DenBrowser
+git switch -c "$RECOVERY" "$OLD_SNAPSHOT"
+git -c core.commentChar=';' rebase --onto "$NEW_BASE" "$OLD_BASE"
+```
+
+Repeat the inventory and range-diff checks against `OLD_SNAPSHOT`, using the
+recovery branch in place of `DenBrowser`. Regenerate with
+`gen-patches.sh --base-tag "$NEW_BASE" --branch "$RECOVERY"` and verify the
+round-trip against that branch. After verification, switch back to
+`"$RECOVERY"`, move `DenBrowser` to it with `git branch -f DenBrowser "$RECOVERY"`,
+and switch back to `DenBrowser`. Preserve the backup and unrelated local files.
+
+Prefer a new revision tag for a published release. If deliberately correcting
+an incorrect existing tag, preserve its old target, record the remote branch
+and tag object IDs with `git ls-remote origin`, and move the local tag with
+`git tag -f "$NEW_TAG" DenBrowser`. This command is for the lightweight snapshot
+tags used here; annotated or signed tags require recreating their metadata.
+
+Publish the corrected branch and tag together with explicit leases and an
+atomic push. Set these variables to the exact object IDs just reviewed, not
+values refreshed automatically during the push:
+
+```bash
+# EXPECTED_BRANCH=<reviewed remote refs/heads/DenBrowser object ID>
+# EXPECTED_TAG=<reviewed remote refs/tags/$NEW_TAG object ID>
+git push --atomic \
+    --force-with-lease="refs/heads/DenBrowser:$EXPECTED_BRANCH" \
+    --force-with-lease="refs/tags/$NEW_TAG:$EXPECTED_TAG" \
+    origin DenBrowser:refs/heads/DenBrowser "$NEW_TAG:refs/tags/$NEW_TAG"
+```
+
+A lease failure means someone changed the remote: inspect it before retrying.
+Tell collaborators that the tag moved; ordinary fetches do not overwrite an
+existing local tag. After preserving any local work, they can explicitly fetch
+the replacement with `git fetch origin "refs/tags/$NEW_TAG:refs/tags/$NEW_TAG" --force`.
 
 ## Missing patch documentation after a rebase
 
@@ -144,13 +270,18 @@ python3 -m unittest discover -s test/patch_stats -p 'test_*.py'
 
 ## Restart from scratch (re-bootstrap)
 
-To rebuild the branch from the patch **files** (e.g. discarding a bad rebase):
+To rebuild from the patch **files**, preserve the existing branch and seed an
+unused branch first. Use this only when the files are the reviewed, complete
+patch set; for a stale-branch rebase, prefer the known-good snapshot recovery
+above. The Firefox checkout must be clean, including no untracked files.
 
 ```bash
-cd ../firefox && git branch -D DenBrowser          # old tips stay under their tags
 cd ../DenBrowser
-scripts/seed-fork-branch.sh --base-tag FIREFOX_<CUR>esr_RELEASE --branch DenBrowser
-git -C ../firefox tag denbrowser-<CUR>esr-1
+# Set OLD_BASE to the ESR base the saved patches were generated against.
+RESEED=reseed/denbrowser-$(date +%Y%m%d-%H%M%S)
+scripts/seed-fork-branch.sh --base-tag "$OLD_BASE" --branch "$RESEED" || exit 1
 ```
 
-Then rebase onto the target ESR as above.
+Verify the seeded branch before replacing `DenBrowser`. Then follow the rebase,
+verification, and tagging steps above. Do not delete the old branch or create
+a release tag before verification.

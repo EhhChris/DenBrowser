@@ -61,7 +61,7 @@ diff --git a/widget/cocoa/nsCocoaWindow.mm b/widget/cocoa/nsCocoaWindow.mm
 index 02418d5d8c3a..55c5ebc0b0d2 100644
 --- a/widget/cocoa/nsCocoaWindow.mm
 +++ b/widget/cocoa/nsCocoaWindow.mm
-@@ -5267,6 +5267,10 @@ nsresult nsCocoaWindow::CreateNativeWindow(const NSRect& aRect,
+@@ -5267,6 +5267,10 @@ static unsigned int WindowMaskForBorderStyle(BorderStyle aBorderStyle) {
                                             styleMask:features
                                               backing:NSBackingStoreBuffered
                                                 defer:YES];
